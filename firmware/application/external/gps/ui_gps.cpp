@@ -20,6 +20,8 @@
  */
 
 #include "ui_gps.hpp"
+#include "gps_cache.hpp"
+#include "gps_nav.hpp"
 
 #include "portapack.hpp"
 #include "rtc_time.hpp"
@@ -250,14 +252,15 @@ bool OrbitLoader::open(Stage s, GpsView& v) {
     line_no_ = 0;
     eof_ = false;
     tle_state_ = 0;
+    air_prn_ = 0;
     const char16_t* name = s == ALMANAC ? u"GPS/ALMANAC.TXT"
-                                        : (s == EPHEMERIS ? u"GPS/EPHEM.RNX" : (s == SATFREQ ? u"GPS/SATFREQ.TXT" : u"GPS/TLE.TXT"));
+                                        : (s == EPHEMERIS ? u"GPS/EPHEM.RNX" : (s == EPH_AIR ? u"GPS/EPH_AIR.TXT" : (s == SATFREQ ? u"GPS/SATFREQ.TXT" : u"GPS/TLE.TXT")));
     file_ = new File();
     if (file_->open(name).is_valid()) { /* an error */
         close();
         return false;
     }
-    (s == ALMANAC ? v.alm_file_ : (s == EPHEMERIS ? v.eph_file_ : (s == SATFREQ ? v.freq_file_ : v.tle_file_))) = true;
+    if (s != EPH_AIR) (s == ALMANAC ? v.alm_file_ : (s == EPHEMERIS ? v.eph_file_ : (s == SATFREQ ? v.freq_file_ : v.tle_file_))) = true;
     return true;
 }
 
@@ -327,6 +330,31 @@ void OrbitLoader::take(GpsView& v) {
                 slot = o;
                 if (o.toe > v.eph_toe_newest_) v.eph_toe_newest_ = o.toe;
             }
+        }
+    } else if (stage_ == EPH_AIR) {
+        uint8_t prn, sfid;
+        int32_t week;
+        uint32_t tow, w[10];
+        if (!eph_air_parse(line_, &prn, &week, &sfid, &tow, w)) return;
+        if (prn != air_prn_ || sfid == 1) {
+            air_prn_ = prn;
+            v.mem_->cache_have = 0;
+        }
+        std::memcpy(v.mem_->cache_sf[sfid - 1], w, sizeof(w));
+        v.mem_->cache_have |= static_cast<uint8_t>(1u << (sfid - 1));
+        if (v.mem_->cache_have != 7) return;
+        v.mem_->cache_have = 0;
+        if (!nav::decode_ephemeris(v.mem_->cache_sf[0], v.mem_->cache_sf[1], v.mem_->cache_sf[2], prn, week, o)) return;
+        if (o.toe > v.eph_file_newest_) v.eph_file_newest_ = o.toe;
+        if (std::fabs(o.toe - now_gps_) >= GpsView::kEphMaxAgeS) return;
+        Orbit& slot = v.mem_->orbits[o.prn - 1];
+        const bool better = !slot.valid || !slot.ephemeris ||
+                            (slot.health != 0 && o.health == 0) ||
+                            (o.health == slot.health && std::fabs(o.toe - now_gps_) < std::fabs(slot.toe - now_gps_));
+        if (better) {
+            if (!slot.valid || !slot.ephemeris) v.n_eph_++;
+            slot = o;
+            if (o.toe > v.eph_toe_newest_) v.eph_toe_newest_ = o.toe;
         }
     } else if (stage_ == SATFREQ) {
         if (v.n_freq_ >= GpsScratch::kMaxFreq) return;
@@ -752,7 +780,7 @@ HeardView::HeardView(GpsView& main, Rect r)
       sky_{{120, UI_POS_Y(3) + 2, 120, 120}, "Heard"} {
     add_children({&field_depth_, &button_search_, &button_stop_, &text_status_, &text_list_, &sky_});
     button_stop_.on_select = [this](Button&) {
-        main_.stop_search();
+        if (main_.job_ != GpsView::JOB_AUTO) main_.stop_search(); /* Autonomous: stopped on the Fix tab */
         show();
     };
     field_depth_.set_selected_index(main_.depth_ ? 1 : 0, false);
@@ -770,6 +798,7 @@ HeardView::HeardView(GpsView& main, Rect r)
     };
     button_search_.on_select = [this](Button&) {
         if (main_.solving()) return; /* the fix's solver still uses the orbits */
+        if (main_.job_ == GpsView::JOB_AUTO) return; /* the tracking loops run: Stop on the Fix tab first */
         main_.request_search(GpsView::JOB_HEARD, main_.depth_ ? 20 : 10);
         show();
     };
@@ -799,11 +828,87 @@ bool HeardView::on_key(const KeyEvent key) {
     return true;
 }
 
+/* While the tracking loops run (Autonomous): one row per channel. */
+void HeardView::show_tracking() {
+    char b[TextLines::kCols + 1];
+    const Color white = Color::white(), yellow = Color::yellow(), green = Color::green(), grey = Color::grey();
+    const AutoState& a = main_.mem_->autos;
+    text_status_.begin();
+    {
+        Fmt f{b, sizeof(b)};
+        f.s("Tracking ").u(main_.auto_tracked_).s(" (Fix tab: Stop)");
+        text_status_.set(0, b, main_.auto_tracked_ >= 4 ? green : yellow);
+    }
+    if (main_.trk_sh_) {
+        /* M4 load of the loops: cycles per 1 ms buffer / 2000 = percent */
+        Fmt f{b, sizeof(b)};
+        const uint32_t pct = main_.trk_sh_->cycles_avg / 2000u, mx = main_.trk_sh_->cycles_max / 2000u;
+        f.s("M4 ").u(pct).s("% max ").u(mx).s("% missed ").u(main_.trk_sh_->missed);
+        text_status_.set(1, b, mx > 95 ? Color::red() : grey);
+    }
+    text_status_.end();
+    text_list_.begin();
+    sky_.clear();
+    for (auto& r : list_prn_) r = 0;
+    text_list_.set_highlight(-1);
+    text_list_.set(0, "PRN C/N0 lock bit TOW eph", grey);
+    size_t row = 1;
+    for (int i = 0; i < gps_trk::kMaxCh && row < kListRows; i++) {
+        const gps_trk::ChInfo& c = a.ch[i];
+        if (!c.prn || c.state == gps_trk::TRK_IDLE) continue;
+        Fmt f{b, sizeof(b)};
+        f.c('G').d2(c.prn).c(' ');
+        Color col = white;
+        if (c.state == gps_trk::TRK_SEARCH) {
+            f.s("lost: searching");
+            col = yellow;
+        } else if (c.state == gps_trk::TRK_FAILED) {
+            f.s("lost");
+            col = grey;
+        } else if (c.state == gps_trk::TRK_PULLIN) {
+            f.s("pull-in");
+            col = yellow;
+        } else {
+            f.u((c.cn0_x10 + 5u) / 10u).s("  ");
+            f.s(c.flags & gps_trk::F_PLL ? " L" : " -");
+            f.s(c.flags & gps_trk::F_BIT ? "   B" : "   -");
+            f.s(c.flags & gps_trk::F_FRAME ? "   T" : "   -");
+            const Orbit& o = main_.mem_->orbits[c.prn - 1];
+            const bool eph = o.valid && o.ephemeris && std::fabs(main_.now_gps() - o.toe) <= GpsView::kEphMaxAgeS;
+            f.s(eph ? "   E" : "   -");
+            col = (c.flags & gps_trk::F_VERIFIED) ? (eph ? green : white) : yellow;
+        }
+        list_prn_[row] = c.prn;
+        text_list_.set(row++, b, col);
+    }
+    if (row < kListRows - 2) {
+        text_list_.set(row + 1, "L lock B bits T time", grey);
+        text_list_.set(row + 2, "E orbit decoded (eph)", grey);
+    }
+    if (main_.pos_valid_ && main_.geo_ready_) {
+        for (int i = 0; i < gps_trk::kMaxCh; i++) {
+            const gps_trk::ChInfo& c = a.ch[i];
+            if (!c.prn || c.state != gps_trk::TRK_TRACK) continue;
+            const SatGeo& g = main_.mem_->geo[c.prn - 1];
+            if (g.el < 0) continue;
+            char lbl[4];
+            Fmt{lbl, sizeof(lbl)}.u(c.prn);
+            sky_.add(static_cast<int16_t>(g.az), static_cast<int16_t>(g.el), lbl, green, (c.flags & gps_trk::F_VERIFIED) != 0, false);
+        }
+    }
+    text_list_.end();
+    sky_.commit();
+}
+
 void HeardView::show() {
     if (hidden()) return; /* redrawn when the tab is selected (GpsView::on_frame) */
+    if (main_.job_ == GpsView::JOB_AUTO && main_.tracking_ && main_.mem_) {
+        show_tracking();
+        return;
+    }
     char b[TextLines::kCols + 1];
     const auto& st = main_.status_;
-    const bool mine = main_.job_ == GpsView::JOB_HEARD || main_.job_ == GpsView::JOB_FIX;
+    const bool mine = main_.job_ == GpsView::JOB_HEARD || main_.job_ == GpsView::JOB_FIX || main_.job_ == GpsView::JOB_AUTO;
     const Color white = Color::white(), yellow = Color::yellow(), red = Color::red();
     int heard = 0;
     for (int p = 0; p < 32 && main_.done_ && main_.results_; p++) heard += main_.results_[p].detected;
@@ -989,7 +1094,26 @@ FixView::FixView(GpsView& main, Rect r)
         show();
     };
     button_fix_.on_select = [this](Button&) {
-        if (field_method_.selected_index_value() != 0) return;
+        if (field_method_.selected_index_value() != 0) { /* Autonomous */
+            if (main_.job_ == GpsView::JOB_AUTO || main_.want_job_ == GpsView::JOB_AUTO) {
+                main_.stop_auto();
+                show();
+                return;
+            }
+            save_msg_ = nullptr;
+            if (!main_.mem_ || main_.loading()) {
+                show();
+                return;
+            }
+            main_.fix_tried_ = false;
+            main_.fix_ok_ = false;
+            main_.ttff_s_ = main_.ttff_coarse_s_ = 0;
+            main_.auto_t0_ = chTimeNow();
+            auto_reset(main_.mem_->autos);
+            main_.request_search(GpsView::JOB_AUTO, 20);
+            show();
+            return;
+        }
         /* the button reads "Stop" while a search or the solver runs */
         if (main_.searching() || main_.want_job_ == GpsView::JOB_FIX) {
             main_.want_job_ = GpsView::JOB_NONE;
@@ -1141,10 +1265,131 @@ void FixView::show_blocker(size_t row) {
     }
 }
 
+/* Autonomous: search -> coarse (almanac) -> upgrading (tracking, decoding
+ * ephemerides) -> precise; plain words, 30 columns. */
+void FixView::show_auto() {
+    char b[TextLines::kCols + 1];
+    const Color white = Color::white(), yellow = Color::yellow(), green = Color::green(), grey = Color::light_grey();
+    const auto& st = main_.status_;
+    const bool running = main_.job_ == GpsView::JOB_AUTO;
+    if (!running && main_.want_job_ != GpsView::JOB_AUTO && !main_.fix_ok_) {
+        text_.set(0, "Autonomous: decodes the orbits", white);
+        text_.set(1, "from the satellites, no files", white);
+        text_.set(2, "needed. Get fix: search, a", white);
+        text_.set(3, "coarse fix from the almanac,", white);
+        text_.set(4, "then 'upgrading' while it", white);
+        text_.set(5, "tracks; 'precise' with 4", white);
+        text_.set(6, "ephemerides (30 s to 1 min", white);
+        text_.set(7, "of clean signal). Open sky,", white);
+        text_.set(8, "active antenna, Ant power on.", white);
+        if (main_.fix_tried_ && main_.status_.level == GpsRxStatusMessage::LEVEL_LOW) text_.set(9, "Last try: signal too low.", Color::red());
+        return;
+    }
+    /* row 0: the phase */
+    {
+        Fmt f{b, sizeof(b)};
+        Color c = yellow;
+        if (main_.want_job_ == GpsView::JOB_AUTO) {
+            f.s("Preparing: sky first...");
+        } else if (running && !main_.done_) {
+            if (st.state == GpsRxStatusMessage::CAPTURING || main_.awaiting_seq_)
+                f.s(st.confirming ? "Confirming: capture" : "Capturing 20 ms...");
+            else if (st.confirming)
+                f.s("Confirming ").u(st.done_prn).c('/').u(st.total_prn);
+            else
+                f.s(st.state == GpsRxStatusMessage::REFINING ? "Refining " : "Searching ").u(st.done_prn).c('/').u(st.total_prn).c(' ').u(static_cast<uint32_t>(main_.progress_pct())).c('%');
+        } else if (running && st.level == GpsRxStatusMessage::LEVEL_LOW) {
+            f.s("Signal too low: no search.");
+            c = Color::red();
+        } else if (running && !main_.tracking_) {
+            int heard = 0;
+            for (int p = 0; p < 32 && main_.results_; p++) heard += main_.results_[p].detected;
+            if (heard)
+                f.s("Starting the tracking loops");
+            else
+                f.s("Heard none: Stop; Heard tips");
+        } else if (main_.fix_ok_ && main_.fix_mode_ == GpsView::FIX_PRECISE) {
+            f.s("PRECISE");
+            if (main_.ttff_s_) f.s(", first fix ").u(main_.ttff_s_).s(" s");
+            c = green;
+        } else if (main_.auto_eph_ < 4 && main_.tracking_) {
+            f.s("Upgrading: ").u(main_.auto_eph_).s(" of 4 ephemerides");
+        } else if (main_.tracking_) {
+            f.s("Upgrading: solving...");
+        } else {
+            f.s("Stopped");
+            c = grey;
+        }
+        text_.set(0, b, c);
+    }
+    if (main_.fix_ok_) {
+        const Solution& s = main_.fix_;
+        double lat, lon, h;
+        ecef_to_lla(s.pos, lat, lon, h);
+        const bool coarse = main_.fix_mode_ == GpsView::FIX_COARSE;
+        const Color c = coarse ? yellow : green;
+        Fmt f{b, sizeof(b)};
+        f.s("Lat ");
+        put_deg(f, static_cast<int32_t>(std::lround(lat * 1e7)));
+        text_.set(1, b, c);
+        Fmt g{b, sizeof(b)};
+        g.s("Lon ");
+        put_deg(g, static_cast<int32_t>(std::lround(lon * 1e7)));
+        text_.set(2, b, c);
+        Fmt e{b, sizeof(b)};
+        if (coarse) {
+            e.s("COARSE (almanac), est. +/-");
+            put_dist(e, main_.fix_est_m_);
+        } else {
+            e.s("Err est. ~").u(main_.fix_est_m_).s(" m Alt ").d(static_cast<int32_t>(std::lround(h))).s(" m");
+        }
+        text_.set(3, b, coarse ? yellow : white);
+    }
+    /* satellites */
+    if (main_.tracking_) {
+        Fmt f{b, sizeof(b)};
+        f.s("Tracked ").u(main_.auto_tracked_).s(", TOW ").u(main_.auto_synced_).s(", eph ").u(main_.auto_eph_);
+        text_.set(4, b, white);
+        if (main_.fix_ok_) {
+            Fmt g{b, sizeof(b)};
+            g.s("Used ").u(main_.fix_.used).s(" HDOP ").fixed(static_cast<int32_t>(main_.fix_.hdop * 10), 1);
+            if (main_.mem_ && main_.mem_->pvt_fix.ok && main_.mem_->pvt_fix.checked) g.s(" checked");
+            text_.set(5, b, white);
+        }
+    }
+    /* GPS time from the satellites */
+    if (main_.gps_time_ok_) {
+        const double u = gps_to_unix(main_.now_gps());
+        const int64_t t = static_cast<int64_t>(std::floor(u));
+        const int32_t sod = static_cast<int32_t>(((t % 86400) + 86400) % 86400);
+        Fmt f{b, sizeof(b)};
+        f.s("GPS time ").d2(sod / 3600).c(':').d2(sod / 60 % 60).c(':').d2(sod % 60).s(" UTC");
+        text_.set(6, b, grey);
+    }
+    if (main_.mem_ && main_.mem_->pvt_fix.ok && main_.mem_->pvt_fix.vel_ok) {
+        const PvtSolution& p = main_.mem_->pvt_fix;
+        Fmt f{b, sizeof(b)};
+        const int32_t ppb = static_cast<int32_t>(std::lround(p.drift_mps / kC * 1e9));
+        f.s("TCXO ");
+        if (ppb >= 0) f.c('+');
+        f.fixed(ppb / 10, 2).s(" ppm, speed ").fixed(static_cast<int32_t>(norm(p.vel) * 10), 1).s(" m/s");
+        text_.set(7, b, grey);
+    }
+    if (main_.cache_written_) {
+        Fmt f{b, sizeof(b)};
+        f.s("Saved ").u(main_.cache_written_).s(" eph to /GPS/EPH_AIR");
+        text_.set(8, b, grey);
+    }
+    if (main_.fix_ok_ && main_.fix_mode_ == GpsView::FIX_COARSE && main_.tracking_)
+        text_.set(9, "Keep it outdoors: upgrading", grey);
+}
+
 void FixView::show() {
     if (hidden()) return; /* redrawn when the tab is selected (GpsView::on_frame) */
     char b[TextLines::kCols + 1];
-    const bool busy = main_.searching() || main_.solving() || main_.want_job_ == GpsView::JOB_FIX;
+    const bool busy = field_method_.selected_index_value() != 0
+                          ? (main_.job_ == GpsView::JOB_AUTO || main_.want_job_ == GpsView::JOB_AUTO)
+                          : (main_.searching() || main_.solving() || main_.want_job_ == GpsView::JOB_FIX);
     if (busy != fix_running_shown_) {
         fix_running_shown_ = busy;
         button_fix_.set_text(busy ? "Stop" : "Get fix");
@@ -1152,14 +1397,7 @@ void FixView::show() {
     const Color white = Color::white(), yellow = Color::yellow();
     text_.begin();
     if (field_method_.selected_index_value() != 0) {
-        text_.set(0, "Autonomous: not available yet", yellow);
-        text_.set(1, "It will decode the orbits", white);
-        text_.set(2, "from the satellites while it", white);
-        text_.set(3, "tracks them (no files). That", white);
-        text_.set(4, "receiver part is not built", white);
-        text_.set(5, "yet. Snapshot works now from", white);
-        text_.set(6, "the almanac on the card", white);
-        text_.set(7, "(coarse, about 0.5-2 km).", white);
+        show_auto();
         text_.end();
         return;
     }
@@ -1564,7 +1802,7 @@ GpsView::~GpsView() {
     rtc_time::signal_tick_second -= tick_token_;
     tab_ = tab_view_.selected();
     if (solver_) { /* it works in the lent RAM: stop it first (one satellite row at most) */
-        if (mem_) mem_->solve.cancel = 1;
+        if (mem_) mem_->solve.cancel = mem_->autos.pvt.cancel = 1;
         chThdWait(solver_);
         solver_ = nullptr;
     }
@@ -1741,8 +1979,10 @@ bool GpsView::start_search(Job job, uint8_t k_ms) {
     GpsRxConfigMessage m;
     m.cmd = GpsRxConfigMessage::CMD_SEARCH;
     m.k_ms = k_ms;
-    m.refine = job == JOB_FIX;
+    m.refine = job == JOB_FIX || job == JOB_AUTO;
     m.confirm = 1; /* a PRN is reported only if a second snapshot confirms it */
+    m.track = job == JOB_AUTO; /* the confirmed PRNs go straight to the tracking loops */
+    m.max_ch = 8;              /* M4: ~60 % with 8 channels (notes, gps-autonomous) */
     int nprn = 0;
     if (assisted_possible() && geo_ready_) {
         /* visible PRNs and their Doppler from the sky cache (at most kGeoPeriodS
@@ -1759,7 +1999,7 @@ bool GpsView::start_search(Job job, uint8_t k_ms) {
         m.half_bins = kAssistedHalfBins;
     }
     if (!nprn) {
-        if (job == JOB_FIX) return false;
+        if (job == JOB_FIX) return false; /* Autonomous may search all 32 (slow, no files) */
         m.prn_mask = 0xFFFFFFFFu;
         m.half_bins = kColdHalfBins;
         nprn = 32;
@@ -1767,13 +2007,32 @@ bool GpsView::start_search(Job job, uint8_t k_ms) {
     job_units_ = static_cast<uint32_t>(nprn) * (2u * m.half_bins + 1u) * k_ms;
     job_ = job;
     done_ = false;
+    tracking_ = false;
     awaiting_seq_ = true;
     results_ = nullptr;
     baseband::gps_rx_config(m);
     return true;
 }
 
+void GpsView::stop_auto() {
+    want_job_ = JOB_NONE;
+    if (job_ != JOB_AUTO) return;
+    GpsRxConfigMessage m;
+    m.cmd = GpsRxConfigMessage::CMD_STOP; /* the search and the tracking loops */
+    baseband::gps_rx_config(m);
+    job_ = JOB_NONE;
+    awaiting_seq_ = false;
+    done_ = false;
+    solve_pending_ = false;
+    tracking_ = false;
+    if (solver_ && mem_) mem_->solve.cancel = mem_->autos.pvt.cancel = 1;
+}
+
 void GpsView::stop_search() {
+    if (job_ == JOB_AUTO) {
+        stop_auto();
+        return;
+    }
     if (!searching()) return;
     GpsRxConfigMessage m;
     m.cmd = GpsRxConfigMessage::CMD_STOP;
@@ -1815,7 +2074,7 @@ void GpsView::on_status(const GpsRxStatusMessage& m) {
     if (!awaiting_seq_ && job_ != JOB_NONE && m.seq == job_seq_ && m.state == GpsRxStatusMessage::DONE && !done_) {
         done_ = true;
         results_ = static_cast<const gps_rx::Result*>(m.results);
-        if (job_ == JOB_FIX) solve_pending_ = true;
+        if (job_ == JOB_FIX || job_ == JOB_AUTO) solve_pending_ = pos_valid_ && (n_alm_ || n_eph_); /* Autonomous: the coarse fix first */
         if (mem_ && results_) {
             const uint32_t t = static_cast<uint32_t>(now_unix());
             for (int p = 0; p < 32; p++)
@@ -1824,6 +2083,14 @@ void GpsView::on_status(const GpsRxStatusMessage& m) {
                     mem_->heard_cn0[p] = static_cast<uint8_t>(results_[p].cn0 + 0.5f);
                 }
         }
+    }
+    if (m.track) trk_sh_ = static_cast<const gps_trk::Shared*>(m.track);
+    if (job_ == JOB_AUTO && done_ && m.state == GpsRxStatusMessage::TRACKING) tracking_ = true;
+    if (job_ == JOB_AUTO && tracking_) {
+        auto_poll_m4();
+        view_fix_.show();
+        view_heard_.show();
+        return;
     }
     /* redraw only when something shown changed (idle status comes twice a second) */
     const uint32_t sig = (status_.state | (status_.level << 4) | (status_.confirming << 7)) ^ (status_.done_prn << 8) ^
@@ -1874,6 +2141,7 @@ void GpsView::solve_fix() {
     solve_prior_ = rx_;
     solve_max_rms_ = all_eph ? 30.0 : almanac_max_rms(fix_alm_age_d_);
     solve_max_dt_ = all_eph ? 60.0 : kAlmMaxDtS;
+    solve_kind_ = 0;
     mem_->solve.cancel = 0;
     solver_done_ = false;
     solver_ = chThdCreateFromHeap(nullptr, kSolverStack, NORMALPRIO - 2, solver_fn, this);
@@ -1886,6 +2154,13 @@ void GpsView::solve_fix() {
 
 msg_t GpsView::solver_fn(void* arg) {
     auto* v = static_cast<GpsView*>(arg);
+    if (v->solve_kind_ == 1) { /* PVT from the tracking loops */
+        GpsScratch& m = *v->mem_;
+        const double max_rms = v->solve_pvt_eph_ ? 25.0 : almanac_max_rms(v->alm_age_days() < 0 ? 30.0 : v->alm_age_days());
+        v->solve_ok_ = pvt_solve(m.autos.pvt, v->solve_pvt_n_, v->solve_prior_, v->solve_pvt_trx_, m.pvt, max_rms, true);
+        v->solver_done_ = true;
+        return 0;
+    }
     v->solve_ok_ = snapshot_fix(v->mem_->solve.in, v->solve_n_, v->solve_prior_, v->solve_t_, v->solve_out_, v->mem_->solve,
                                 v->solve_max_rms_, v->solve_max_dt_);
     v->solver_done_ = true;
@@ -1896,6 +2171,11 @@ void GpsView::finish_solve() {
     if (solver_) {
         chThdWait(solver_);
         solver_ = nullptr;
+    }
+    if (solve_kind_ == 1) {
+        solve_kind_ = 0;
+        auto_finish_pvt();
+        return;
     }
     const bool cancelled = mem_ && mem_->solve.cancel;
     fix_ok_ = !cancelled && solve_ok_;
@@ -1908,6 +2188,184 @@ void GpsView::finish_solve() {
     }
     if (load_wanted_) start_load(); /* a Load pressed while solving */
     view_fix_.show();
+}
+
+/* ---------------------------------------------------------------- autonomous */
+
+/* About 5 times a second while the tracking loops run (from the status
+ * message, UI thread): copy the channel table, take new subframes (not while
+ * the solver reads the orbit table: they wait in the ring, 16 slots ~ 12 s),
+ * and start a PVT on each new measurement set when the solver is free. */
+void GpsView::auto_poll_m4() {
+    if (!mem_ || !trk_sh_) return;
+    AutoState& a = mem_->autos;
+    const int32_t week_hint = static_cast<int32_t>(now_gps() / kWeekS);
+    bool new_eph = false;
+    const gps_trk::Shared* sh = trk_sh_;
+    bool newmeas;
+    if (solving()) { /* channels and measurements only */
+        newmeas = false;
+        for (int tries = 0; tries < 3; tries++) {
+            const uint32_t s1 = sh->ch_seq;
+            if (s1 & 1u) continue;
+            for (int i = 0; i < gps_trk::kMaxCh; i++) a.ch[i] = sh->ch[i];
+            if (sh->ch_seq == s1) break;
+        }
+    } else {
+        newmeas = auto_poll(a, sh, week_hint, mem_->orbits, [&](int prn) {
+            (void)prn;
+            new_eph = true;
+        });
+    }
+    if (new_eph) { /* off-air ephemerides now in the orbit table */
+        int ne = 0;
+        double newest = 0;
+        for (int p = 0; p < 32; p++)
+            if (mem_->orbits[p].valid && mem_->orbits[p].ephemeris) {
+                ne++;
+                if (mem_->orbits[p].toe > newest) newest = mem_->orbits[p].toe;
+            }
+        n_eph_ = static_cast<uint8_t>(ne);
+        if (newest > eph_toe_newest_) eph_toe_newest_ = newest;
+    }
+    /* counts for the screen */
+    uint8_t tracked = 0, synced = 0, with_eph = 0;
+    for (int i = 0; i < gps_trk::kMaxCh; i++) {
+        const auto& c = a.ch[i];
+        if (c.state != gps_trk::TRK_TRACK || !(c.flags & gps_trk::F_VERIFIED)) continue;
+        tracked++;
+        if (c.flags & gps_trk::F_FRAME) synced++;
+        if (c.prn >= 1 && c.prn <= 32 && mem_->orbits[c.prn - 1].valid && mem_->orbits[c.prn - 1].ephemeris &&
+            std::fabs(now_gps() - mem_->orbits[c.prn - 1].toe) <= kEphMaxAgeS)
+            with_eph++;
+    }
+    auto_tracked_ = tracked;
+    auto_synced_ = synced;
+    auto_eph_ = with_eph;
+    /* GPS time from the first TOW (within ~20 ms; the PVT refines it) */
+    if (!gps_time_ok_ && a.have_meas) {
+        for (int i = 0; i < a.meas.n; i++)
+            if (a.meas.ch[i].flags & gps_trk::F_FRAME) {
+                const int32_t wk = a.week > 0 ? a.week : week_hint;
+                const double t = wk * kWeekS + a.meas.ch[i].tx_ms * 1e-3 + 0.075;
+                gps_off_s_ = t - unix_to_gps(now_unix());
+                gps_time_ok_ = true;
+                break;
+            }
+    }
+    if (!newmeas || solving() || solve_pending_) return;
+    /* a PVT: precise with >= 4 ephemerides, else coarse with almanac orbits */
+    const int32_t week = a.week > 0 ? a.week : week_hint;
+    int n_eph = 0;
+    int n = auto_build_pvt(a, mem_->orbits, false, week, &n_eph);
+    bool eph_only = false;
+    if (n_eph >= 4) {
+        n = auto_build_pvt(a, mem_->orbits, true, week, &n_eph);
+        eph_only = true;
+    } else if (fix_ok_ && fix_mode_ == FIX_COARSE && mem_->pvt_fix.ok) {
+        /* coarse already: refresh it at most every 10 s (the M0 time goes to the solver) */
+        static uint32_t last = 0;
+        const uint32_t t = chTimeNow();
+        if (t - last < S2ST(10)) return;
+        last = t;
+    }
+    if (n < 4) return;
+    solve_pvt_n_ = n;
+    solve_pvt_eph_ = eph_only;
+    solve_pvt_trx_ = auto_t_rx_guess(a, n);
+    solve_prior_ = (fix_ok_ ? fix_.pos : (pos_valid_ ? rx_ : Vec3{0, 0, 0}));
+    solve_kind_ = 1;
+    a.pvt.cancel = 0;
+    solver_done_ = false;
+    solver_ = chThdCreateFromHeap(nullptr, kSolverStack, NORMALPRIO - 2, solver_fn, this);
+    if (!solver_) solve_kind_ = 0; /* no heap now: the next second */
+}
+
+void GpsView::auto_finish_pvt() {
+    if (!mem_) return;
+    const bool cancelled = mem_->autos.pvt.cancel;
+    if (cancelled || !solve_ok_) return;
+    PvtSolution& p = mem_->pvt;
+    /* a coarse (almanac) PVT never replaces a precise fix */
+    if (!solve_pvt_eph_ && fix_ok_ && fix_mode_ == FIX_PRECISE) return;
+    mem_->pvt_fix = p;
+    fix_ok_ = true;
+    fix_tried_ = true;
+    fix_.pos = p.pos;
+    fix_.clock_m = p.clock_m;
+    fix_.resid_rms_m = p.resid_rms_m;
+    fix_.hdop = p.hdop;
+    fix_.used = p.used;
+    fix_.ok = true;
+    fix_fat_ = saved_position::now_fat();
+    fix_mode_ = solve_pvt_eph_ ? FIX_PRECISE : FIX_COARSE;
+    fix_alm_age_d_ = alm_age_days();
+    const double est = solve_pvt_eph_ ? pvt_err_m(p.hdop) : almanac_err_m(fix_alm_age_d_ < 0 ? 30.0 : fix_alm_age_d_, p.hdop);
+    fix_est_m_ = static_cast<uint32_t>(std::lround(est));
+    const uint32_t since = static_cast<uint32_t>((chTimeNow() - auto_t0_) / CH_FREQUENCY);
+    if (solve_pvt_eph_ && !ttff_s_) ttff_s_ = since ? since : 1;
+    if (!ttff_coarse_s_) ttff_coarse_s_ = since ? since : 1;
+    /* GPS time from the solution (the measurement is < ~1 s old: within the RTC's 1 s anyway) */
+    gps_off_s_ = p.t_rx - unix_to_gps(now_unix());
+    gps_time_ok_ = true;
+    view_fix_.show();
+}
+
+/* One EPH_AIR.TXT line per call (three per ephemeris, < 100 bytes each):
+ * from the frame handler (UI thread), never while the solver runs or the
+ * loader reads. A user's EPHEM.RNX is never written. */
+void GpsView::auto_cache_step() {
+    AutoState& a = mem_->autos;
+    if (cache_line_ == 0) { /* find a fresh set */
+        int k = 0;
+        for (; k < kAutoSlots; k++) {
+            const EphCollect& c = a.col[(cache_cursor_ + k) % kAutoSlots];
+            if (c.prn && c.fresh && c.have == 7) break;
+        }
+        if (k == kAutoSlots) return;
+        cache_cursor_ = static_cast<uint8_t>((cache_cursor_ + k) % kAutoSlots);
+    }
+    EphCollect& c = a.col[cache_cursor_];
+    if (!c.fresh || c.have != 7) { /* replaced meanwhile: start again */
+        cache_line_ = 0;
+        return;
+    }
+    char line[100];
+    const int32_t week = a.week > 0 ? a.week : static_cast<int32_t>(now_gps() / kWeekS);
+    const size_t n = eph_air_line(line, sizeof(line), c.prn, week, static_cast<uint8_t>(cache_line_ + 1), nav::sf_tow_start(c.sf[cache_line_]), c.sf[cache_line_]);
+    bool ok = false;
+    File* f = new File(); /* heap, not the M0 stack (~0.6 KB) */
+    if (cache_line_ == 0) {
+        /* a new file with its header, or append; start again past ~48 KB */
+        bool exists = !f->open(u"GPS/EPH_AIR.TXT").is_valid();
+        const bool big = exists && f->size() > 48u * 1024u;
+        f->close();
+        if (big) {
+            delete_file(u"GPS/EPH_AIR.TXT");
+            exists = false;
+        }
+        if (!exists && !f->create(u"GPS/EPH_AIR.TXT").is_valid()) {
+            const char* hdr = "# GPS ephemerides decoded off the air (HackRF GPS app, source off-air)\n# S prn week subframe tow_s 10 data words (hex); read with EPHEM.RNX\n";
+            f->write(hdr, std::strlen(hdr));
+            f->close();
+        }
+    }
+    if (!f->append(u"GPS/EPH_AIR.TXT").is_valid()) {
+        ok = !f->write(line, n).is_error();
+        f->close();
+    }
+    delete f;
+    if (!ok) { /* no card / no folder: give up on this one */
+        c.fresh = 0;
+        cache_line_ = 0;
+        return;
+    }
+    if (++cache_line_ == 3) {
+        cache_line_ = 0;
+        c.fresh = 0;
+        cache_written_++;
+        cache_cursor_ = static_cast<uint8_t>((cache_cursor_ + 1) % kAutoSlots);
+    }
 }
 
 void GpsView::on_frame() {
@@ -1947,6 +2405,7 @@ void GpsView::on_frame() {
         }
         return;
     }
+    if (mem_ && !solving() && !loading() && job_ == JOB_AUTO) auto_cache_step(); /* one line of an off-air ephemeris to /GPS/EPH_AIR.TXT */
     if (geo_active_) {
         geo_step();
         return;
