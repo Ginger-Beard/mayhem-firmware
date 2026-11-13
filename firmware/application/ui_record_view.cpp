@@ -173,6 +173,13 @@ uint32_t RecordView::dropped_percent() const {
     return is_active() ? std::min(99U, capture_thread->state().dropped_percent()) : 0;
 }
 
+bool RecordView::stream_bytes(uint64_t& received, uint64_t& dropped) const {
+    if (!is_active()) return false;
+    received = capture_thread->state().baseband_bytes_received;
+    dropped = capture_thread->state().baseband_bytes_dropped;
+    return true;
+}
+
 void RecordView::toggle() {
     if (is_active()) {
         stop();
