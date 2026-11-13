@@ -50,6 +50,7 @@ void GpsRxProcessor::apply() {
     units_ = 0;
     unit_cycles_sum_ = 0;
     snapshot.start(req_.k_ms);
+    settle_ = kSettleBuffers;
     state_ = GpsRxStatusMessage::CAPTURING;
     send_status();
 }
@@ -76,6 +77,10 @@ void GpsRxProcessor::execute(const buffer_c8_t& buffer) {
     if (pending_) apply();
     switch (state_) {
         case GpsRxStatusMessage::CAPTURING: {
+            if (settle_) {
+                settle_--;
+                break;
+            }
             snapshot.put(reinterpret_cast<const int8_t*>(buffer.p), buffer.count);
             if (snapshot.full()) {
                 gps_acq::Acquirer::Request r;

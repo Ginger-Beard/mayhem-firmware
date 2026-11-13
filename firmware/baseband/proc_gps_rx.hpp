@@ -56,7 +56,9 @@ class GpsRxProcessor : public BasebandProcessor {
         int16_t center[32]{};
     } req_{};
 
+    static constexpr uint8_t kSettleBuffers = 20; /* 20 ms skipped before a capture: LO / gain settling after enable */
     uint8_t state_{GpsRxStatusMessage::IDLE};
+    uint8_t settle_{0};
     uint32_t seq_{0};
     uint32_t units_{0};
     uint64_t unit_cycles_sum_{0};
