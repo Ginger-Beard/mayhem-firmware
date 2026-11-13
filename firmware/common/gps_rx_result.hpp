@@ -37,6 +37,7 @@ struct Result {
     uint8_t searched{0};
     uint8_t detected{0};
     uint8_t refined{0};
+    uint8_t once{0}; /* detected in the first snapshot but not confirmed in the second */
 };
 
 }  // namespace gps_rx

@@ -301,6 +301,8 @@ class GpsView : public View {
     /* Baseband status (copied from GpsRxStatusMessage) and the current search. */
     struct Status {
         uint8_t state{GpsRxStatusMessage::IDLE};
+        uint8_t level{GpsRxStatusMessage::LEVEL_OK};
+        uint8_t confirming{0};
         uint8_t done_prn{0}, total_prn{0}, k_ms{0};
         uint16_t rms_x10{0}, clip_permille{0};
         uint32_t seq{0}, units{0}, unit_cycles{0};

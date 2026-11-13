@@ -138,7 +138,8 @@ class Snapshot {
         k_ = k_ms < 1 ? 1 : (k_ms > kMaxK ? kMaxK : k_ms);
         filled_ = 0;
         th_i_ = th_q_ = 0;
-        sum_sq_ = 0;
+        dc_i_ = dc_q_ = 0;
+        ac_sq_ = 0;
         clip_ = 0;
         peak_ = 0;
     }
@@ -146,27 +147,44 @@ class Snapshot {
     int k() const { return k_; }
     /* Append samples (interleaved int8 I, Q); returns how many were taken. */
     size_t put(const int8_t* iq, size_t n) {
-        if (th_i_ == 0) { /* thresholds ~1 sigma per channel from the first buffer: 1.2533 * mean|x| */
-            uint32_t si = 0, sq = 0;
+        /* DC offset per channel, from every buffer (1 ms): the 2-bit quantiser is
+         * symmetric about it. A HackRF Pro recording with the amp on had -4.7 LSB
+         * of DC, which made random PRNs cross the threshold (at 0 Hz residual
+         * Doppler even after a one-off estimate), so it is tracked per buffer. */
+        {
+            int32_t si = 0, sq = 0;
             for (size_t k = 0; k < n; k++) {
-                si += static_cast<uint32_t>(iq[2 * k] < 0 ? -iq[2 * k] : iq[2 * k]);
-                sq += static_cast<uint32_t>(iq[2 * k + 1] < 0 ? -iq[2 * k + 1] : iq[2 * k + 1]);
+                si += iq[2 * k];
+                sq += iq[2 * k + 1];
             }
-            th_i_ = threshold(si, n);
-            th_q_ = threshold(sq, n);
+            const int32_t nn = static_cast<int32_t>(n ? n : 1);
+            dc_i_ = (si * 16 + (si >= 0 ? nn / 2 : -nn / 2)) / nn;
+            dc_q_ = (sq * 16 + (sq >= 0 ? nn / 2 : -nn / 2)) / nn;
+        }
+        if (th_i_ == 0) { /* magnitude threshold ~1 sigma (1.2533 x mean |x - dc|), first buffer, 1/16 LSB */
+            uint32_t ai = 0, aq = 0;
+            for (size_t k = 0; k < n; k++) {
+                const int32_t a = iq[2 * k] * 16 - dc_i_, b = iq[2 * k + 1] * 16 - dc_q_;
+                ai += static_cast<uint32_t>(a < 0 ? -a : a);
+                aq += static_cast<uint32_t>(b < 0 ? -b : b);
+            }
+            th_i_ = threshold16(ai, n);
+            th_q_ = threshold16(aq, n);
         }
         size_t taken = 0;
         while (taken < n && !full()) {
             const int i = iq[2 * taken], q = iq[2 * taken + 1];
-            sum_sq_ += static_cast<uint32_t>(i * i + q * q);
+            const int32_t a = i * 16 - dc_i_, b = q * 16 - dc_q_; /* DC removed, 1/16 LSB */
+            ac_sq_ += static_cast<uint32_t>((a * a + b * b + 128) >> 8);
             if (i >= 127 || i <= -127 || q >= 127 || q <= -127) clip_++;
             const int ai = i < 0 ? -i : i, aq = q < 0 ? -q : q;
             if (ai > peak_) peak_ = ai;
             if (aq > peak_) peak_ = aq;
+            const int32_t ma = a < 0 ? -a : a, mb = b < 0 ? -b : b;
             /* a zero sample takes the sign of the sample index parity: no DC from rounding */
             const bool odd = filled_ & 1;
-            const uint8_t ci = static_cast<uint8_t>((i < 0 || (i == 0 && odd) ? 2 : 0) | (ai >= th_i_ ? 1 : 0));
-            const uint8_t cq = static_cast<uint8_t>((q < 0 || (q == 0 && odd) ? 2 : 0) | (aq >= th_q_ ? 1 : 0));
+            const uint8_t ci = static_cast<uint8_t>((a < 0 || (a == 0 && odd) ? 2 : 0) | (ma >= th_i_ ? 1 : 0));
+            const uint8_t cq = static_cast<uint8_t>((b < 0 || (b == 0 && odd) ? 2 : 0) | (mb >= th_q_ ? 1 : 0));
             const uint8_t nib = static_cast<uint8_t>((ci << 2) | cq);
             uint8_t& byte = data_[filled_ >> 1];
             byte = (filled_ & 1) ? static_cast<uint8_t>((byte & 0x0F) | (nib << 4)) : nib;
@@ -183,7 +201,11 @@ class Snapshot {
         q = level(nib & 3);
     }
     /* Noise statistics for the gain advice. */
-    float rms() const { return filled_ ? std::sqrt(static_cast<float>(sum_sq_) / (2.0f * filled_)) : 0.0f; }
+    /* AC rms per component (DC removed), LSB */
+    float rms() const { return filled_ ? std::sqrt(static_cast<float>(ac_sq_) / (2.0f * filled_)) : 0.0f; }
+    /* DC offset of the first buffer, LSB */
+    float dc_i() const { return dc_i_ / 16.0f; }
+    float dc_q() const { return dc_q_ / 16.0f; }
     uint32_t clipped() const { return clip_; }
     uint32_t filled() const { return filled_; }
     int peak() const { return peak_; }
@@ -191,13 +213,14 @@ class Snapshot {
    private:
     uint8_t data_[kMaxK * kN / 2]{};
     uint32_t filled_{0};
-    int k_{0}; /* zero-initialised object: .bss, not .data */
-    int th_i_{0}, th_q_{0};
-    uint32_t sum_sq_{0};
-    static int threshold(uint32_t sum_abs, size_t n) {
-        const uint32_t mean_x100 = static_cast<uint32_t>(sum_abs * 100u / (n ? n : 1));
-        const int th = static_cast<int>((mean_x100 * 125u + 5000u) / 10000u);
-        return th < 1 ? 1 : th;
+    int k_{0};                  /* zero-initialised object: .bss, not .data */
+    int32_t th_i_{0}, th_q_{0}; /* 1/16 LSB */
+    int32_t dc_i_{0}, dc_q_{0}; /* 1/16 LSB */
+    uint32_t ac_sq_{0};
+    static int32_t threshold16(uint32_t sum_abs16, size_t n) {
+        const uint32_t mean16 = static_cast<uint32_t>(sum_abs16 / (n ? n : 1));
+        const int32_t th = static_cast<int32_t>((mean16 * 1253u + 500u) / 1000u);
+        return th < 8 ? 8 : th; /* at least half an LSB */
     }
     uint32_t clip_{0};
     int peak_{0};
@@ -496,6 +519,164 @@ class Acquirer {
         r.refined = 1;
         next_refine();
     }
+};
+
+/* A whole search as the PGPR baseband runs it, host testable:
+ *  1. capture snapshot A and check its level: AC rms below kMinRms LSB (a
+ *     starved ADC, mostly 0 / +-1) stops here with LEVEL_LOW and no results;
+ *     clipping above kMaxClipPermille is reported as LEVEL_HIGH (search goes on);
+ *  2. search A;
+ *  3. confirmation (if asked): capture snapshot B, search only the PRNs found
+ *     in A around their Doppler (+-1 kHz), refine there; a PRN counts as
+ *     detected only if B finds it at a consistent Doppler (+-750 Hz) and its
+ *     code phase moved by what that Doppler predicts (code / carrier = 1/1540)
+ *     over the time between A and B. Others stay as "once" (not reported as
+ *     heard). Noise and interference peaks do not repeat that way.
+ * The caller feeds samples while want_samples() and steps otherwise; times
+ * are in seconds on any monotonic clock (the M4 uses its cycle counter). */
+class Session {
+   public:
+    enum Phase : uint8_t { IDLE,
+                           CAPTURE_A,
+                           SEARCH_A,
+                           CAPTURE_B,
+                           SEARCH_B,
+                           DONE };
+    enum Level : uint8_t { LEVEL_OK = 0,
+                           LEVEL_LOW = 1,
+                           LEVEL_HIGH = 2 };
+    static constexpr float kMinRms = 1.5f;             /* LSB, AC rms per component */
+    static constexpr uint32_t kMaxClipPermille = 10;   /* 1 % of the samples at full scale */
+    static constexpr float kConfirmDopplerHz = 750.0f; /* A vs B */
+    static constexpr int kConfirmHalfBins = 2;         /* B search: +-1 kHz around A's Doppler */
+    struct Params {
+        uint32_t prn_mask{0};
+        int16_t center[32]{};
+        uint8_t half_bins{12};
+        uint8_t k_ms{20};
+        uint8_t refine{1};
+        uint8_t confirm{1};
+    };
+
+    Session(Snapshot& snap, Acquirer& acq)
+        : snap_{snap}, acq_{acq} {}
+
+    void start(const Params& p) {
+        p_ = p;
+        for (int i = 0; i < 32; i++) {
+            final_[i] = Result{};
+            final_[i].prn = static_cast<uint8_t>(i + 1);
+        }
+        level_ = LEVEL_OK;
+        snap_.start(p.k_ms);
+        phase_ = CAPTURE_A;
+        t_a_ = t_b_ = -1;
+    }
+    void stop() {
+        acq_.stop();
+        phase_ = IDLE;
+    }
+    bool want_samples() const { return phase_ == CAPTURE_A || phase_ == CAPTURE_B; }
+    void put(const int8_t* iq, size_t n, double t_s) {
+        if (!want_samples()) return;
+        if (snap_.filled() == 0) (phase_ == CAPTURE_A ? t_a_ : t_b_) = t_s;
+        snap_.put(iq, n);
+        if (!snap_.full()) return;
+        if (phase_ == CAPTURE_A) {
+            const uint32_t f = snap_.filled();
+            if (snap_.rms() < kMinRms) {
+                level_ = LEVEL_LOW;
+                phase_ = DONE;
+                return;
+            }
+            if (f && snap_.clipped() * 1000u / f > kMaxClipPermille) level_ = LEVEL_HIGH;
+            Acquirer::Request r;
+            r.prn_mask = p_.prn_mask;
+            std::memcpy(r.center, p_.center, sizeof(r.center));
+            r.half_bins = p_.half_bins > 20 ? 20 : p_.half_bins;
+            r.refine = p_.confirm ? 0 : p_.refine;
+            acq_.start(r);
+            phase_ = SEARCH_A;
+        } else {
+            Acquirer::Request r;
+            for (int i = 0; i < 32; i++)
+                if (a_[i].detected) {
+                    r.prn_mask |= 1u << i;
+                    r.center[i] = static_cast<int16_t>(std::lround(a_[i].doppler));
+                }
+            r.half_bins = kConfirmHalfBins;
+            r.refine = p_.refine;
+            acq_.start(r);
+            phase_ = SEARCH_B;
+        }
+    }
+    /* One work unit; false when there is nothing to step (capturing, done). */
+    bool step() {
+        if (phase_ != SEARCH_A && phase_ != SEARCH_B) return false;
+        if (acq_.step()) return true;
+        if (phase_ == SEARCH_A) {
+            bool any = false;
+            for (int i = 0; i < 32; i++) {
+                a_[i] = acq_.result(i + 1);
+                any |= a_[i].detected != 0;
+            }
+            if (p_.confirm && any) {
+                snap_.start(p_.k_ms);
+                phase_ = CAPTURE_B;
+            } else {
+                for (int i = 0; i < 32; i++) final_[i] = a_[i];
+                phase_ = DONE;
+            }
+            return false;
+        }
+        /* SEARCH_B done: merge */
+        const double dt = t_b_ - t_a_;
+        for (int i = 0; i < 32; i++) {
+            const Result& b = acq_.result(i + 1);
+            Result r = a_[i].detected ? b : a_[i];
+            r.searched = a_[i].searched;
+            if (a_[i].detected) {
+                const bool ok = consistent(a_[i], b, dt);
+                r.detected = ok;
+                r.once = !ok;
+                if (!ok) { /* keep A's numbers for display */
+                    r.metric = a_[i].metric;
+                    r.doppler = a_[i].doppler;
+                    r.code_phase = a_[i].code_phase;
+                    r.cn0 = a_[i].cn0;
+                    r.refined = 0;
+                }
+            }
+            final_[i] = r;
+        }
+        phase_ = DONE;
+        return false;
+    }
+    static bool consistent(const Result& a, const Result& b, double dt) {
+        if (!b.detected || dt < 0) return false;
+        if (std::fabs(b.doppler - a.doppler) > kConfirmDopplerHz) return false;
+        const double fd = 0.5 * (static_cast<double>(a.doppler) + b.doppler);
+        const double pred = a.code_phase + dt * fd * (kChipRate / kL1);
+        double err = std::fmod(static_cast<double>(b.code_phase) - pred + 1023.0 * 1000.0 + 511.5, 1023.0) - 511.5;
+        if (err < 0) err = -err;
+        const double tol = 1.5 + 300.0 * dt * (kChipRate / kL1); /* code phase + 300 Hz of Doppler error over dt */
+        return err <= tol;
+    }
+    Phase phase() const { return phase_; }
+    Level level() const { return level_; }
+    const Result* results() const { return final_; }
+    double dt() const { return t_b_ - t_a_; }
+    bool confirming() const { return phase_ == CAPTURE_B || phase_ == SEARCH_B; }
+
+   private:
+    Snapshot& snap_;
+    Acquirer& acq_;
+    Params p_{};
+    Result a_[32]{};
+    Result final_[32]{};
+    Phase phase_{IDLE};
+    Level level_{LEVEL_OK};
+    double t_a_{-1}, t_b_{-1};
 };
 
 }  // namespace gps_acq

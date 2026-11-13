@@ -530,29 +530,40 @@ void HeardView::show() {
             c = Color::light_grey();
         } else if (!main_.done_) {
             if (st.state == GpsRxStatusMessage::CAPTURING || main_.awaiting_seq_)
-                f.s("Capturing ").u(st.k_ms).s(" ms...");
+                f.s(st.confirming ? "Confirming: capture" : "Capturing ").u(st.k_ms).s(" ms...");
+            else if (st.confirming)
+                f.s("Confirming ").u(st.done_prn).c('/').u(st.total_prn);
             else
                 f.s(st.state == GpsRxStatusMessage::REFINING ? "Refining " : "Searching ").u(st.done_prn).c('/').u(st.total_prn).c(' ').u(static_cast<uint32_t>(main_.progress_pct())).c('%');
             c = Color::yellow();
+        } else if (st.level == GpsRxStatusMessage::LEVEL_LOW) {
+            f.s("Signal too low: no search");
+            c = Color::red();
         } else {
             int n = 0;
             for (int p = 0; p < 32; p++) n += main_.results_ && main_.results_[p].detected;
-            f.s("Heard ").u(static_cast<uint32_t>(n)).s(" of ").u(st.total_prn).s(" searched");
+            f.s("Heard ").u(static_cast<uint32_t>(n)).s(" (confirmed)");
             c = n ? Color::green() : Color::yellow();
         }
         text_status_.set(0, b, c);
     }
-    /* line 1: noise level and gain advice */
+    /* line 1: the measured input level (AC rms per component of the snapshot,
+     * DC removed) against the target, and the M4 time of one search step */
     if (mine && st.rms_x10) {
         Fmt f{b, sizeof(b)};
-        f.s("Noise ").fixed(st.rms_x10, 1).s(" clip ").fixed(st.clip_permille, 1).c('%');
-        Color c = Color::light_grey();
-        if (st.clip_permille > 10) {
-            f.s(" gain-");
+        f.s("Level ").fixed(st.rms_x10, 1).s(" LSB");
+        Color c = Color::green();
+        if (st.level == GpsRxStatusMessage::LEVEL_LOW || st.rms_x10 < 15) {
+            f.s(" LOW gain+");
             c = Color::red();
-        } else if (st.rms_x10 < 30) {
-            f.s(" gain+");
+        } else if (st.level == GpsRxStatusMessage::LEVEL_HIGH || st.clip_permille > 10) {
+            f.s(" CLIP gain-");
+            c = Color::red();
+        } else if (st.rms_x10 < 40) {
+            f.s(" low");
             c = Color::yellow();
+        } else {
+            f.s(" ok");
         }
         if (st.unit_cycles) f.s(" ").u(st.unit_cycles / 20000u).s("0us"); /* M4 time of one work unit, 10 us steps */
         text_status_.set(1, b, c);
@@ -576,12 +587,22 @@ void HeardView::show() {
             order[k] = order[k - 1];
             order[k - 1] = t;
         }
+    if (st.level == GpsRxStatusMessage::LEVEL_LOW) {
+        text_list_.set(0, "Input too low to trust:", Color::red());
+        text_list_.set(1, "the ADC barely moves.", Color::white());
+        text_list_.set(3, "- raise LNA / VGA (40/46)", Color::white());
+        text_list_.set(4, "- active antenna? turn", Color::white());
+        text_list_.set(5, "  Ant power on (status bar)", Color::white());
+        text_list_.set(6, "- target level 4-30 LSB", Color::white());
+        sky_.set_dirty();
+        return;
+    }
     if (!n) {
         text_list_.set(0, "No satellites heard.", Color::yellow());
         text_list_.set(2, "- active antenna? turn", Color::white());
         text_list_.set(3, "  Ant power on (status bar)", Color::white());
         text_list_.set(4, "- open sky, outdoors", Color::white());
-        text_list_.set(5, "- noise 6-30 LSB:", Color::white());
+        text_list_.set(5, "- level 4-30 LSB:", Color::white());
         text_list_.set(6, "  adjust LNA / VGA", Color::white());
         text_list_.set(7, "- Deep 20ms", Color::white());
     }
@@ -598,6 +619,15 @@ void HeardView::show() {
         if (dop >= 0) f.c('+');
         f.fixed(dop, 1).c('k');
         text_list_.set(k, b, r.cn0 >= 38 ? Color::green() : Color::white());
+    }
+    /* seen in one snapshot only: shown grey with '?', not counted as heard */
+    size_t row = n ? n : 9;
+    for (int p = 0; p < 32 && row < kListRows; p++) {
+        const auto& r = main_.results_[p];
+        if (!r.once) continue;
+        Fmt f{b, sizeof(b)};
+        f.c('G').d2(r.prn).s("? once, not confirmed");
+        text_list_.set(row++, b, Color::grey());
     }
     /* sky plot when orbits and a position are known: heard filled */
     if (main_.mem_ && main_.pos_valid_) {
@@ -755,6 +785,11 @@ void FixView::show() {
             put_span(f, main_.fix_eph_age_s_ < 0 ? -main_.fix_eph_age_s_ : main_.fix_eph_age_s_);
             text_.set(6, b, Color::white());
         }
+    } else if (main_.done_ && main_.job_ == GpsView::JOB_FIX && st.level == GpsRxStatusMessage::LEVEL_LOW) {
+        text_.set(0, "Signal too low: no search", Color::red());
+        text_.set(1, "raise LNA / VGA (40/46);", Color::white());
+        text_.set(2, "Ant power for an active", Color::white());
+        text_.set(3, "antenna (status bar)", Color::white());
     } else if (main_.fix_tried_) {
         Fmt f{b, sizeof(b)};
         f.s("No fix: ").u(main_.fix_heard_).s(" sats heard");
@@ -831,8 +866,8 @@ GpsView::GpsView(NavigationView& nav)
 
     if (!settings_.loaded()) { /* an active antenna gives plenty: moderate gains */
         receiver_model.set_rf_amp(false);
-        receiver_model.set_lna(32);
-        receiver_model.set_vga(30);
+        receiver_model.set_lna(40); /* bench recordings: LNA 32 / VGA 24 left the ADC at ~0.6 LSB rms */
+        receiver_model.set_vga(46);
     }
     field_lna_.set_value(receiver_model.lna());
     field_vga_.set_value(receiver_model.vga());
@@ -917,6 +952,7 @@ bool GpsView::start_search(Job job, uint8_t k_ms) {
     m.cmd = GpsRxConfigMessage::CMD_SEARCH;
     m.k_ms = k_ms;
     m.refine = job == JOB_FIX;
+    m.confirm = 1; /* a PRN is reported only if a second snapshot confirms it */
     int nprn = 0;
     if (assisted_possible()) {
         /* visible PRNs (by the orbit files), Doppler predicted from the range rate */
@@ -974,6 +1010,8 @@ int GpsView::progress_pct() const {
 
 void GpsView::on_status(const GpsRxStatusMessage& m) {
     status_.state = m.state;
+    status_.level = m.level;
+    status_.confirming = m.confirming;
     status_.done_prn = m.done_prn;
     status_.total_prn = m.total_prn;
     status_.k_ms = m.k_ms;

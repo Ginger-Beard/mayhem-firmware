@@ -2602,6 +2602,7 @@ struct GpsRxConfigMessage : public Message {
     uint8_t refine{1};     /* refine detected PRNs (snapshot fix) */
     uint32_t prn_mask{0};  /* bit p-1: search PRN p */
     int16_t center[32]{};  /* Doppler window centre per PRN, Hz */
+    uint8_t confirm{1};    /* report a PRN only if a second snapshot confirms it */
 };
 
 /* M4 -> M0: progress, noise statistics, and where the results and the lent
@@ -2614,12 +2615,17 @@ struct GpsRxStatusMessage : public Message {
                            SEARCHING,
                            REFINING,
                            DONE };
+    enum Level : uint8_t { LEVEL_OK = 0,
+                           LEVEL_LOW, /* snapshot AC rms below the floor: no search done */
+                           LEVEL_HIGH /* clipping: results still reported */ };
     /* The M4 RAM PGPR lends the app: orbit tables and solver work space
      * (never touched by the M4). */
     static constexpr uint16_t kScratchSize = 7168;
     uint8_t state{IDLE};
-    uint8_t done_prn{0};  /* PRNs searched */
-    uint8_t total_prn{0}; /* PRNs requested */
+    uint8_t level{LEVEL_OK};
+    uint8_t confirming{0}; /* second (confirmation) snapshot under way */
+    uint8_t done_prn{0};   /* PRNs searched */
+    uint8_t total_prn{0};  /* PRNs requested */
     uint8_t k_ms{0};
     uint16_t rms_x10{0};          /* noise rms of the snapshot, LSB x 10 */
     uint16_t clip_permille{0};    /* samples at full scale, per mille */

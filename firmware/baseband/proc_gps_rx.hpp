@@ -54,6 +54,7 @@ class GpsRxProcessor : public BasebandProcessor {
         uint8_t k_ms{20}, half_bins{12}, refine{1};
         uint32_t prn_mask{0};
         int16_t center[32]{};
+        uint8_t confirm{1};
     } req_{};
 
     static constexpr uint8_t kSettleBuffers = 20; /* 20 ms skipped before a capture: LO / gain settling after enable */
@@ -63,6 +64,11 @@ class GpsRxProcessor : public BasebandProcessor {
     uint32_t units_{0};
     uint64_t unit_cycles_sum_{0};
     uint32_t last_status_{0};
+    /* Time for the A -> B interval in samples of the sample clock (DMA buffers
+     * handled + missed): the code phases are measured in that clock too, so a
+     * TCXO error cancels in the confirmation rule. */
+    uint64_t samples_{0};
+    uint16_t missed_seen_{0};
     GpsRxStatusMessage status_{};
 
     void apply();

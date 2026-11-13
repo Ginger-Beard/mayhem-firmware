@@ -78,12 +78,21 @@ Heard tab (what the receiver hears)
 "Search" records a snapshot (Quick 10 ms or Deep 20 ms) and searches it for
 GPS satellites. With orbit files, a position and the time it searches only the
 satellites that should be up, around their expected Doppler (faster); without
-them all 32 (Quick: about 1 minute, Deep: about 2 minutes, estimated). The list
-shows each satellite heard with a C/N0 bar (dB-Hz; 38 and up is good) and its
-Doppler in kHz. The second line shows the noise level: aim for 6-30 LSB with
-no "clip" (lower the gains if "gain-" shows, raise them if "gain+" shows), and
-the M4 time of one search step. The sky plot shows satellites predicted above
-the horizon (grey) and those heard (green).
+them all 32 (Quick: about 1 minute, Deep: about 2 minutes, estimated).
+A satellite is reported as heard only when a SECOND snapshot, taken after the
+first search, finds it again at the same Doppler with its code phase moved as
+that Doppler predicts ("Confirming ..."). One-off peaks from noise and
+interference do not repeat that way: they are listed grey as "G13? once, not
+confirmed" and not counted. The list shows each confirmed satellite with a
+C/N0 bar (dB-Hz; 38 and up is good) and its Doppler in kHz.
+The second line is the measured input level ("Level x.x LSB", rms per
+component, DC removed) and the M4 time of one search step. Target 4-30 LSB:
+below 1.5 LSB the ADC is starved (mostly 0 / +-1) and the app does not search
+at all ("Signal too low"); "CLIP" means lower the gains. Starting gains:
+LNA 40, VGA 46, AMP off (with a LaNA-class LNA in front, no L1 filter, LNA 40 /
+VGA 40 gave about 3 LSB with the amp off and 15 LSB with it on; LNA 32 / VGA 24
+gave 0.6 LSB). The sky plot shows satellites predicted above the horizon
+(grey) and those heard (green).
 
 Fix tab (your position)
 -----------------------
