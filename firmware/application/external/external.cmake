@@ -456,6 +456,17 @@ set(EXTCPPSRC
 	external/signature_detect/sigdet_track.cpp
 	external/signature_detect/sigdet_zwnet.cpp
 	external/signature_detect/sigdet_capture.cpp
+	#gps (receiver; HackRF Pro)
+	external/gps/main.cpp
+	external/gps/ui_gps.cpp
+	external/gps/gps_orbit.cpp
+	external/gps/gps_sgp4.cpp
+	external/gps/gps_pass.cpp
+	external/gps/gps_point.cpp
+	external/gps/gps_solve.cpp
+	external/gps/gps_freq.cpp
+	external/gps/gps_follow.cpp
+	external/gps/ui_gps_follow.cpp
 )
 
 set(EXTAPPLIST
@@ -564,5 +575,6 @@ set(EXTAPPLIST
 	vdl2_rx
 	subghz_chat
 	signature_detect
+	gps
 )
 

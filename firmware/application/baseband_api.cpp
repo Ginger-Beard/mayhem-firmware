@@ -515,6 +515,10 @@ void set_signature_detect_dsss(uint8_t wifi_channel, int8_t slice_mhz, uint8_t f
     send_message(&message);
 }
 
+void gps_rx_config(const GpsRxConfigMessage& message) {
+    send_message(&message);
+}
+
 static bool baseband_image_running = false;
 static bool rx_fs4_supported = false;
 

@@ -1,0 +1,47 @@
+# /GPS/SATFREQ.TXT - satellite downlinks for the GPS app's Follow (receive only).
+# Checked 2026-11-13 against AMSAT status (status.amsat.org, reports of Nov 8-13),
+# the AMSAT FM / linear frequency summaries (pages dated 2026-10-31), ARISS station
+# status (2026-11-04), SatNOGS DB, sigidwiki and WMO OSCAR. Sources per entry and
+# what is uncertain: /GPS/README.TXT ("Downlinks"). Satellites change: re-check
+# before relying on an entry.
+#
+# One downlink per line, fields separated by blanks:
+#   NORAD  NAME  DOWNLINK  MODE  BW_KHZ  NOTE
+# NORAD   catalogue number, matched with TLE.TXT (or "-" to match by NAME, the
+#         start of the TLE's name line)
+# NAME    one word, for you (and for "-" matching)
+# DOWNLINK MHz with a point (437.800) or Hz (437800000), the nominal frequency;
+#         the app adds the Doppler shift itself
+# MODE    NFM, AM, WFM, USB, LSB, CW (a CW beacon: heard as a 700 Hz tone in USB),
+#         DATA (digital: followed and metered, not decoded)
+# BW_KHZ  the signal's width (picks the filter), or "-"
+# NOTE    the rest of the line (24 characters are shown)
+# Lines starting with # are comments. Up to 24 downlinks; a satellite can have
+# several (Follow lets you switch). VHF entries (below 300 MHz) need a VHF
+# antenna: a 300 MHz-6 GHz panel will not hear them.
+#
+# --- FM voice (easiest: NFM, a carrier you can hear and point at)
+25544  ISS       437.800   NFM   15   FM repeater (ARISS)
+25544  ISS       145.800   NFM   15   voice/SSTV events only
+25544  ISS       437.825   NFM   15   APRS packets (bursts)
+27607  SO-50     436.795   NFM   15   FM sat, busy on passes
+61781  AO-123    435.400   NFM   15   FM sat + 9k6 telemetry
+#
+# --- linear transponders: CW beacon for pointing, passband centre for listening
+44909  RS-44     435.605   CW    -    beacon, best to point at
+44909  RS-44     435.640   USB   3    passband 435.610-.670
+24278  FO-29     435.795   CW    -    beacon; schedule, sun only
+24278  FO-29     435.850   USB   3    passband 435.800-.900
+7530   AO-7      145.950   USB   3    mode B, sun only (VHF)
+39444  AO-73     145.935   DATA  3    BPSK telemetry (VHF)
+#
+# --- digital (meter and pointing only)
+68446  SO-127    436.875   DATA  5    HADES-SA FSK, uncertain
+57166  METEOR-M2-3 137.900 DATA  150  LRPT 72k (VHF)
+59051  METEOR-M2-4 137.900 DATA  150  LRPT 72k (VHF)
+59051  METEOR-M2-4 137.100 DATA  150  LRPT backup freq (VHF)
+#
+# Not listed (checked 2026-11-13): NOAA-15/18/19 APT (decommissioned 2025: NOAA-18
+# on 2025-06-06, NOAA-19 on 2025-08-13, NOAA-15 on 2025-08-19); AO-91 (eclipse-
+# limited, not heard most days); AO-27, PO-101, JO-97, IO-86 (no fresh reports,
+# dying, or equatorial only); SO-121, SO-124, SO-125 (re-entered).
