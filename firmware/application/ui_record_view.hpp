@@ -39,6 +39,10 @@ namespace ui {
 class RecordView : public View {
    public:
     std::function<void(std::string)> on_error{};
+    /* Asked before a recording starts (button or start()); false: not now. Lets
+     * an app finish its own SD work first: none may run while the capture
+     * thread writes (FatFs validate() reads the driver state unlocked). */
+    std::function<bool()> on_before_start{};
 
     enum FileType {
         RawS8 = 1,
@@ -71,6 +75,8 @@ class RecordView : public View {
     void on_hide() override;
 
     bool is_active() const;
+    /* Share of samples dropped by the capture thread so far, 0..99 (0 when idle). */
+    uint32_t dropped_percent() const;
 
     void set_filename_date_frequency(bool set);
     void set_filename_as_is(bool set);
