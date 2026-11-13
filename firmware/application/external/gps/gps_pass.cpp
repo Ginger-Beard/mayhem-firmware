@@ -60,6 +60,7 @@ void PassFinder::start(const SatSource& src, const Observer& rx, double t0, doub
     pass_ = Pass{};
     found_ = false;
     done_ = false;
+    phase_ = SCAN;
     best_el_ = -99;
     double az = 0;
     el_prev_ = elevation(src_, rx_, t_, &az);
@@ -77,89 +78,127 @@ void PassFinder::start(const SatSource& src, const Observer& rx, double t0, doub
     }
 }
 
-/* Bisection of the horizon crossing between a (below/above) and b. */
-double PassFinder::crossing(double a, double b, bool rising) {
-    for (int k = 0; k < 9; k++) {
-        const double m = 0.5 * (a + b);
-        const bool above = elevation(src_, rx_, m) > 0.0;
-        if (above == rising)
-            b = m;
-        else
-            a = m;
-    }
-    return 0.5 * (a + b);
+/* The search as a state machine, one elevation per unit (the arithmetic and
+ * the order of evaluations are those of a straight bisection (9 steps) and
+ * golden-section search (10 steps), so results do not depend on slicing). */
+void PassFinder::start_top() {
+    ga_ = best_t_ - dt_;
+    gb_ = best_t_ + dt_;
+    if (ga_ < t0_) ga_ = t0_;
+    constexpr double g = 0.6180339887;
+    gc_ = gb_ - g * (gb_ - ga_);
+    gd_ = ga_ + g * (gb_ - ga_);
+    phase_ = TOP_C;
 }
 
-/* Golden-section search for the highest point around the best coarse sample. */
-void PassFinder::refine_top() {
-    double a = best_t_ - dt_, b = best_t_ + dt_;
-    if (a < t0_) a = t0_;
+void PassFinder::unit() {
     constexpr double g = 0.6180339887;
-    double c = b - g * (b - a), d = a + g * (b - a);
-    double fc = elevation(src_, rx_, c), fd = elevation(src_, rx_, d);
-    for (int k = 0; k < 10; k++) {
-        if (fc > fd) {
-            b = d;
-            d = c;
-            fd = fc;
-            c = b - g * (b - a);
-            fc = elevation(src_, rx_, c);
-        } else {
-            a = c;
-            c = d;
-            fc = fd;
-            d = a + g * (b - a);
-            fd = elevation(src_, rx_, d);
+    double az = 0;
+    switch (phase_) {
+        case SCAN: {
+            const double t = t_ + dt_;
+            if (t > end_) {
+                if (up_) /* still up at the end of the span */
+                    start_top();
+                else
+                    done_ = true;
+                return;
+            }
+            const double el = elevation(src_, rx_, t, &az);
+            if (el <= -98.0) {
+                done_ = true;
+                return;
+            }
+            if (!up_ && el > 0.0) {
+                up_ = true;
+                ba_ = t_;
+                bb_ = t;
+                rising_ = true;
+                k_ = 0;
+                phase_ = BISECT;
+                best_t_ = t;
+                best_el_ = el;
+            } else if (up_ && el <= 0.0) {
+                ba_ = t_;
+                bb_ = t;
+                rising_ = false;
+                k_ = 0;
+                phase_ = BISECT;
+            } else if (up_ && el > best_el_) {
+                best_el_ = el;
+                best_t_ = t;
+            }
+            el_prev_ = el;
+            t_ = t;
+            return;
+        }
+        case BISECT: {
+            const double m = 0.5 * (ba_ + bb_);
+            const bool above = elevation(src_, rx_, m) > 0.0;
+            if (above == rising_)
+                bb_ = m;
+            else
+                ba_ = m;
+            if (++k_ >= 9) phase_ = CROSS_AZ;
+            return;
+        }
+        case CROSS_AZ: {
+            const double tc = 0.5 * (ba_ + bb_);
+            elevation(src_, rx_, tc, &az);
+            if (rising_) {
+                pass_.rise = tc;
+                pass_.rise_az = static_cast<float>(az);
+                phase_ = SCAN;
+            } else {
+                pass_.set = tc;
+                pass_.set_az = static_cast<float>(az);
+                start_top();
+            }
+            return;
+        }
+        case TOP_C:
+            gfc_ = elevation(src_, rx_, gc_);
+            phase_ = TOP_D;
+            return;
+        case TOP_D:
+            gfd_ = elevation(src_, rx_, gd_);
+            k_ = 0;
+            phase_ = TOP_ITER;
+            return;
+        case TOP_ITER:
+            if (gfc_ > gfd_) {
+                gb_ = gd_;
+                gd_ = gc_;
+                gfd_ = gfc_;
+                gc_ = gb_ - g * (gb_ - ga_);
+                gfc_ = elevation(src_, rx_, gc_);
+            } else {
+                ga_ = gc_;
+                gc_ = gd_;
+                gfc_ = gfd_;
+                gd_ = ga_ + g * (gb_ - ga_);
+                gfd_ = elevation(src_, rx_, gd_);
+            }
+            if (++k_ >= 10) phase_ = TOP_END;
+            return;
+        case TOP_END: {
+            const double t = 0.5 * (ga_ + gb_);
+            const double e = elevation(src_, rx_, t);
+            if (e > best_el_) {
+                best_el_ = e;
+                best_t_ = t;
+            }
+            pass_.top = best_t_;
+            pass_.max_el = static_cast<float>(best_el_);
+            found_ = true;
+            done_ = true;
+            return;
         }
     }
-    const double t = 0.5 * (a + b);
-    const double e = elevation(src_, rx_, t);
-    if (e > best_el_) {
-        best_el_ = e;
-        best_t_ = t;
-    }
-    pass_.top = best_t_;
-    pass_.max_el = static_cast<float>(best_el_);
 }
 
 bool PassFinder::step(int n) {
-    while (!done_ && n-- > 0) {
-        const double t = t_ + dt_;
-        if (t > end_) {
-            if (up_) { /* still up at the end of the span */
-                refine_top();
-                found_ = true;
-            }
-            done_ = true;
-            break;
-        }
-        double az = 0;
-        const double el = elevation(src_, rx_, t, &az);
-        if (el <= -98.0) {
-            done_ = true;
-            break;
-        }
-        if (!up_ && el > 0.0) {
-            up_ = true;
-            pass_.rise = crossing(t_, t, true);
-            elevation(src_, rx_, pass_.rise, &az);
-            pass_.rise_az = static_cast<float>(az);
-            best_t_ = t;
-            best_el_ = el;
-        } else if (up_ && el <= 0.0) {
-            pass_.set = crossing(t_, t, false);
-            elevation(src_, rx_, pass_.set, &az);
-            pass_.set_az = static_cast<float>(az);
-            refine_top();
-            found_ = true;
-            done_ = true;
-        } else if (up_ && el > best_el_) {
-            best_el_ = el;
-            best_t_ = t;
-        }
-        el_prev_ = el;
-        t_ = t;
-    }
+    while (!done_ && n-- > 0) unit();
     return done_;
 }
 
@@ -194,9 +233,9 @@ bool PassList::start_current() {
     return true;
 }
 
-bool PassList::step(int coarse_steps) {
+bool PassList::step(int units) {
     if (!busy_) return false;
-    if (!finder_.step(coarse_steps)) return true;
+    if (!finder_.step(units)) return true;
     ok_[idx_] = finder_.found();
     res_[idx_] = finder_.pass();
     done_[idx_] = true;

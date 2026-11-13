@@ -68,6 +68,8 @@ struct SolveWork {
     Measurement use[kMaxMeas];
     double a[5][6];
     double w[5][6];
+    /* set from another thread to abandon a solve (checked per satellite row) */
+    volatile uint8_t cancel;
 };
 
 /* One coarse-time least-squares solution with every measurement; residuals
@@ -77,7 +79,24 @@ bool coarse_time_solve(const Measurement* m, int n, const Vec3& prior, double t_
 /* With RAIM: drop the worst residual (or, if the solution is implausible,
  * the weakest satellite) until rms < max_rms (a third of it with only 6
  * satellites) with >= 6 satellites. */
-bool snapshot_fix(const Measurement* m, int n, const Vec3& prior, double t_prior_gps, Solution& out, SolveWork& w, double max_rms = 30.0);
+/* max_dt_s: largest accepted correction of the a priori time (the clock must be
+ * that close; a larger one is a wrong solution). */
+bool snapshot_fix(const Measurement* m, int n, const Vec3& prior, double t_prior_gps, Solution& out, SolveWork& w, double max_rms = 30.0, double max_dt_s = 60.0);
+
+/* Coarse fixes with ALMANAC orbits (no ephemeris file). Numbers from
+ * rf_test/gps/run_gps_alm_age.sh: almanacs 0.8 to 365 days old against a day of
+ * broadcast ephemerides (2020-12-06 and 2026-11-12), 60 receivers x 12 epochs.
+ * Older than kAlmMaxAgeDays the fix is refused (median error > 10 km, many
+ * solutions fail). */
+constexpr double kAlmMaxAgeDays = 30.0;
+constexpr double kAlmMaxDtS = 30.0;
+/* Typical line-of-sight range error (orbit + clock) of an almanac this old, m. */
+double almanac_range_err_m(double age_days);
+/* RAIM residual limit for snapshot_fix with almanac orbits, m (use it with
+ * max_dt_s = kAlmMaxDtS: the clock must be within ~30 s anyway). */
+double almanac_max_rms(double age_days);
+/* On-screen error estimate (about 2 fixes in 3 within it), m. */
+double almanac_err_m(double age_days, double hdop);
 
 }  // namespace ui::external_app::gps
 

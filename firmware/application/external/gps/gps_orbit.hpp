@@ -71,6 +71,21 @@ struct Orbit {
     uint8_t valid{0};
 };
 
+/* An almanac record kept beside the orbit table (56 bytes instead of 120), so
+ * a satellite whose ephemeris has gone stale falls back to its almanac.
+ * sqrt_a and toe stay double (a float sqrt_a would add ~3 km of along-track
+ * error after 30 days); the angles as float are within ~6 m. */
+struct AlmRec {
+    double sqrt_a{0};
+    double toe{0}; /* time of applicability, continuous GPS s */
+    float e{0}, i0{0}, omega0{0}, omega{0}, m0{0}, omega_dot{0}, af0{0}, af1{0};
+    uint8_t prn{0};
+    uint8_t health{0};
+    uint8_t valid{0};
+};
+AlmRec to_alm(const Orbit& o);
+Orbit from_alm(const AlmRec& a);
+
 /* Satellite position (ECEF at time t, metres) and clock offset (s, incl.
  * the relativistic term; minus TGD for ephemerides). t: continuous GPS s. */
 Vec3 sat_position(const Orbit& o, double t, double* clock_s = nullptr);

@@ -35,6 +35,7 @@
  * processing and lends the app M4 RAM for the orbit tables and the solver, so
  * they do not take the M0 heap. */
 
+#include "ch.h"
 #include "ui.hpp"
 #include "ui_widget.hpp"
 #include "ui_navigation.hpp"
@@ -80,11 +81,17 @@ class TextLines : public Widget {
     void paint(Painter& painter) override;
     void set(size_t row, const char* text, Color color);
     void clear();
+    /* begin(), set() the rows wanted, end(): rows not set are blanked. Only
+     * rows whose text or colour changed mark the widget dirty, so an
+     * unchanged screen is not repainted. */
+    void begin() { used_ = 0; }
+    void end();
 
    private:
     Line* lines_;
     size_t rows_;
     const Font* font_;
+    uint32_t used_{0};
 };
 
 /* Azimuth / elevation plot: north up, the horizon as the outer ring. */
@@ -102,24 +109,45 @@ class SkyPlot : public Widget {
         : Widget{r}, title_{title} {}
     SkyPlot(const SkyPlot&) = delete;
     SkyPlot& operator=(const SkyPlot&) = delete;
-    void clear() { n_ = 0; }
+    void clear() {
+        n_ = 0;
+        hash_ = 2166136261u;
+    }
     void add(int16_t az, int16_t el, const char* label, Color color, bool filled);
+    /* repaint only if the dots differ from what was last painted */
+    void commit() {
+        if (hash_ != shown_) {
+            shown_ = hash_;
+            set_dirty();
+        }
+    }
     void paint(Painter& painter) override;
 
    private:
     Dot dots_[kMax]{};
     size_t n_{0};
+    uint32_t hash_{2166136261u}, shown_{0};
     const char* title_; /* drawn top left, e.g. "GPS now" */
+};
+
+/* Where a satellite is seen from the saved position (the sky cache, filled
+ * one satellite per display frame: all views read it, none computes orbits). */
+struct SatGeo {
+    float az{0}, el{-90};
+    float rr{0}; /* range rate, m/s (Doppler = -rr / lambda) */
 };
 
 /* What lives in the M4 RAM PGPR lends (GpsRxStatusMessage::scratch). */
 struct GpsScratch {
     static constexpr size_t kMaxTle = 5;
-    Orbit orbits[32];
+    Orbit orbits[32]; /* per PRN: a fresh ephemeris, else the almanac */
+    AlmRec alm[32];   /* the almanac, kept for when an ephemeris goes stale */
     Tle tles[kMaxTle];
     Sgp4 search; /* pass search */
-    Sgp4 sky;    /* sky plot */
+    Sgp4 sky;    /* sky cache (TLE dots) */
     SolveWork solve;
+    SatGeo geo[32];
+    SatGeo tle_geo[kMaxTle];
 };
 
 class GpsView;
@@ -137,9 +165,10 @@ class OrbitLoader {
     OrbitLoader(const OrbitLoader&) = delete;
     OrbitLoader& operator=(const OrbitLoader&) = delete;
     ~OrbitLoader();
-    void start(double now_gps);
-    /* One frame's worth; true while there is more to do. */
-    bool step(GpsView& v);
+    void start(double now_gps, GpsView& v);
+    /* Lines until the frame's time slice (started at t0) is used, at least
+     * one; true while there is more to do. */
+    bool step(GpsView& v, systime_t t0);
     Stage stage() const { return stage_; }
 
    private:
@@ -156,7 +185,7 @@ class OrbitLoader {
     double now_gps_{0};
     YumaParser yuma_{0};
     RinexNavParser rinex_{};
-    bool open(Stage s);
+    bool open(Stage s, GpsView& v);
     void close();
     bool next_line();
     void take(GpsView& v);
@@ -166,10 +195,11 @@ class PassesView : public View {
    public:
     PassesView(GpsView& main, Rect r);
     void focus() override;
-    void refresh();        /* position / time / file lines */
-    void update_sky();     /* every few seconds */
-    void restart_passes(); /* new position, time or files */
-    void frame();          /* a slice of the pass search */
+    void refresh();           /* position / time / file lines */
+    void update_sky();        /* every few seconds */
+    void restart_passes();    /* new position, time or files */
+    void frame(systime_t t0); /* the pass search until the frame's slice is used */
+    void tick();              /* countdowns ("in 1h05") */
 
    private:
     GpsView& main_;
@@ -216,6 +246,8 @@ class HeardView : public View {
 class FixView : public View {
    public:
     FixView(GpsView& main, Rect r);
+    FixView(const FixView&) = delete;
+    FixView& operator=(const FixView&) = delete;
     void focus() override;
     void show();
 
@@ -225,6 +257,9 @@ class FixView : public View {
     Button button_fix_;
     Button button_save_;
     bool fix_running_shown_{false}; /* button_fix_ shows "Stop" */
+    const char* save_msg_{nullptr}; /* bottom row after "Save pos" */
+    Color save_color_{Color::white()};
+    void show_blocker(size_t row);
     static constexpr size_t kRows = 11;
     TextLines::Line lines_[kRows]{};
     TextLines text_;
@@ -284,14 +319,33 @@ class GpsView : public View {
     app_settings::SettingsManager settings_;
     int8_t bias_shown_{-1};  /* last antenna-power state shown (read only) */
     uint32_t tab_shown_{99}; /* tab whose content was last refreshed */
-    bool rx_on_{false};
+    bool rx_on_{false};      /* receiver enabled (stock path: applies the stored antenna power) */
 
     /* Lent M4 RAM: orbit tables, TLEs, propagator states, solver work. */
     GpsScratch* mem_{nullptr};
     uint8_t n_alm_{0}, n_eph_{0}, n_tle_{0};
     double eph_toe_newest_{0};
+    /* what the card held at the last load (for the plain-language states) */
+    bool alm_file_{false}, eph_file_{false}, tle_file_{false};
+    double alm_toa_{0};         /* the almanac's time of applicability, GPS s */
+    double eph_file_newest_{0}; /* newest GPS record in EPHEM.RNX, used or not */
     OrbitLoader loader_{};
     bool load_wanted_{true};
+    bool loading() const;
+    double alm_age_days() const; /* -1 without an almanac */
+    /* an ephemeris older than this (either way) is replaced by the almanac */
+    static constexpr double kEphMaxAgeS = 4 * 3600.0;
+    void refresh_orbits(); /* stale ephemerides -> almanac (not while solving) */
+
+    /* The sky cache (GpsScratch::geo): one satellite per frame, a new pass
+     * every few seconds; the views draw from it. */
+    uint8_t geo_idx_{0};
+    bool geo_ready_{false};  /* a complete pass since the last restart */
+    bool geo_active_{false}; /* a pass in progress */
+    uint32_t geo_started_{0};
+    void geo_restart();
+    void geo_step();
+    size_t geo_units() const { return 32u + 2u * n_tle_; }
 
     saved_position::Position pos_{};
     bool pos_valid_{false};
@@ -314,20 +368,55 @@ class GpsView : public View {
     uint32_t job_units_{0}; /* expected work units, for the progress */
     bool done_{false};      /* results of job_seq_ complete */
     bool solve_pending_{false};
+    Job want_job_{JOB_NONE}; /* a search waiting for the sky cache */
+    uint8_t want_kms_{0};
+    uint32_t status_sig_{0}; /* what the views last showed of the status */
 
     /* Last fix. */
+    enum FixMode : uint8_t { FIX_NONE,
+                             FIX_PRECISE,  /* every satellite from a fresh ephemeris */
+                             FIX_COARSE }; /* almanac orbits (bundled file) */
     Solution fix_{};
     bool fix_ok_{false};
     bool fix_tried_{false};
     uint32_t fix_fat_{0};
     uint8_t fix_heard_{0};
+    uint8_t fix_cand_{0}; /* heard with an orbit */
+    FixMode fix_mode_{FIX_NONE};
     double fix_eph_age_s_{0};
+    double fix_alm_age_d_{0};
+    uint32_t fix_est_m_{0};
+
+    /* The solver runs in a low-priority thread (0.2 s to seconds of soft
+     * double on the M0): touch and the display keep running meanwhile. */
+    Thread* solver_{nullptr};
+    volatile bool solver_done_{false};
+    int solve_n_{0};
+    double solve_t_{0};
+    Vec3 solve_prior_{};
+    double solve_max_rms_{30.0};
+    double solve_max_dt_{60.0};
+    Solution solve_out_{};
+    bool solve_ok_{false};
+    static msg_t solver_fn(void* arg);
+    void finish_solve();
+    bool solving() const { return solver_ != nullptr; }
 
     double now_unix() const;   /* UTC from the RTC and the zone */
     double local_unix() const; /* the clock as shown (incl. Mayhem DST), as if it were UTC */
     double now_gps() const { return unix_to_gps(now_unix()); }
     void load_position();
     void start_load();
+    /* Why a fix cannot be tried now (FixView explains it), or OK. */
+    enum Blocker : uint8_t { BLOCK_NONE,
+                             BLOCK_STARTING,
+                             BLOCK_LOADING,
+                             BLOCK_NO_POS,
+                             BLOCK_NO_ORBITS,
+                             BLOCK_ALM_OLD };
+    Blocker fix_blocker() const;
+    /* Start now if the sky cache is ready, else as soon as it is. */
+    void request_search(Job job, uint8_t k_ms);
     /* Start a snapshot search: assisted (visible PRNs, predicted Doppler)
      * when orbits, a position and the time allow, else all 32 PRNs. */
     bool start_search(Job job, uint8_t k_ms);
@@ -336,7 +425,7 @@ class GpsView : public View {
     bool searching() const { return job_ != JOB_NONE && !done_; }
     bool assisted_possible() const;
     void on_status(const GpsRxStatusMessage& m);
-    void solve_fix();
+    void solve_fix(); /* starts the solver thread */
     int progress_pct() const;
 
     Labels labels_{
@@ -358,7 +447,7 @@ class GpsView : public View {
     TabView tab_view_;
 
     SignalToken tick_token_{};
-    uint8_t sky_tick_{0};
+    uint16_t sky_tick_{0};
 
     MessageHandlerRegistration message_handler_frame_sync{
         Message::ID::DisplayFrameSync,

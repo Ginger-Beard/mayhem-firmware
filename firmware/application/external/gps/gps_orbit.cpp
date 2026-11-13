@@ -142,10 +142,51 @@ double parse_double(const char* s, size_t n) {
     return neg ? -v : v;
 }
 
+AlmRec to_alm(const Orbit& o) {
+    AlmRec a;
+    a.sqrt_a = o.sqrt_a;
+    a.toe = o.toe;
+    a.e = static_cast<float>(o.e);
+    a.i0 = static_cast<float>(o.i0);
+    a.omega0 = static_cast<float>(o.omega0);
+    a.omega = static_cast<float>(o.omega);
+    a.m0 = static_cast<float>(o.m0);
+    a.omega_dot = o.omega_dot;
+    a.af0 = o.af0;
+    a.af1 = o.af1;
+    a.prn = o.prn;
+    a.health = o.health;
+    a.valid = o.valid;
+    return a;
+}
+
+Orbit from_alm(const AlmRec& a) {
+    Orbit o;
+    o.sqrt_a = a.sqrt_a;
+    o.toe = o.toc = a.toe;
+    o.e = a.e;
+    o.i0 = a.i0;
+    o.omega0 = a.omega0;
+    o.omega = a.omega;
+    o.m0 = a.m0;
+    o.omega_dot = a.omega_dot;
+    o.af0 = a.af0;
+    o.af1 = a.af1;
+    o.prn = a.prn;
+    o.health = a.health;
+    o.ephemeris = 0;
+    o.valid = a.valid;
+    return o;
+}
+
 Vec3 sat_position(const Orbit& o, double t, double* clock_s) {
     const double a = o.sqrt_a * o.sqrt_a;
     const double n = std::sqrt(kMu / (a * a * a)) + o.dn;
-    const double tk = fold_week(t - o.toe);
+    /* toe is continuous GPS time: fold only an ephemeris (valid for hours; its
+     * toc/toe weeks may differ at a week boundary). An almanac is used for
+     * weeks or months: folding to +-3.5 days would put the satellite ~14 deg
+     * off along its orbit for every whole week of age. */
+    const double tk = o.ephemeris ? fold_week(t - o.toe) : t - o.toe;
     const double m = o.m0 + n * tk;
     const double ea = eccentric_anomaly(m, o.e);
     const double sin_e = std::sin(ea), cos_e = std::cos(ea);
@@ -164,7 +205,7 @@ Vec3 sat_position(const Orbit& o, double t, double* clock_s) {
     const double om = o.omega0 + (o.omega_dot - kOmegaE) * tk - kOmegaE * toe_sow;
     const double co = std::cos(om), so = std::sin(om), ci = std::cos(i), si = std::sin(i);
     if (clock_s) {
-        const double dt = fold_week(t - o.toc);
+        const double dt = o.ephemeris ? fold_week(t - o.toc) : t - o.toc;
         *clock_s = o.af0 + o.af1 * dt + o.af2 * dt * dt + kFRel * o.e * o.sqrt_a * sin_e - (o.ephemeris ? o.tgd : 0.0f);
     }
     return {xp * co - yp * ci * so, xp * so + yp * ci * co, yp * si};

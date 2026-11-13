@@ -62,7 +62,10 @@ class PassFinder {
    public:
     /* Search [t0, t0 + span] with a coarse step (s): 30 for LEO, 120 for GPS. */
     void start(const SatSource& src, const Observer& obs, double t0, double span, double step);
-    /* Advance up to n coarse steps; true when the search is over. */
+    /* Advance up to n work units (one elevation each: a coarse step, one
+     * bisection or golden-section iteration); true when the search is over.
+     * A unit is one SGP4/Kepler evaluation, so a caller can bound the time of
+     * a slice (an M0 frame) whatever the phase of the search. */
     bool step(int n);
     bool done() const { return done_; }
     bool found() const { return found_; }
@@ -78,8 +81,22 @@ class PassFinder {
     double best_t_{0}, best_el_{-99};
     bool up_{false}, done_{true}, found_{false};
     Pass pass_{};
-    double crossing(double a, double b, bool rising);
-    void refine_top();
+    /* resumable sub-searches (each unit does one elevation) */
+    enum Phase : uint8_t { SCAN,
+                           BISECT,   /* horizon crossing between ba_ and bb_ */
+                           CROSS_AZ, /* azimuth at the crossing */
+                           TOP_C,    /* golden section: first two samples */
+                           TOP_D,
+                           TOP_ITER,
+                           TOP_END };
+    Phase phase_{SCAN};
+    bool rising_{false};
+    uint8_t k_{0};
+    double ba_{0}, bb_{0};                 /* bisection bracket */
+    double ga_{0}, gb_{0}, gc_{0}, gd_{0}; /* golden-section bracket and samples */
+    double gfc_{0}, gfd_{0};
+    void unit();
+    void start_top();
 };
 
 /* The pass list of the Passes tab: the next pass of up to kMax TLE
@@ -94,8 +111,9 @@ class PassList {
     /* work: the propagator state used for the search (kept by the caller) */
     void start(const Tle* tles, size_t n, Sgp4* work, const Vec3& rx, double now);
     void stop() { busy_ = false; }
-    /* up to `coarse_steps` steps of the pass search; false when all done */
-    bool step(int coarse_steps);
+    /* up to `units` work units of the pass search (PassFinder::step; starting
+     * the next satellite's propagator is one unit too); false when all done */
+    bool step(int units);
     bool busy() const { return busy_; }
     size_t count() const { return n_; }
     bool found(size_t i) const { return i < n_ && ok_[i]; }

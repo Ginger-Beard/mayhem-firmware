@@ -111,6 +111,7 @@ bool coarse_time_solve(const Measurement* m, int n, const Vec3& prior, double t_
             for (auto& v : row) v = 0;
         double ss = 0;
         for (int i = 0; i < n; i++) {
+            if (w.cancel) return false;
             double t_tx;
             Vec3 s;
             const double rho = geometric_range(*m[i].orbit, x, t, &t_tx, &s);
@@ -181,16 +182,16 @@ bool coarse_time_solve(const Measurement* m, int n, const Vec3& prior, double t_
     return true;
 }
 
-bool snapshot_fix(const Measurement* m, int n, const Vec3& prior, double t_prior, Solution& out, SolveWork& w, double max_rms) {
+bool snapshot_fix(const Measurement* m, int n, const Vec3& prior, double t_prior, Solution& out, SolveWork& w, double max_rms, double max_dt_s) {
     Measurement* use = w.use;
     if (n > kMaxMeas) n = kMaxMeas;
     for (int i = 0; i < n; i++) use[i] = m[i];
     out = Solution{};
-    while (n >= 6) {
+    while (n >= 6 && !w.cancel) {
         Solution s;
         const bool ok = coarse_time_solve(use, n, prior, t_prior, s, w);
         const Vec3 d{s.pos.x - prior.x, s.pos.y - prior.y, s.pos.z - prior.z};
-        const bool plausible = ok && norm(d) < 150e3 && std::fabs(s.time_corr_s) < 60.0;
+        const bool plausible = ok && norm(d) < 150e3 && std::fabs(s.time_corr_s) < max_dt_s;
         /* with 6 satellites only one residual degree of freedom is left: be stricter */
         const double limit = n >= 7 ? max_rms : max_rms / 3.0;
         if (plausible && s.resid_rms_m < limit) {
@@ -205,6 +206,29 @@ bool snapshot_fix(const Measurement* m, int n, const Vec3& prior, double t_prior
         n--;
     }
     return false;
+}
+
+double almanac_range_err_m(double age_days) {
+    const double a = age_days < 0 ? 0 : age_days;
+    return 450.0 + 60.0 * a + 2.5 * a * a;
+}
+
+double almanac_max_rms(double age_days) {
+    return 2.5 * almanac_range_err_m(age_days);
+}
+
+double almanac_err_m(double age_days, double hdop) {
+    /* horizontal error / HDOP at the 68th percentile, by age (7 heard satellites) */
+    static constexpr double kAge[] = {0, 1, 7, 14, 30};
+    static constexpr double kK[] = {400, 450, 1800, 5500, 25000};
+    const double a = age_days < 0 ? 0 : age_days;
+    double k = kK[4];
+    for (int i = 0; i < 4; i++)
+        if (a <= kAge[i + 1]) {
+            k = kK[i] + (kK[i + 1] - kK[i]) * (a - kAge[i]) / (kAge[i + 1] - kAge[i]);
+            break;
+        }
+    return k * (hdop > 0.5 ? hdop : 0.5);
 }
 
 }  // namespace ui::external_app::gps
