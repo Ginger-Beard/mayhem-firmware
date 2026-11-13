@@ -23,13 +23,17 @@
 #define __UI_GPS_H__
 
 /* GPS: the HackRF Pro as a GPS L1 C/A receiver, receive only.
- *   Fix     position from a snapshot + an ephemeris file on the SD card, or
- *           (later) autonomous; Save position -> /SETTINGS/position.ini
- *   Heard   satellites received: PRN, C/N0, Doppler
+ *   Fix     position from a 20 ms snapshot + an ephemeris file on the SD card
+ *           (coarse-time navigation); "Autonomous" is not available yet.
+ *           Save writes /SETTINGS/position.ini (source "HackRF GPS").
+ *   Heard   satellites received in a snapshot: PRN, C/N0, Doppler, and a sky
+ *           plot when orbits and a position are known
  *   Passes  predicted passes from orbit files (no reception): GPS almanac /
  *           ephemeris and TLE element sets (ISS ...), with a sky plot
  * Files: /GPS/ALMANAC.TXT (YUMA), /GPS/EPHEM.RNX (RINEX 2/3 navigation),
- * /GPS/TLE.TXT (sdcard/GPS/README.TXT). */
+ * /GPS/TLE.TXT (sdcard/GPS/README.TXT). The baseband (PGPR) does the signal
+ * processing and lends the app M4 RAM for the orbit tables and the solver, so
+ * they do not take the M0 heap. */
 
 #include "ui.hpp"
 #include "ui_widget.hpp"
@@ -38,14 +42,17 @@
 #include "ui_tabview.hpp"
 #include "app_settings.hpp"
 #include "saved_position.hpp"
+#include "radio_state.hpp"
 #include "message.hpp"
 
 #ifdef PRALINE
 #include "ui_geomap.hpp"
 #include "file.hpp"
+#include "gps_rx_result.hpp"
 #include "gps_orbit.hpp"
 #include "gps_sgp4.hpp"
 #include "gps_pass.hpp"
+#include "gps_solve.hpp"
 #endif
 
 namespace ui::external_app::gps {
@@ -61,7 +68,7 @@ inline constexpr Bitmap bitmap_icon_gps{{16, 16}, bitmap_icon_gps_data};
 /* Lines of text painted from char buffers (no std::string per line). */
 class TextLines : public Widget {
    public:
-    static constexpr size_t kCols = 40;
+    static constexpr size_t kCols = 30;
     struct Line {
         char text[kCols + 1];
         Color color;
@@ -72,6 +79,7 @@ class TextLines : public Widget {
     TextLines& operator=(const TextLines&) = delete;
     void paint(Painter& painter) override;
     void set(size_t row, const char* text, Color color);
+    void clear();
 
    private:
     Line* lines_;
@@ -89,7 +97,7 @@ class SkyPlot : public Widget {
         Color color;
         bool filled;
     };
-    static constexpr size_t kMax = 40;
+    static constexpr size_t kMax = 32;
     explicit SkyPlot(Rect r)
         : Widget{r} {}
     void clear() { n_ = 0; }
@@ -99,6 +107,16 @@ class SkyPlot : public Widget {
    private:
     Dot dots_[kMax]{};
     size_t n_{0};
+};
+
+/* What lives in the M4 RAM PGPR lends (GpsRxStatusMessage::scratch). */
+struct GpsScratch {
+    static constexpr size_t kMaxTle = 5;
+    Orbit orbits[32];
+    Tle tles[kMaxTle];
+    Sgp4 search; /* pass search */
+    Sgp4 sky;    /* sky plot */
+    SolveWork solve;
 };
 
 class GpsView;
@@ -166,15 +184,7 @@ class PassesView : public View {
     static constexpr size_t kPassRows = 5;
     TextLines::Line pass_lines_[kPassRows]{};
     TextLines text_passes_;
-    /* pass search over the TLE satellites, one at a time */
     PassFinder finder_{};
-    Sgp4 sgp4_{};
-    Sgp4 sky_sgp4_{}; /* the sky plot's own (the search keeps sgp4_) */
-    struct Vis {
-        uint8_t prn;
-        int16_t el, az;
-    };
-    Vis vis_[32]{}; /* sky list, off the stack */
     Pass results_[kPassRows]{};
     bool result_ok_[kPassRows]{};
     uint8_t search_idx_{0};
@@ -186,28 +196,35 @@ class HeardView : public View {
    public:
     HeardView(GpsView& main, Rect r);
     void focus() override;
+    void show(); /* status / results changed */
 
    private:
     GpsView& main_;
-    static constexpr size_t kRows = 15;
-    TextLines::Line lines_[kRows]{};
-    TextLines text_;
-    Button button_start_;
+    OptionsField field_depth_;
+    Button button_search_;
+    static constexpr size_t kStatusRows = 2;
+    TextLines::Line status_[kStatusRows]{};
+    TextLines text_status_;
+    static constexpr size_t kListRows = 15;
+    TextLines::Line list_[kListRows]{};
+    TextLines text_list_;
+    SkyPlot sky_;
 };
 
 class FixView : public View {
    public:
     FixView(GpsView& main, Rect r);
     void focus() override;
+    void show();
 
    private:
     GpsView& main_;
     OptionsField field_method_;
-    static constexpr size_t kRows = 12;
+    Button button_fix_;
+    Button button_save_;
+    static constexpr size_t kRows = 11;
     TextLines::Line lines_[kRows]{};
     TextLines text_;
-    Button button_save_;
-    void show_method();
 };
 
 /* Manual position entry (degrees / minutes / seconds, the stock GeoPos
@@ -243,31 +260,68 @@ class GpsView : public View {
     friend class FixView;
     friend class PositionView;
 
+    enum Job : uint8_t { JOB_NONE,
+                         JOB_HEARD,
+                         JOB_FIX };
+
     NavigationView& nav_;
+    RxRadioState radio_state_{
+        1575420000 /* GPS L1 */,
+        1750000 /* baseband filter */,
+        2048000 /* 2048 samples = 1 ms = one DMA buffer */,
+        ReceiverModel::Mode::WidebandFMAudio};
     int32_t utc_off_min_{0}; /* RTC minus UTC, minutes (saved) */
     uint32_t tab_{2};        /* last tab (saved) */
+    uint32_t depth_{1};      /* Heard snapshot: 0 = 10 ms, 1 = 20 ms (saved) */
     app_settings::SettingsManager settings_;
     bool bias_was_{false};
+    bool rx_on_{false};
 
-    /* Orbit data (from the SD card files): one slot per PRN, the best of
-     * almanac / ephemeris; TLE element sets for other satellites. */
-    Orbit orbits_[32]{};
-    uint8_t n_alm_{0}, n_eph_{0};
-    int32_t alm_week_{0};
+    /* Lent M4 RAM: orbit tables, TLEs, propagator states, solver work. */
+    GpsScratch* mem_{nullptr};
+    uint8_t n_alm_{0}, n_eph_{0}, n_tle_{0};
     double eph_toe_newest_{0};
-    static constexpr size_t kMaxTle = 5;
-    Tle tles_[kMaxTle]{};
-    uint8_t n_tle_{0};
     OrbitLoader loader_{};
-    bool load_error_{false};
+    bool load_wanted_{true};
 
     saved_position::Position pos_{};
     bool pos_valid_{false};
     Vec3 rx_{};
 
+    /* Baseband status (copied from GpsRxStatusMessage) and the current search. */
+    struct Status {
+        uint8_t state{GpsRxStatusMessage::IDLE};
+        uint8_t done_prn{0}, total_prn{0}, k_ms{0};
+        uint16_t rms_x10{0}, clip_permille{0};
+        uint32_t seq{0}, units{0}, unit_cycles{0};
+    } status_{};
+    const gps_rx::Result* results_{nullptr};
+    Job job_{JOB_NONE};
+    bool awaiting_seq_{false};
+    uint32_t job_seq_{0};
+    uint32_t job_units_{0}; /* expected work units, for the progress */
+    bool done_{false};      /* results of job_seq_ complete */
+    bool solve_pending_{false};
+
+    /* Last fix. */
+    Solution fix_{};
+    bool fix_ok_{false};
+    bool fix_tried_{false};
+    uint32_t fix_fat_{0};
+    uint8_t fix_heard_{0};
+    double fix_eph_age_s_{0};
+
     double now_unix() const; /* UTC from the RTC and the offset */
+    double now_gps() const { return unix_to_gps(now_unix()); }
     void load_position();
     void start_load();
+    /* Start a snapshot search: assisted (visible PRNs, predicted Doppler)
+     * when orbits, a position and the time allow, else all 32 PRNs. */
+    bool start_search(Job job, uint8_t k_ms);
+    bool assisted_possible() const;
+    void on_status(const GpsRxStatusMessage& m);
+    void solve_fix();
+    int progress_pct() const;
 
     Labels labels_{
         {{UI_POS_X(0), UI_POS_Y(0)}, "LNA:   VGA:   AMP:", Theme::getInstance()->fg_light->foreground}};
@@ -291,6 +345,11 @@ class GpsView : public View {
         Message::ID::DisplayFrameSync,
         [this](const Message* const) {
             this->on_frame();
+        }};
+    MessageHandlerRegistration message_handler_status{
+        Message::ID::GpsRxStatus,
+        [this](const Message* const p) {
+            this->on_status(*static_cast<const GpsRxStatusMessage*>(p));
         }};
     void on_frame();
     void on_tick_second();

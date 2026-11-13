@@ -26,6 +26,7 @@
 #include "theme.hpp"
 
 #ifdef PRALINE
+#include "baseband_api.hpp"
 #include "gps_fmt.hpp"
 
 #include <cmath>
@@ -42,6 +43,13 @@ namespace {
 
 constexpr int kLoadLinesPerFrame = 60; /* a few KB of file per display frame */
 constexpr double kSearchSpan = 86400.0;
+constexpr int kStepsPerFrame = 12; /* pass search coarse steps per frame */
+constexpr double kL1Lambda = kC / 1575.42e6;
+constexpr uint8_t kAssistedHalfBins = 6; /* +-3 kHz around the predicted Doppler: TCXO <= ~1.5 ppm */
+constexpr uint8_t kColdHalfBins = 14;    /* +-7 kHz */
+constexpr double kMinFixEl = 5.0;
+
+static_assert(sizeof(GpsScratch) <= GpsRxStatusMessage::kScratchSize, "GpsScratch: raise GpsRxStatusMessage::kScratchSize");
 
 const char* tle_short(const Tle& t, char* buf, size_t n) {
     size_t i = 0;
@@ -62,6 +70,11 @@ void put_span(Fmt& f, double s) {
         f.u(v).c('s');
 }
 
+/* Degrees with 5 decimals from 1e-7 degrees (about 1 m). */
+void put_deg(Fmt& f, int32_t e7) {
+    f.fixed(e7 / 100, 5);
+}
+
 }  // namespace
 
 /* ---------------------------------------------------------------- widgets */
@@ -74,6 +87,10 @@ void TextLines::set(size_t row, const char* text, Color color) {
     l.text[kCols] = 0;
     l.color = color;
     set_dirty();
+}
+
+void TextLines::clear() {
+    for (size_t i = 0; i < rows_; i++) set(i, "", Color::white());
 }
 
 void TextLines::paint(Painter& painter) {
@@ -171,8 +188,7 @@ bool OrbitLoader::open(Stage s) {
 
 void OrbitLoader::start(double now_gps) {
     now_gps_ = now_gps;
-    const int32_t week = static_cast<int32_t>(now_gps / kWeekS);
-    yuma_.reset(week);
+    yuma_.reset(static_cast<int32_t>(now_gps / kWeekS));
     rinex_.reset();
     stage_ = IDLE;
     if (!open(ALMANAC) && !open(EPHEMERIS) && !open(TLES)) stage_ = DONE;
@@ -203,19 +219,19 @@ bool OrbitLoader::next_line() {
 }
 
 void OrbitLoader::take(GpsView& v) {
+    if (!v.mem_) return;
     Orbit o;
     if (stage_ == ALMANAC) {
         if (yuma_.line(line_, o)) {
-            Orbit& slot = v.orbits_[o.prn - 1];
+            Orbit& slot = v.mem_->orbits[o.prn - 1];
             if (!slot.valid || (!slot.ephemeris && std::fabs(o.toe - now_gps_) < std::fabs(slot.toe - now_gps_))) {
                 if (!slot.valid) v.n_alm_++;
                 slot = o;
-                v.alm_week_ = static_cast<int32_t>(o.toe / kWeekS);
             }
         }
     } else if (stage_ == EPHEMERIS) {
         if (rinex_.line(line_, o) && std::fabs(o.toe - now_gps_) < 4 * 3600.0) {
-            Orbit& slot = v.orbits_[o.prn - 1];
+            Orbit& slot = v.mem_->orbits[o.prn - 1];
             const bool better = !slot.valid || !slot.ephemeris ||
                                 (slot.health != 0 && o.health == 0) ||
                                 (o.health == slot.health && std::fabs(o.toe - now_gps_) < std::fabs(slot.toe - now_gps_));
@@ -232,8 +248,8 @@ void OrbitLoader::take(GpsView& v) {
             tle_state_ = 1;
         } else if (line_[0] == '2' && line_[1] == ' ' && n >= 69 && tle_state_ == 1) {
             tle_state_ = 0;
-            if (v.n_tle_ < GpsView::kMaxTle) {
-                Tle& t = v.tles_[v.n_tle_];
+            if (v.n_tle_ < GpsScratch::kMaxTle) {
+                Tle& t = v.mem_->tles[v.n_tle_];
                 if (parse_tle(tle_l1_, line_, t)) {
                     std::strncpy(t.name, tle_name_, sizeof(t.name) - 1);
                     if (!t.name[0]) Fmt{t.name, sizeof(t.name)}.u(t.catnr);
@@ -313,7 +329,9 @@ void PassesView::refresh() {
     {
         Fmt f{b, sizeof(b)};
         if (main_.pos_valid_) {
-            f.fixed(main_.pos_.lat_e7 / 1000, 4).c(' ').fixed(main_.pos_.lon_e7 / 1000, 4);
+            put_deg(f, main_.pos_.lat_e7);
+            f.c(' ');
+            put_deg(f, main_.pos_.lon_e7);
             text_head_.set(0, b, white);
         } else {
             text_head_.set(0, "No position: Pos", yellow);
@@ -332,7 +350,9 @@ void PassesView::refresh() {
     {
         Fmt f{b, sizeof(b)};
         const auto st = main_.loader_.stage();
-        if (st != OrbitLoader::DONE && st != OrbitLoader::IDLE) {
+        if (!main_.mem_) {
+            text_head_.set(2, "Starting...", yellow);
+        } else if (st != OrbitLoader::DONE && st != OrbitLoader::IDLE) {
             f.s(st == OrbitLoader::ALMANAC ? "Reading ALMANAC" : (st == OrbitLoader::EPHEMERIS ? "Reading EPHEM" : "Reading TLE"));
             text_head_.set(2, b, yellow);
         } else if (!main_.n_alm_ && !main_.n_eph_ && !main_.n_tle_) {
@@ -346,58 +366,49 @@ void PassesView::refresh() {
 
 void PassesView::update_sky() {
     sky_.clear();
-    for (size_t i = 0; i < kSideRows; i++) text_side_.set(i, "", Color::white());
-    if (!main_.pos_valid_) {
+    text_side_.clear();
+    if (!main_.pos_valid_ || !main_.mem_) {
         sky_.set_dirty();
-        text_side_.set(0, "Set a position", Color::yellow());
+        text_side_.set(0, main_.pos_valid_ ? "" : "Set a position", Color::yellow());
         return;
     }
     const double t = main_.now_unix();
     const double tg = unix_to_gps(t);
-    /* GPS satellites above the horizon, highest first in the side list */
-    Vis* vis = vis_;
+    char b[TextLines::kCols + 1];
+    /* GPS satellites above the horizon; the side list in PRN order */
     size_t nv = 0;
     for (size_t i = 0; i < 32; i++) {
-        const Orbit& o = main_.orbits_[i];
+        const Orbit& o = main_.mem_->orbits[i];
         if (!o.valid || o.health) continue;
         double az, el;
         az_el(main_.rx_, sat_position(o, tg), az, el);
         if (el < 0) continue;
-        vis[nv++] = {o.prn, static_cast<int16_t>(el), static_cast<int16_t>(az)};
-    }
-    for (size_t a = 1; a < nv; a++)
-        for (size_t b = a; b > 0 && vis[b].el > vis[b - 1].el; b--) {
-            const Vis tmp = vis[b];
-            vis[b] = vis[b - 1];
-            vis[b - 1] = tmp;
+        char lbl[4];
+        Fmt{lbl, sizeof(lbl)}.u(o.prn);
+        sky_.add(static_cast<int16_t>(az), static_cast<int16_t>(el), lbl, Color::green(), true);
+        nv++;
+        if (nv + 1 < kSideRows) {
+            Fmt f{b, sizeof(b)};
+            f.c('G').d2(o.prn).s(" el").u(static_cast<uint32_t>(el), 2).s(" az").u(static_cast<uint32_t>(az), 3);
+            text_side_.set(nv, b, Color::white());
         }
-    char b[TextLines::kCols + 1];
+    }
     {
         Fmt f{b, sizeof(b)};
         f.s("GPS up ").u(static_cast<uint32_t>(nv));
         text_side_.set(0, b, Color::light_grey());
     }
-    for (size_t k = 0; k < nv; k++) {
-        char lbl[4];
-        Fmt{lbl, sizeof(lbl)}.u(vis[k].prn);
-        sky_.add(vis[k].az, vis[k].el, lbl, Color::green(), true);
-        if (k + 2 < kSideRows) {
-            Fmt f{b, sizeof(b)};
-            f.c('G').d2(vis[k].prn).s(" el").u(static_cast<uint32_t>(vis[k].el), 2).s(" az").u(static_cast<uint32_t>(vis[k].az), 3);
-            text_side_.set(k + 1, b, Color::white());
-        }
-    }
     /* TLE satellites (orange) if up */
     for (size_t i = 0; i < main_.n_tle_; i++) {
-        if (!sgp4_init(main_.tles_[i], sky_sgp4_)) continue;
+        if (!sgp4_init(main_.mem_->tles[i], main_.mem_->sky)) continue;
         SatSource src;
         src.kind = SatSource::SGP4;
-        src.sgp4 = &sky_sgp4_;
+        src.sgp4 = &main_.mem_->sky;
         double az = 0;
         const double el = elevation(src, main_.rx_, t, &az);
         if (el < 0) continue;
         char nm[9];
-        tle_short(main_.tles_[i], nm, 4);
+        tle_short(main_.mem_->tles[i], nm, 4);
         sky_.add(static_cast<int16_t>(az), static_cast<int16_t>(el), nm, Color::orange(), false);
     }
     sky_.set_dirty();
@@ -407,27 +418,29 @@ void PassesView::restart_passes() {
     for (auto& ok : result_ok_) ok = false;
     search_idx_ = 0;
     searching_ = false;
-    if (!main_.pos_valid_ || !main_.n_tle_) {
+    if (!main_.pos_valid_ || !main_.n_tle_ || !main_.mem_) {
         show_passes();
         return;
     }
-    if (sgp4_init(main_.tles_[0], sgp4_)) {
-        SatSource src;
-        src.kind = SatSource::SGP4;
-        src.sgp4 = &sgp4_;
-        finder_.start(src, main_.rx_, main_.now_unix(), kSearchSpan, 30.0);
-        searching_ = true;
-    } else {
-        search_idx_ = 1;
-        searching_ = search_idx_ < main_.n_tle_;
+    search_idx_ = 0;
+    while (search_idx_ < main_.n_tle_ && search_idx_ < kPassRows) {
+        if (sgp4_init(main_.mem_->tles[search_idx_], main_.mem_->search)) {
+            SatSource src;
+            src.kind = SatSource::SGP4;
+            src.sgp4 = &main_.mem_->search;
+            finder_.start(src, main_.rx_, main_.now_unix(), kSearchSpan, 30.0);
+            searching_ = true;
+            break;
+        }
+        search_idx_++;
     }
     show_passes();
 }
 
 void PassesView::frame() {
-    if (!searching_) return;
+    if (!searching_ || !main_.mem_) return;
     if (!finder_.done()) {
-        finder_.step(12);
+        finder_.step(kStepsPerFrame);
         if (!finder_.done()) return;
     }
     if (search_idx_ < kPassRows) {
@@ -436,10 +449,10 @@ void PassesView::frame() {
     }
     search_idx_++;
     while (search_idx_ < main_.n_tle_ && search_idx_ < kPassRows) {
-        if (sgp4_init(main_.tles_[search_idx_], sgp4_)) {
+        if (sgp4_init(main_.mem_->tles[search_idx_], main_.mem_->search)) {
             SatSource src;
             src.kind = SatSource::SGP4;
-            src.sgp4 = &sgp4_;
+            src.sgp4 = &main_.mem_->search;
             finder_.start(src, main_.rx_, main_.now_unix(), kSearchSpan, 30.0);
             show_passes();
             return;
@@ -460,7 +473,7 @@ void PassesView::show_passes() {
         }
         Fmt f{b, sizeof(b)};
         char nm[9];
-        f.s(tle_short(main_.tles_[i], nm, sizeof(nm))).pad(9);
+        f.s(tle_short(main_.mem_->tles[i], nm, sizeof(nm))).pad(9);
         if (!main_.pos_valid_) {
             f.s("no position");
         } else if (searching_ && i >= search_idx_) {
@@ -488,15 +501,128 @@ void PassesView::show_passes() {
 HeardView::HeardView(GpsView& main, Rect r)
     : View{r},
       main_{main},
-      text_{{0, 0, UI_POS_MAXWIDTH, UI_POS_HEIGHT(kRows)}, lines_, kRows, &ui::font::fixed_8x16},
-      button_start_{{0, UI_POS_Y(kRows), UI_POS_WIDTH_PERCENT(50), UI_POS_HEIGHT(1)}, "Search"} {
-    add_children({&text_, &button_start_});
-    text_.set(0, "Satellite search: not in", Color::yellow());
-    text_.set(1, "this build yet (stage 2).", Color::yellow());
+      field_depth_{{UI_POS_X(0), 0}, 10, {{"Quick 10ms", 0}, {"Deep 20ms", 1}}},
+      button_search_{{UI_POS_X(20), 0, UI_POS_WIDTH(10), UI_POS_HEIGHT(1)}, "Search"},
+      text_status_{{0, UI_POS_Y(1), UI_POS_MAXWIDTH, UI_POS_HEIGHT(kStatusRows)}, status_, kStatusRows, &ui::font::fixed_8x16},
+      text_list_{{0, UI_POS_Y(3) + 2, 118, 8 * kListRows}, list_, kListRows, &ui::font::fixed_5x8},
+      sky_{{120, UI_POS_Y(3) + 2, 120, 120}} {
+    add_children({&field_depth_, &button_search_, &text_status_, &text_list_, &sky_});
+    field_depth_.set_selected_index(main_.depth_ ? 1 : 0, false);
+    field_depth_.on_change = [this](size_t i, OptionsField::value_t) {
+        main_.depth_ = static_cast<uint32_t>(i);
+    };
+    button_search_.on_select = [this](Button&) {
+        main_.start_search(GpsView::JOB_HEARD, main_.depth_ ? 20 : 10);
+        show();
+    };
+    show();
 }
 
 void HeardView::focus() {
-    button_start_.focus();
+    button_search_.focus();
+}
+
+void HeardView::show() {
+    char b[TextLines::kCols + 1];
+    const auto& st = main_.status_;
+    const bool mine = main_.job_ == GpsView::JOB_HEARD || main_.job_ == GpsView::JOB_FIX;
+    /* line 0: what is going on */
+    {
+        Fmt f{b, sizeof(b)};
+        Color c = Color::white();
+        if (!main_.mem_) {
+            f.s("Baseband starting...");
+            c = Color::yellow();
+        } else if (!mine) {
+            f.s(main_.assisted_possible() ? "Search: assisted" : "Search: all 32 PRNs");
+            c = Color::light_grey();
+        } else if (!main_.done_) {
+            if (st.state == GpsRxStatusMessage::CAPTURING || main_.awaiting_seq_)
+                f.s("Capturing ").u(st.k_ms).s(" ms...");
+            else
+                f.s(st.state == GpsRxStatusMessage::REFINING ? "Refining " : "Searching ").u(st.done_prn).c('/').u(st.total_prn).c(' ').u(static_cast<uint32_t>(main_.progress_pct())).c('%');
+            c = Color::yellow();
+        } else {
+            int n = 0;
+            for (int p = 0; p < 32; p++) n += main_.results_ && main_.results_[p].detected;
+            f.s("Heard ").u(static_cast<uint32_t>(n)).s(" of ").u(st.total_prn).s(" searched");
+            c = n ? Color::green() : Color::yellow();
+        }
+        text_status_.set(0, b, c);
+    }
+    /* line 1: noise level and gain advice */
+    if (mine && st.rms_x10) {
+        Fmt f{b, sizeof(b)};
+        f.s("Noise ").fixed(st.rms_x10, 1).s(" clip ").fixed(st.clip_permille, 1).c('%');
+        Color c = Color::light_grey();
+        if (st.clip_permille > 10) {
+            f.s(" gain-");
+            c = Color::red();
+        } else if (st.rms_x10 < 30) {
+            f.s(" gain+");
+            c = Color::yellow();
+        }
+        if (st.unit_cycles) f.s(" ").u(st.unit_cycles / 20000u).s("0us"); /* M4 time of one work unit, 10 us steps */
+        text_status_.set(1, b, c);
+    } else {
+        text_status_.set(1, "", Color::white());
+    }
+    /* list: detected PRNs by C/N0 with a bar; guidance when none */
+    text_list_.clear();
+    sky_.clear();
+    if (!main_.done_ || !main_.results_) {
+        sky_.set_dirty();
+        return;
+    }
+    uint8_t order[32]; /* detected PRN indices, strongest first (indices only: small stack) */
+    size_t n = 0;
+    for (int p = 0; p < 32; p++)
+        if (main_.results_[p].detected) order[n++] = static_cast<uint8_t>(p);
+    for (size_t a = 1; a < n; a++)
+        for (size_t k = a; k > 0 && main_.results_[order[k]].cn0 > main_.results_[order[k - 1]].cn0; k--) {
+            const uint8_t t = order[k];
+            order[k] = order[k - 1];
+            order[k - 1] = t;
+        }
+    if (!n) {
+        text_list_.set(0, "No satellites heard.", Color::yellow());
+        text_list_.set(2, "- Ant ticked? (active", Color::white());
+        text_list_.set(3, "  antenna, 3.3 V)", Color::white());
+        text_list_.set(4, "- open sky, outdoors", Color::white());
+        text_list_.set(5, "- noise 6-30 LSB:", Color::white());
+        text_list_.set(6, "  adjust LNA / VGA", Color::white());
+        text_list_.set(7, "- Deep 20ms", Color::white());
+    }
+    for (size_t k = 0; k < n && k < kListRows; k++) {
+        const auto& r = main_.results_[order[k]];
+        Fmt f{b, sizeof(b)};
+        f.c('G').d2(r.prn).c(' ');
+        int bars = static_cast<int>((r.cn0 - 32.0f) / 1.5f);
+        if (bars < 1) bars = 1;
+        if (bars > 10) bars = 10;
+        for (int i = 0; i < 10; i++) f.c(i < bars ? '|' : ' ');
+        f.c(' ').u(static_cast<uint32_t>(r.cn0 + 0.5f)).c(' ');
+        const int32_t dop = static_cast<int32_t>(std::lround(r.doppler / 100.0f));
+        if (dop >= 0) f.c('+');
+        f.fixed(dop, 1).c('k');
+        text_list_.set(k, b, r.cn0 >= 38 ? Color::green() : Color::white());
+    }
+    /* sky plot when orbits and a position are known: heard filled */
+    if (main_.mem_ && main_.pos_valid_) {
+        const double tg = main_.now_gps();
+        for (int p = 0; p < 32; p++) {
+            const Orbit& o = main_.mem_->orbits[p];
+            if (!o.valid || o.health) continue;
+            double az, el;
+            az_el(main_.rx_, sat_position(o, tg), az, el);
+            if (el < 0) continue;
+            char lbl[4];
+            Fmt{lbl, sizeof(lbl)}.u(o.prn);
+            const bool heard = main_.results_[p].detected;
+            sky_.add(static_cast<int16_t>(az), static_cast<int16_t>(el), lbl, heard ? Color::green() : Color::grey(), heard);
+        }
+    }
+    sky_.set_dirty();
 }
 
 /* ---------------------------------------------------------------- fix */
@@ -504,33 +630,144 @@ void HeardView::focus() {
 FixView::FixView(GpsView& main, Rect r)
     : View{r},
       main_{main},
-      field_method_{{UI_POS_X(0), 0}, 20, {{"Snapshot + eph file", 0}, {"Autonomous", 1}}},
-      text_{{0, UI_POS_Y(1), UI_POS_MAXWIDTH, UI_POS_HEIGHT(kRows)}, lines_, kRows, &ui::font::fixed_8x16},
-      button_save_{{0, UI_POS_Y(kRows + 1), UI_POS_WIDTH_PERCENT(50), UI_POS_HEIGHT(1)}, "Save pos"} {
-    add_children({&field_method_, &text_, &button_save_});
-    field_method_.set_selected_index(0);
+      field_method_{{UI_POS_X(0), 0}, 18, {{"Snapshot+eph file", 0}, {"Autonomous", 1}}},
+      button_fix_{{UI_POS_X(0), UI_POS_Y(1), UI_POS_WIDTH(14), UI_POS_HEIGHT(1)}, "Get fix"},
+      button_save_{{UI_POS_X(16), UI_POS_Y(1), UI_POS_WIDTH(14), UI_POS_HEIGHT(1)}, "Save pos"},
+      text_{{0, UI_POS_Y(2) + 4, UI_POS_MAXWIDTH, UI_POS_HEIGHT(kRows)}, lines_, kRows, &ui::font::fixed_8x16} {
+    add_children({&field_method_, &button_fix_, &button_save_, &text_});
+    field_method_.set_selected_index(0, false);
     field_method_.on_change = [this](size_t, OptionsField::value_t) {
-        show_method();
+        show();
+    };
+    button_fix_.on_select = [this](Button&) {
+        if (field_method_.selected_index_value() != 0) return;
+        main_.fix_tried_ = false;
+        main_.fix_ok_ = false;
+        main_.start_search(GpsView::JOB_FIX, 20);
+        show();
     };
     button_save_.on_select = [this](Button&) {
-        text_.set(kRows - 1, "No fix to save yet", Color::yellow());
+        if (!main_.fix_ok_) {
+            text_.set(kRows - 1, "No fix to save", Color::yellow());
+            return;
+        }
+        saved_position::Position p;
+        double lat, lon, h;
+        ecef_to_lla(main_.fix_.pos, lat, lon, h);
+        p.lat_e7 = static_cast<int32_t>(std::lround(lat * 1e7));
+        p.lon_e7 = static_cast<int32_t>(std::lround(lon * 1e7));
+        p.alt_m = static_cast<int32_t>(std::lround(h));
+        p.source = saved_position::SOURCE_HACKRF_GPS;
+        p.time = main_.fix_fat_;
+        p.sats = main_.fix_.used;
+        p.acc_m = static_cast<uint32_t>(std::lround(main_.fix_.hdop * 15.0f));
+        if (saved_position::save(p)) {
+            main_.load_position();
+            text_.set(kRows - 1, "Saved for all apps", Color::green());
+        } else {
+            text_.set(kRows - 1, "SD write failed", Color::red());
+        }
     };
-    show_method();
+    show();
 }
 
 void FixView::focus() {
-    field_method_.focus();
+    button_fix_.focus();
 }
 
-void FixView::show_method() {
-    for (size_t i = 0; i < kRows; i++) text_.set(i, "", Color::white());
-    if (field_method_.selected_index_value() == 0) {
-        text_.set(0, "Snapshot fix: not in", Color::yellow());
-        text_.set(1, "this build yet (stage 3).", Color::yellow());
-    } else {
+void FixView::show() {
+    char b[TextLines::kCols + 1];
+    text_.clear();
+    if (field_method_.selected_index_value() != 0) {
         text_.set(0, "Autonomous: NOT AVAILABLE", Color::yellow());
-        text_.set(1, "yet (tracking + nav data", Color::yellow());
-        text_.set(2, "decoding not built).", Color::yellow());
+        text_.set(1, "yet. It needs real-time", Color::white());
+        text_.set(2, "tracking of 4+ satellites", Color::white());
+        text_.set(3, "for 30+ s to decode the", Color::white());
+        text_.set(4, "orbits from the signal;", Color::white());
+        text_.set(5, "not built. Use Snapshot", Color::white());
+        text_.set(6, "with GPS/EPHEM.RNX.", Color::white());
+        return;
+    }
+    /* requirements */
+    int vis = 0;
+    if (main_.mem_ && main_.pos_valid_) {
+        const double tg = main_.now_gps();
+        for (int p = 0; p < 32; p++) {
+            const Orbit& o = main_.mem_->orbits[p];
+            if (!o.valid || !o.ephemeris || o.health) continue;
+            double az, el;
+            az_el(main_.rx_, sat_position(o, tg), az, el);
+            vis += el > kMinFixEl;
+        }
+    }
+    const auto& st = main_.status_;
+    if (main_.job_ == GpsView::JOB_FIX && !main_.done_) {
+        Fmt f{b, sizeof(b)};
+        if (st.state == GpsRxStatusMessage::CAPTURING || main_.awaiting_seq_)
+            f.s("Capturing 20 ms...");
+        else
+            f.s(st.state == GpsRxStatusMessage::REFINING ? "Refining " : "Searching ").u(st.done_prn).c('/').u(st.total_prn).c(' ').u(static_cast<uint32_t>(main_.progress_pct())).c('%');
+        text_.set(0, b, Color::yellow());
+    } else if (main_.solve_pending_) {
+        text_.set(0, "Solving...", Color::yellow());
+    } else if (main_.fix_ok_) {
+        const Solution& s = main_.fix_;
+        double lat, lon, h;
+        ecef_to_lla(s.pos, lat, lon, h);
+        {
+            Fmt f{b, sizeof(b)};
+            f.s("Lat ");
+            put_deg(f, static_cast<int32_t>(std::lround(lat * 1e7)));
+            text_.set(0, b, Color::green());
+        }
+        {
+            Fmt f{b, sizeof(b)};
+            f.s("Lon ");
+            put_deg(f, static_cast<int32_t>(std::lround(lon * 1e7)));
+            text_.set(1, b, Color::green());
+        }
+        {
+            Fmt f{b, sizeof(b)};
+            f.s("Alt ").d(static_cast<int32_t>(std::lround(h))).s(" m (rough)");
+            text_.set(2, b, Color::white());
+        }
+        {
+            Fmt f{b, sizeof(b)};
+            f.s("Error ~").u(static_cast<uint32_t>(std::lround(s.hdop * 15.0f))).s(" m (HDOP ").fixed(static_cast<int32_t>(s.hdop * 10), 1).c(')');
+            text_.set(3, b, Color::white());
+        }
+        {
+            Fmt f{b, sizeof(b)};
+            f.s("Sats ").u(s.used).s(" used, ").u(main_.fix_heard_).s(" heard");
+            text_.set(4, b, Color::white());
+        }
+        {
+            Fmt f{b, sizeof(b)};
+            f.s("Resid ").fixed(static_cast<int32_t>(s.resid_rms_m * 10), 1).s(" m, clock ");
+            f.d(static_cast<int32_t>(std::lround(s.time_corr_s))).c('s');
+            text_.set(5, b, Color::white());
+        }
+        {
+            Fmt f{b, sizeof(b)};
+            f.s("Ephemeris age ");
+            put_span(f, main_.fix_eph_age_s_ < 0 ? -main_.fix_eph_age_s_ : main_.fix_eph_age_s_);
+            text_.set(6, b, Color::white());
+        }
+    } else if (main_.fix_tried_) {
+        Fmt f{b, sizeof(b)};
+        f.s("No fix: ").u(main_.fix_heard_).s(" sats heard");
+        text_.set(0, b, Color::yellow());
+        text_.set(1, "needs 6+ with ephemeris;", Color::white());
+        text_.set(2, "see Heard for signal level", Color::white());
+    }
+    /* what the method needs (always shown below) */
+    const size_t r0 = 8;
+    if (!main_.pos_valid_) text_.set(r0, "Needs a rough position", Color::yellow());
+    if (!main_.n_eph_) text_.set(r0 + 1, "Needs GPS/EPHEM.RNX (today)", Color::yellow());
+    if (main_.pos_valid_ && main_.n_eph_) {
+        Fmt f{b, sizeof(b)};
+        f.s("Eph sats up: ").u(static_cast<uint32_t>(vis));
+        text_.set(r0, b, vis >= 6 ? Color::light_grey() : Color::yellow());
     }
 }
 
@@ -575,7 +812,8 @@ GpsView::GpsView(NavigationView& nav)
           "rx_gps",
           app_settings::Mode::RX,
           {{"utc_off_min"sv, &utc_off_min_},
-           {"tab"sv, &tab_}}},
+           {"tab"sv, &tab_},
+           {"depth"sv, &depth_}}},
       view_fix_{*this, view_rect_},
       view_heard_{*this, view_rect_},
       view_passes_{*this, view_rect_},
@@ -583,9 +821,20 @@ GpsView::GpsView(NavigationView& nav)
           {"Fix", Theme::getInstance()->fg_cyan->foreground, &view_fix_},
           {"Heard", Theme::getInstance()->fg_green->foreground, &view_heard_},
           {"Passes", Theme::getInstance()->fg_yellow->foreground, &view_passes_}} {
+    baseband::run_image(portapack::spi_flash::image_tag_gps_rx);
+
     add_children({&labels_, &field_lna_, &field_vga_, &field_amp_, &check_bias_, &text_warn_,
                   &tab_view_, &view_fix_, &view_heard_, &view_passes_});
     tab_view_.set_parent_rect({0, UI_POS_Y(2), screen_width, 24});
+
+    if (!settings_.loaded()) { /* an active antenna gives plenty: moderate gains */
+        receiver_model.set_rf_amp(false);
+        receiver_model.set_lna(32);
+        receiver_model.set_vga(30);
+    }
+    field_lna_.set_value(receiver_model.lna());
+    field_vga_.set_value(receiver_model.vga());
+    field_amp_.set_value(receiver_model.rf_amp());
 
     bias_was_ = portapack::get_antenna_bias();
     check_bias_.set_value(bias_was_);
@@ -597,7 +846,6 @@ GpsView::GpsView(NavigationView& nav)
     if (bias_was_) text_warn_.set("ANT POWER 3.3V: active antenna only!");
 
     load_position();
-    start_load();
     view_passes_.refresh();
     tick_token_ = rtc_time::signal_tick_second += [this]() {
         on_tick_second();
@@ -608,6 +856,9 @@ GpsView::GpsView(NavigationView& nav)
 GpsView::~GpsView() {
     rtc_time::signal_tick_second -= tick_token_;
     tab_ = tab_view_.selected();
+    mem_ = nullptr; /* the lent RAM goes with the baseband */
+    if (rx_on_) receiver_model.disable();
+    baseband::shutdown();
     /* Antenna power back as it was before the app (the port may get another antenna). */
     if (portapack::get_antenna_bias() != bias_was_) portapack::set_antenna_bias(bias_was_);
 }
@@ -626,23 +877,146 @@ void GpsView::load_position() {
     view_passes_.refresh();
     view_passes_.update_sky();
     view_passes_.restart_passes();
+    view_fix_.show();
 }
 
 void GpsView::start_load() {
-    for (auto& o : orbits_) o = Orbit{};
+    if (!mem_) {
+        load_wanted_ = true;
+        return;
+    }
+    load_wanted_ = false;
+    for (auto& o : mem_->orbits) o = Orbit{};
     n_alm_ = n_eph_ = n_tle_ = 0;
-    alm_week_ = 0;
     eph_toe_newest_ = 0;
-    loader_.start(unix_to_gps(now_unix()));
+    loader_.start(now_gps());
     view_passes_.refresh();
 }
 
+bool GpsView::assisted_possible() const {
+    return mem_ && pos_valid_ && (n_alm_ || n_eph_);
+}
+
+bool GpsView::start_search(Job job, uint8_t k_ms) {
+    if (!mem_) return false;
+    if (!rx_on_) {
+        receiver_model.enable();
+        rx_on_ = true;
+    }
+    GpsRxConfigMessage m;
+    m.cmd = GpsRxConfigMessage::CMD_SEARCH;
+    m.k_ms = k_ms;
+    m.refine = job == JOB_FIX;
+    int nprn = 0;
+    if (assisted_possible()) {
+        /* visible PRNs (by the orbit files), Doppler predicted from the range rate */
+        const double tg = now_gps();
+        const double min_el = job == JOB_FIX ? kMinFixEl : 0.0;
+        for (int p = 0; p < 32; p++) {
+            const Orbit& o = mem_->orbits[p];
+            if (!o.valid || o.health || (job == JOB_FIX && !o.ephemeris)) continue;
+            const Vec3 s = sat_position(o, tg);
+            double az, el;
+            az_el(rx_, s, az, el);
+            if (el <= min_el) continue;
+            const Vec3 v = sat_velocity(o, tg);
+            const Vec3 d{s.x - rx_.x, s.y - rx_.y, s.z - rx_.z};
+            const double r = norm(d);
+            const double rr = (v.x * d.x + v.y * d.y + v.z * d.z) / r;
+            m.prn_mask |= 1u << p;
+            m.center[p] = static_cast<int16_t>(std::lround(-rr / kL1Lambda));
+            nprn++;
+        }
+        m.half_bins = kAssistedHalfBins;
+    }
+    if (!nprn) {
+        if (job == JOB_FIX) return false;
+        m.prn_mask = 0xFFFFFFFFu;
+        m.half_bins = kColdHalfBins;
+        nprn = 32;
+    }
+    job_units_ = static_cast<uint32_t>(nprn) * (2u * m.half_bins + 1u) * k_ms;
+    job_ = job;
+    done_ = false;
+    awaiting_seq_ = true;
+    results_ = nullptr;
+    baseband::gps_rx_config(m);
+    return true;
+}
+
+int GpsView::progress_pct() const {
+    if (!job_units_) return 0;
+    const uint32_t p = status_.units * 100u / job_units_;
+    return static_cast<int>(p > 99 ? 99 : p);
+}
+
+void GpsView::on_status(const GpsRxStatusMessage& m) {
+    status_.state = m.state;
+    status_.done_prn = m.done_prn;
+    status_.total_prn = m.total_prn;
+    status_.k_ms = m.k_ms;
+    status_.rms_x10 = m.rms_x10;
+    status_.clip_permille = m.clip_permille;
+    status_.seq = m.seq;
+    status_.units = m.units;
+    status_.unit_cycles = m.unit_cycles;
+    if (!mem_ && m.scratch && m.scratch_size >= sizeof(GpsScratch)) {
+        mem_ = reinterpret_cast<GpsScratch*>(m.scratch);
+        std::memset(static_cast<void*>(mem_), 0, sizeof(GpsScratch));
+        if (load_wanted_) start_load();
+    }
+    if (awaiting_seq_ && m.state == GpsRxStatusMessage::CAPTURING) {
+        awaiting_seq_ = false;
+        job_seq_ = m.seq;
+    }
+    if (!awaiting_seq_ && job_ != JOB_NONE && m.seq == job_seq_ && m.state == GpsRxStatusMessage::DONE && !done_) {
+        done_ = true;
+        results_ = static_cast<const gps_rx::Result*>(m.results);
+        if (job_ == JOB_FIX) solve_pending_ = true;
+    }
+    view_heard_.show();
+    view_fix_.show();
+}
+
+/* Snapshot fix on the M0: detected PRNs with an ephemeris, the saved position
+ * as the a priori, the RTC as the coarse time (~0.2-0.5 s of soft double). */
+void GpsView::solve_fix() {
+    solve_pending_ = false;
+    fix_tried_ = true;
+    fix_ok_ = false;
+    fix_heard_ = 0;
+    if (!mem_ || !results_ || !pos_valid_) return;
+    Measurement* m = mem_->solve.in; /* off the stack */
+    int n = 0;
+    double newest = 0;
+    for (int p = 0; p < 32; p++) {
+        const auto& r = results_[p];
+        const Orbit& o = mem_->orbits[p];
+        if (!r.detected) continue;
+        fix_heard_++;
+        if (!o.valid || !o.ephemeris || n >= kMaxMeas) continue;
+        m[n++] = {&o, r.code_phase, r.metric};
+        if (o.toe > newest) newest = o.toe;
+    }
+    const double tg = now_gps();
+    fix_ok_ = snapshot_fix(m, n, rx_, tg, fix_, mem_->solve);
+    fix_fat_ = saved_position::now_fat();
+    fix_eph_age_s_ = tg - newest;
+}
+
 void GpsView::on_frame() {
+    if (solve_pending_) {
+        solve_fix();
+        view_fix_.show();
+        return;
+    }
     if (loader_.stage() != OrbitLoader::DONE && loader_.stage() != OrbitLoader::IDLE) {
         if (!loader_.step(*this)) { /* all files read */
             view_passes_.refresh();
             view_passes_.update_sky();
             view_passes_.restart_passes();
+            view_fix_.show();
+            view_heard_.show();
         }
         return; /* one job per frame */
     }

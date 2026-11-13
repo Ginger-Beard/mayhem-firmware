@@ -142,6 +142,7 @@ constexpr image_tag_t image_tag_wmbus_rx{'P', 'W', 'M', 'B'};
 constexpr image_tag_t image_tag_vdl2_rx{'P', 'V', 'D', 'L'};
 constexpr image_tag_t image_tag_subghz_chat{'P', 'C', 'H', 'T'};
 constexpr image_tag_t image_tag_drone_detect{'P', 'D', 'R', 'N'};
+constexpr image_tag_t image_tag_gps_rx{'P', 'G', 'P', 'R'};
 
 constexpr image_tag_t image_tag_noop{'P', 'N', 'O', 'P'};
 
