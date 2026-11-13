@@ -848,7 +848,7 @@ void ClockManager::set_sampling_frequency(const uint32_t frequency) {
 
     // Configure Si5351 clocks using the correct AFE VCO
     // CLK0 always drives the AFE/MAX5864 clock.
-    clock_generator.set_ms_frequency(0, afe_rate * 2, si5351_vco_afe_f, 1);
+    bool ok = clock_generator.set_ms_frequency(0, afe_rate * 2, si5351_vco_afe_f, 1);
 
     /* Do not reset PLLA here. On PRALINE, CLK2/MCU_CLKIN is sourced from PLLA,
      * so a runtime PLLA reset can glitch the LPC43xx peripheral clock tree and
@@ -880,7 +880,7 @@ void ClockManager::set_sampling_frequency(const uint32_t frequency) {
         }
 
         // TX gateware consumes complex samples at the rate presented on CLK1.
-        clock_generator.set_ms_frequency(1, afe_rate, si5351_vco_afe_f, 0);
+        if (ok) ok = clock_generator.set_ms_frequency(1, afe_rate, si5351_vco_afe_f, 0);
 
         uint8_t tx_interp = 0;
         uint32_t tx_rate = frequency;
@@ -895,7 +895,7 @@ void ClockManager::set_sampling_frequency(const uint32_t frequency) {
     // for RX mode
     else {
         // RX path keeps CLK1 at 2x AFE for receive timing / SGPIO alignment.
-        clock_generator.set_ms_frequency(1, afe_rate * 2, si5351_vco_afe_f, 0);
+        if (ok) ok = clock_generator.set_ms_frequency(1, afe_rate * 2, si5351_vco_afe_f, 0);
 
         // === Stop FPGA processing and flush filters ===
         fpga_debug_register_write(1, 0x00);  // Disable FPGA filters (resets CIC accumulators)
@@ -937,12 +937,16 @@ void ClockManager::set_sampling_frequency(const uint32_t frequency) {
      * is divided by two.
      */
 
+    bool ok;
     if (hackrf_r9) {
-        clock_generator.set_ms_frequency(clock_generator_output_r9_sgpio, frequency * 2, si5351_vco_f, 0);
+        ok = clock_generator.set_ms_frequency(clock_generator_output_r9_sgpio, frequency * 2, si5351_vco_f, 0);
     } else {
-        clock_generator.set_ms_frequency(clock_generator_output_og_codec, frequency * 2, si5351_vco_f, 1);
+        ok = clock_generator.set_ms_frequency(clock_generator_output_og_codec, frequency * 2, si5351_vco_f, 1);
     }
 #endif
+    /* Kept for callers that must not run on a wrong sample clock unawares. */
+    _sampling_frequency_ok = ok;
+    if (!ok) _sampling_frequency_errors++;
 }
 
 void ClockManager::set_reference_ppb(const int32_t ppb) {

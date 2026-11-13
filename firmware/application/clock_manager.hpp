@@ -74,6 +74,11 @@ class ClockManager {
         return _base_band_frequency;
     };
 
+    /* false when the last set_sampling_frequency() could not program the
+     * Si5351 (I2C failure): the sample clock is not the requested one. */
+    bool sampling_frequency_ok() const { return _sampling_frequency_ok; }
+    uint32_t sampling_frequency_errors() const { return _sampling_frequency_errors; }
+
     void set_reference_ppb(const int32_t ppb);
 
 #ifdef PRALINE
@@ -125,6 +130,8 @@ class ClockManager {
     Reference reference;
 
     uint32_t _base_band_frequency{20000000};
+    bool _sampling_frequency_ok{true};
+    uint32_t _sampling_frequency_errors{0};
 
     void set_gp_clkin_to_clkin_direct();
 

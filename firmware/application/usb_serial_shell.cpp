@@ -1183,6 +1183,13 @@ static void cmd_sysinfo(BaseSequentialStream* chp, int argc, char* argv[]) {
         "uptime: " + to_string_dec_uint(chTimeNow() / CH_FREQUENCY) + "\r\n";
 
     fillOBuffer(&((SerialUSBDriver*)chp)->oqueue, (const uint8_t*)info.c_str(), info.length());
+    /* I2C0 (Si5351, codec, gauge, add-ons): faults (timeouts), controller
+     * recoveries (failed), NACKs, bus state, the last fault. */
+    const auto& i2c = portapack::i2c0.stats();
+    chprintf(chp, "I2C0 faults: %u (%u) recoveries: %u (%u) nacks: %u bus: %s last: 0x%x flags 0x%x at %u s\r\n",
+             (unsigned)i2c.faults, (unsigned)i2c.timeouts, (unsigned)i2c.recoveries, (unsigned)i2c.recovery_failed,
+             (unsigned)i2c.nacks, i2c.bus_ok ? "ok" : "FAILED", (unsigned)i2c.last_fault_addr,
+             (unsigned)i2c.last_fault_flags, (unsigned)(i2c.last_fault_time / CH_FREQUENCY));
     return;
 }
 
@@ -1206,6 +1213,10 @@ static void cmd_radioinfo(BaseSequentialStream* chp, int argc, char* argv[]) {
         "transmitter_model.sampling_rate: " + to_string_dec_uint(portapack::transmitter_model.sampling_rate()) + "\r\n";
 
     fillOBuffer(&((SerialUSBDriver*)chp)->oqueue, (const uint8_t*)info.c_str(), info.length());
+    /* 0: the last sample rate change could not program the Si5351 (I2C). */
+    chprintf(chp, "clock_manager.sampling_frequency_ok: %u (errors %u)\r\n",
+             (unsigned)portapack::clock_manager.sampling_frequency_ok(),
+             (unsigned)portapack::clock_manager.sampling_frequency_errors());
     return;
 }
 
