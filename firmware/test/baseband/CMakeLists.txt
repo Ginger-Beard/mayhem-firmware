@@ -39,6 +39,7 @@ add_executable(baseband_test EXCLUDE_FROM_ALL
 	${PROJECT_SOURCE_DIR}/dd_pattern_test.cpp
 	${PROJECT_SOURCE_DIR}/dd_dsss_test.cpp
 	${PROJECT_SOURCE_DIR}/dd_droneid_test.cpp
+	${PROJECT_SOURCE_DIR}/dd_fsk_test.cpp
 	${COMMON}/dsp_fft.cpp
 )
 
