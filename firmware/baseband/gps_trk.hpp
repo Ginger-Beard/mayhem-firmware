@@ -1006,7 +1006,9 @@ inline void Channel::track_epoch(float ip, float qp, float id, float qd, bool va
             cn0_low_ = 0;
             if (pll_lock_) good_freq_ = freq_;
         }
-        if (cn0_low_ >= 3 && cn0_wins_ >= 3) {
+        /* lost: three windows in a row below, or the smoothed estimate below after
+         * half a second (noise alone gives scattered single windows above 25) */
+        if ((cn0_low_ >= 3 && cn0_wins_ >= 3) || (cn0_wins_ >= 5 && cn0_ < kLossCn0 - 2.0f)) {
             lost();
             return;
         }
@@ -1174,13 +1176,21 @@ class Tracker {
             last_meas_s_ = at / kFs;
             measure(at);
         }
-        int n_on = 0;
+        int n_on = 0, n_used = 0;
+        nbuf_++;
         for (int i = 0; i < kMaxCh; i++) {
             const auto st = ch_[i].state();
             on_[i] = st != TRK_IDLE && st != TRK_FAILED;
+            n_used += on_[i];
+            /* a lost channel's search (exact path, ~2x the cost of tracking) runs on
+             * every other buffer: 8 lost at once stay within the M4 time */
+            if (on_[i] && st == TRK_SEARCH && ((nbuf_ + i) & 1u)) {
+                ch_[i].skip(kBufN, sh_, i);
+                on_[i] = false;
+            }
             n_on += on_[i];
         }
-        active_ = static_cast<uint8_t>(n_on);
+        active_ = static_cast<uint8_t>(n_used);
         if (n_on) {
             for (int g = 0; g < kBufN / kGroupN; g++) {
                 const int8_t* p = iq + 2 * g * kGroupN;
@@ -1220,6 +1230,7 @@ class Tracker {
     uint8_t active_{0};
     uint64_t next_{0};
     uint64_t last_meas_s_{~0ull};
+    uint32_t nbuf_{0};
 
     void measure(uint64_t at) {
         const uint32_t seq = sh_->meas_seq;
