@@ -77,6 +77,9 @@ class RecordView : public View {
     bool is_active() const;
     /* Share of samples dropped by the capture thread so far, 0..99 (0 when idle). */
     uint32_t dropped_percent() const;
+    /* The capture thread's byte counters so far (from the baseband's stream: received, and dropped for
+     * want of an empty buffer); false and untouched when idle. */
+    bool stream_bytes(uint64_t& received, uint64_t& dropped) const;
 
     void set_filename_date_frequency(bool set);
     void set_filename_as_is(bool set);
