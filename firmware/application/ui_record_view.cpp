@@ -169,6 +169,10 @@ bool RecordView::is_active() const {
     return (bool)capture_thread;
 }
 
+uint32_t RecordView::dropped_percent() const {
+    return is_active() ? std::min(99U, capture_thread->state().dropped_percent()) : 0;
+}
+
 void RecordView::toggle() {
     if (is_active()) {
         stop();
@@ -185,6 +189,9 @@ void RecordView::start() {
     trim_path = "";
 
     if (sampling_rate == 0) {
+        return;
+    }
+    if (on_before_start && !on_before_start()) {
         return;
     }
 
