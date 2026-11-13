@@ -8,6 +8,8 @@ the app.
   /GPS/ALMANAC.TXT   GPS almanac, YUMA format     bundled. Sky plot, search,
                                                   and the COARSE fix
   /GPS/TLE.TXT       two-line element sets (TLE)  bundled. Passes (ISS etc.)
+  /GPS/SATFREQ.TXT   satellite downlinks          bundled. Follow (listen,
+                                                  meter, Doppler corrected)
   /GPS/EPHEM.RNX     GPS broadcast ephemeris,     OPTIONAL, not bundled: a
                      RINEX 2 or 3 navigation file  same-day file makes the
                                                   fix PRECISE (~20 m)
@@ -55,15 +57,32 @@ RINEX 4 is not supported.
 
 TLE.TXT (two-line elements)
 ---------------------------
-Bundled: CelesTrak's "stations" group downloaded 2026-11-13 (ISS and other
-crewed stations). Name line, then lines 1 and 2, repeated; up to 5 sets are
-used (the first 5). Near-earth orbits only (period under 225 minutes).
-TLEs age: after about two weeks pass times can be minutes off; the Passes tab
-then says "TLE 20 d old: refresh (max 14)". Source (no login; CelesTrak
-allows one download per data update):
-  https://celestrak.org/NORAD/elements/gp.php?GROUP=stations&FORMAT=TLE
+Bundled: the 10 satellites of SATFREQ.TXT, from CelesTrak's GP data
+downloaded 2026-11-13 16:59 UTC (one query per catalogue number: 25544 ISS,
+27607 SO-50, 61781 AO-123, 44909 RS-44, 24278 FO-29, 7530 AO-7, 39444 AO-73,
+68446 SO-127, 57166 Meteor-M2-3, 59051 Meteor-M2-4; epochs 2026-11-12/13).
+Name line, then lines 1 and 2, repeated. Up to 12 sets are used: the first 12
+in the file, except that satellites listed in SATFREQ.TXT take the place of
+ones that are not, so a whole group file can be copied as TLE.TXT and the
+satellites you can Follow are kept. Near-earth orbits only (period under 225
+minutes).
+HOW FAST TLEs GO STALE: for low satellites (ISS, the amateur satellites,
+Meteor) days to two weeks. The ISS also changes orbit with each reboost, after
+which an older set is minutes off at once. Pass times drift by seconds per
+day at first, then faster; the Doppler correction suffers in proportion (see
+"Follow"). The satellite page shows the age yellow after 7 days and red "too
+old to point by" after 14; the Passes tab says "TLE 20 d old: refresh (max
+14)". Refresh about weekly before you go out, by copying (no login):
+  https://celestrak.org/NORAD/elements/gp.php?GROUP=amateur&FORMAT=TLE
+  (all amateur satellites; the SATFREQ ones are kept, see above) and, for the
+  two Meteors, https://celestrak.org/NORAD/elements/gp.php?GROUP=weather&FORMAT=TLE
+  Simplest: one set per satellite, pasted one after another into one file:
   https://celestrak.org/NORAD/elements/gp.php?CATNR=25544&FORMAT=TLE  (ISS)
-Save as /GPS/TLE.TXT.
+  (replace 25544 with each NORAD number of SATFREQ.TXT)
+Save as /GPS/TLE.TXT (a group file holds over 12 sets: copy the amateur
+group, then append the two Meteor sets at the end; the table's satellites
+are found wherever they are in the file). CelesTrak asks for one download per
+data update (a few hours).
 
 Antenna power
 -------------
@@ -141,9 +160,11 @@ Top: your position, the clock (Local), UTC, Zone, what was loaded ("Alm 31
 3d Eph 0 TLE 5": counts, almanac age). Sky plot ("GPS now"): GPS satellites
 above the horizon (green, PRN numbers) and TLE satellites (orange). Right:
 GPS satellites up (PRN, elevation, azimuth). Bottom: the next pass of each
-TLE satellite in the next 24 h: "in 1h05 47d 9m" = rises in 1 h 05 min,
-highest 47 degrees, visible 9 min ("UP" = above the horizon now; "search 35%"
-while it is being computed). The sky is recomputed every few seconds, one
+TLE satellite in the next 24 h, soonest first: "in 1h05 47d 9m" = rises in
+1 h 05 min, highest 47 degrees, visible 9 min ("UP" = above the horizon now;
+"search 35%" while it is being computed). Four rows show at a time; a "+" at
+the end of the last row means more below: the wheel (sky plot selected)
+scrolls through all of them. The sky is recomputed every few seconds, one
 satellite per display frame, so touch stays responsive.
 
 Selecting a satellite, pointing guide
@@ -165,4 +186,117 @@ Point the antenna to the compass bearing (true north; a phone compass shows
 magnetic north, which differs by a few degrees in most places) and tilt it up
 by the elevation. TLEs of low satellites go stale in days to weeks: after
 7 days the age shows yellow, after 14 days red "too old to point by".
-Back returns to the tab.
+For a satellite listed in SATFREQ.TXT the page also shows its downlinks
+("437.800 NFM UHF") and a "Follow" button. Back returns to the tab.
+
+Follow (listen to a satellite and point by ear)
+-----------------------------------------------
+"Follow" on the satellite page closes the GPS part of the app and opens the
+Follow screen on the stock audio receiver (NFM, AM / USB / LSB, or WFM, as
+SATFREQ.TXT says). "GPS" (bottom right) goes back to the GPS app, which reads
+the files again and selects the satellite; the back arrow in the title bar
+goes to the menu. Receive only; the antenna-power setting is never changed
+(top right shows it, red when ON).
+- Line 2: the satellite and which downlink (touch it to switch, e.g. ISS
+  repeater / voice / APRS).
+- Line 3: the frequency as received now, corrected for Doppler 4 times a
+  second ("437.80823 Dop +8.23k": the satellite comes towards you, so you
+  hear it higher; at the peak the shift passes through 0, as it moves away it
+  goes negative). The tuner is set once; the shift is followed inside the
+  audio baseband (the stock "sliding" frequency shift of the NFM and AM
+  receivers), so there are no retuning clicks. WFM has no such shift and is
+  retuned in 1 kHz steps.
+- Vol (volume), Sq (squelch in dB of the meter: silent below it; at -120 the
+  squelch is off), Snd: Voice (the receiver's audio) or Tone (beeps: silent
+  below Sq, a slow low beep just above it, faster and higher as the signal
+  rises, a steady high tone 24 dB above Sq). Tone uses the NFM receiver
+  whatever the mode, so it also works for CW beacons and digital signals.
+- The pointing readout as on the satellite page ("NW 310 deg", "24 deg up",
+  "sets in 4m12, max 47"), so you need not switch screens while holding the
+  antenna.
+- The meter: level in dB (relative to full scale, gain dependent: compare
+  only at the same gains), peak hold (falls 10 dB/s; white mark on the bar),
+  min and max since Reset (yellow marks), Sq (orange mark), and a 40 s history
+  strip (one column per 0.2 s).
+- Hint "Fading high up: rotate antenna": shown for 15 s (then not again for
+  90 s) when the level falls smoothly by 6 dB or more over 3 s or more while
+  the satellite is at least 15 deg up and the signal is still above the noise.
+  It is a guess: satellites tumble and their antennas are linear, so the
+  polarisation turns; rotating a linear panel by 90 deg often brings it back.
+  A transmitter that just stops (repeater idle, ISS crew not talking) drops
+  in one step and gives no hint.
+- "TLE 3 d, Doppler err ~0.3 kHz": the estimated tuning error, from a clock
+  error of 5 s (the PortaPack clock is set by hand and drifts), the TLE age
+  (about 1 km + 1.5 km per day along the orbit) and a 5 km position error, at
+  the present Doppler rate. Measured on an ISS pass (max 13 deg) with this
+  app's code: 5 s of clock error gives up to 280 Hz at 437.8 MHz (93 Hz at
+  145.8), 10 km of position error up to 70 Hz; at the peak of a high pass the
+  Doppler changes up to ~180 Hz per second at 437.8 MHz, so there 5 s of clock
+  error is ~0.9 kHz. NFM voice tolerates about 1-2 kHz; SSB and CW are
+  touchier (retune by ear with the wheel in the stock Audio app if needed).
+  The radio's own reference error adds to this (1 ppm = 438 Hz at 437.8 MHz;
+  Settings > Radio has the frequency correction). Set the clock against a
+  phone before a pass.
+- Gains: LNA / VGA / AMP as in every receive app, saved for Follow
+  (rx_gpsfol.ini). Start: LNA 40, VGA 32, AMP off; with a passive panel and
+  no LNA, try AMP 1 if the level does not rise when you point at the
+  satellite.
+How to use it: before the pass, open the satellite, press Follow, set Sq
+just above the level you see with the antenna pointed at empty sky, choose
+Tone. As the countdown reaches "rises", point at the bearing and elevation
+shown and sweep slowly until the beeps get faster and higher; then switch
+Snd to Voice to listen.
+
+Downlinks (SATFREQ.TXT)
+-----------------------
+Format: see the comments at the top of the file. Each line: NORAD number,
+name, downlink (MHz with a point, or Hz), mode, bandwidth kHz (or "-"),
+note. Edit it with any text editor; a line the app cannot read is skipped
+and the satellite page says "SATFREQ line 7 bad". Below 300 MHz (VHF: 137 and
+145 MHz) a 300 MHz-6 GHz panel does not receive: those entries are kept for a
+VHF antenna and marked VHF on screen.
+Bundled entries, checked 2026-11-13 (AMSAT reports are from
+https://status.amsat.org/, page of 2026-11-12/13 with reports Nov 8-13):
+- ISS 437.800 NFM, FM cross-band repeater (uplink 145.990 PL 67): active, ARISS
+  station status of 2026-11-04 ("voice repeater mode",
+  https://www.ariss.org/current-status-of-iss-stations.HTML) and AMSAT reports
+  heard 2026-11-13. Silent unless someone uses it; pre-empted by crew events.
+- ISS 145.800 NFM, voice / SSTV: event-based only. SSTV reported heard this
+  week (AMSAT); the ARISS status page lists no current event. The frequency is
+  the long-standing ARISS downlink, not restated on that page (uncertain).
+- ISS 437.825 NFM, APRS packets: active per ARISS (2026-11-04: "APRS is
+  currently active on 437.825 MHz") and AMSAT (heard 2026-11-13). The old
+  145.825 MHz VHF digipeater was NOT heard this week: not listed.
+- SO-50 436.795 NFM: active, AMSAT reports heard 2026-11-13; frequency from the
+  AMSAT FM satellite summary (page dated 2026-10-31,
+  https://www.amsat.org/fm-satellite-frequency-summary/).
+- AO-123 (ASRTU-1) 435.400 NFM: active, AMSAT reports 2026-11-13; frequency
+  from the AMSAT FM summary and SatNOGS (https://db.satnogs.org/satellite/61781).
+- RS-44 beacon 435.605 CW and passband 435.610-435.670 USB (centre 435.640):
+  active, AMSAT reports 2026-11-13; AMSAT linear summary (2026-10-31,
+  https://www.amsat.org/linear-satellite-frequency-summary/). The beacon is the
+  best pointing target: steady.
+- FO-29 beacon 435.795 CW and passband 435.800-435.900 USB: active by schedule
+  and in sunlight (AMSAT, 2026-10-31; reports 2026-11-13).
+- AO-7 mode B passband 145.925-145.975 USB (centre 145.950): reported this week,
+  sun only, alternates with mode A (29 MHz, outside the HackRF's range) on a
+  24 h timer. VHF.
+- AO-73 (FUNcube-1) 145.935 BPSK telemetry beacon: telemetry reports this week
+  (AMSAT). VHF.
+- SO-127 (HADES-SA) 436.875 FSK / SSDV data: a few AMSAT reports this week
+  (newest 2026-11-13); launched 2026-03-30; SatNOGS
+  (https://db.satnogs.org/satellite/68446). UNCERTAIN: how often it transmits.
+- Meteor-M2-3 and M2-4, LRPT 137.900 MHz (M2-4 backup 137.100): digital
+  (OQPSK, 72 ksym/s per a 2026-09-23 decode report and sigidwiki of
+  2026-10-06; SatNOGS / WMO OSCAR also list 80k: uncertain). M2-3's antenna is
+  reported not fully deployed (weak late in passes). Followed and metered
+  only, not decoded here. VHF: below a 300 MHz panel's range.
+Not listed (checked 2026-11-13): NOAA-15, -18 and -19 APT - all three were
+decommissioned in 2025 (NOAA-18 2025-06-06, NOAA-19 2025-08-13, NOAA-15
+2025-08-19; NOAA NESDIS, https://www.nesdis.noaa.gov/news/legacy-orbit-noaa-decommissions-the-poes-satellite-constellation);
+AO-91 (battery: mostly "not heard" this week); AO-27, PO-101, JO-97 (no
+fresh reports, "dying", or conflicting); IO-86 (equatorial: only within
+about 30 deg of the equator); SO-121, SO-124, SO-125 (re-entered).
+Satellites fail and change: check https://status.amsat.org/ before a pass.
+To refresh the table, edit it by hand from the AMSAT pages above; it is not
+downloaded. Keep TLE.TXT holding a set for every NORAD number in it.
