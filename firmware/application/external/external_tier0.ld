@@ -126,6 +126,7 @@ MEMORY
     ram_external_app_subghz_chat           (rwx) : org = 0xAE150000, len = 32k
     ram_external_app_vdl2_rx               (rwx) : org = 0xAE160000, len = 32k
     ram_external_app_drone_detect          (rwx) : org = 0xAE170000, len = 32k
+    ram_external_app_gps                   (rwx) : org = 0xAE180000, len = 32k
 }
 
 SECTIONS
@@ -747,4 +748,10 @@ SECTIONS
         KEEP(*(.external_app.app_drone_detect.application_information));
         */external/drone_detect/*(*ui*external_app*drone_detect*);
     } > ram_external_app_drone_detect
+
+    .external_app_gps : ALIGN(4) SUBALIGN(4)
+    {
+        KEEP(*(.external_app.app_gps.application_information));
+        */external/gps/*(*ui*external_app*gps*);
+    } > ram_external_app_gps
 }

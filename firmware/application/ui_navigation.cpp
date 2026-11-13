@@ -77,6 +77,7 @@
 #include "external/analogtv/analog_tv_app.hpp"
 #include "external/protoview/ui_protoview.hpp"
 #include "external/drone_detect/ui_drone_detect.hpp"
+#include "external/gps/ui_gps.hpp"
 #endif
 
 #include "core_control.hpp"
@@ -122,6 +123,7 @@ const NavigationView::AppList NavigationView::appList = {
     {"analogtv", "Analog TV", RX, Color::yellow(), &bitmap_icon_sstv, new ViewFactory<ui::external_app::analogtv::AnalogTvView>()},
     {"protoview", "ProtoView", RX, Color::yellow(), &bitmap_icon_remote, new ViewFactory<ui::external_app::protoview::ProtoView>()},
     {"drone_detect", "Sig Detect", RX, Color::orange(), &ui::external_app::drone_detect::bitmap_icon_drone_detect, new ViewFactory<ui::external_app::drone_detect::DroneDetectView>()},
+    {"gps", "GPS", RX, Color::cyan(), &ui::external_app::gps::bitmap_icon_gps, new ViewFactory<ui::external_app::gps::GpsView>()},
 #endif
     {"blerx", "BLE Rx", RX, Color::green(), &bitmap_icon_btle, new ViewFactory<BLERxView>()},
     {"pocsag", "POCSAG", RX, Color::green(), &bitmap_icon_pocsag, new ViewFactory<POCSAGAppView>()},

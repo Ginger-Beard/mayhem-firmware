@@ -456,6 +456,12 @@ set(EXTCPPSRC
 	external/drone_detect/dd_track.cpp
 	external/drone_detect/dd_zwnet.cpp
 	external/drone_detect/dd_capture.cpp
+	#gps (receiver; HackRF Pro)
+	external/gps/main.cpp
+	external/gps/ui_gps.cpp
+	external/gps/gps_orbit.cpp
+	external/gps/gps_sgp4.cpp
+	external/gps/gps_pass.cpp
 )
 
 set(EXTAPPLIST
@@ -564,5 +570,6 @@ set(EXTAPPLIST
 	vdl2_rx
 	subghz_chat
 	drone_detect
+	gps
 )
 
