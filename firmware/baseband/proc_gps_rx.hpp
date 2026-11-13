@@ -22,16 +22,21 @@
 #ifndef __PROC_GPS_RX_H__
 #define __PROC_GPS_RX_H__
 
-/* PGPR: GPS L1 C/A snapshot receiver (HackRF Pro). Receive only.
+/* PGPR: GPS L1 C/A receiver (HackRF Pro). Receive only.
  * On GpsRxConfig CMD_SEARCH: capture K ms at 2.048 Msps into a 2-bit
  * snapshot, then search the requested PRNs (gps_acq.hpp), one work unit per
  * DMA buffer, and refine the detected ones; progress and noise statistics go
- * to the app in GpsRxStatus messages, the results stay in M4 RAM. */
+ * to the app in GpsRxStatus messages, the results stay in M4 RAM.
+ * With `track` set (or on CMD_TRACK) the confirmed PRNs are handed to the
+ * real-time tracking loops (gps_trk.hpp, up to max_ch channels), which run
+ * on every DMA buffer and publish channels, parity-checked subframes and
+ * once-a-second transmit-time measurements in M4 RAM (gps_trk::Shared). */
 
 #include "baseband_processor.hpp"
 #include "baseband_thread.hpp"
 #include "message.hpp"
 #include "gps_acq.hpp"
+#include "gps_trk.hpp"
 
 #include <cstdint>
 
@@ -55,6 +60,8 @@ class GpsRxProcessor : public BasebandProcessor {
         uint32_t prn_mask{0};
         int16_t center[32]{};
         uint8_t confirm{1};
+        uint8_t track{0};
+        uint8_t max_ch{8};
     } req_{};
 
     static constexpr uint8_t kSettleBuffers = 20; /* 20 ms skipped before a capture: LO / gain settling after enable */
@@ -70,9 +77,17 @@ class GpsRxProcessor : public BasebandProcessor {
     uint64_t samples_{0};
     uint16_t missed_seen_{0};
     GpsRxStatusMessage status_{};
+    /* tracking: the loops live in the snapshot's RAM while they run */
+    gps_trk::Tracker* trk_{nullptr};
+    uint8_t max_ch_{8};
+    uint16_t last_rms_x10_{0}, last_clip_{0};
+    uint8_t last_k_{0};
+    uint32_t trk_cycles_sum_{0}, trk_cycles_max_{0}, trk_buffers_{0};
 
     void apply();
     void send_status();
+    void start_tracking(uint32_t prn_mask);
+    void stop_tracking();
 
     /* NB: Threads should be the last members in the class definition. */
     BasebandThread baseband_thread{gps_acq::kFs, this, baseband::Direction::Receive};

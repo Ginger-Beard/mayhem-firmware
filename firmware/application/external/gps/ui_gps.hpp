@@ -59,6 +59,8 @@
 #include "gps_point.hpp"
 #include "gps_freq.hpp"
 #include "gps_follow.hpp"
+#include "gps_auto.hpp"
+#include "gps_pvt.hpp"
 #endif
 
 namespace ui::external_app::gps {
@@ -194,6 +196,13 @@ struct GpsScratch {
     uint8_t tle_freq[kMaxTle]; /* first downlink of each TLE, kNoFreq none */
     Tle tle_tmp;               /* the loader parses here first */
     PassList passes;           /* the Passes tab's list */
+    /* "Autonomous": subframes / ephemerides / almanac pages / measurements
+     * from the tracking loops, the PVT work space and its last solution */
+    AutoState autos;
+    PvtSolution pvt;     /* the solver thread's output */
+    PvtSolution pvt_fix; /* the last accepted one (shown, saved) */
+    uint32_t cache_sf[3][10]; /* the loader assembles an EPH_AIR.TXT record here */
+    uint8_t cache_have;
 };
 
 class GpsView;
@@ -205,6 +214,7 @@ class OrbitLoader {
     enum Stage : uint8_t { IDLE,
                            ALMANAC,
                            EPHEMERIS,
+                           EPH_AIR, /* /GPS/EPH_AIR.TXT: off-air ephemerides of earlier runs */
                            SATFREQ,
                            TLES,
                            DONE };
@@ -228,6 +238,7 @@ class OrbitLoader {
     char tle_name_[17]{};
     char tle_l1_[72]{};
     uint8_t tle_state_{0};
+    uint8_t air_prn_{0}; /* EPH_AIR record being assembled (subframes in GpsScratch::cache_sf) */
     uint16_t line_no_{0};
     bool eof_{false};
     double now_gps_{0};
@@ -291,6 +302,7 @@ class HeardView : public View {
     void show(); /* status / results changed */
 
    private:
+    void show_tracking();
     GpsView& main_;
     OptionsField field_depth_;
     Button button_search_;
@@ -324,6 +336,7 @@ class FixView : public View {
     const char* save_msg_{nullptr}; /* bottom row after "Save pos" */
     Color save_color_{Color::white()};
     void show_blocker(size_t row);
+    void show_auto();
     static constexpr size_t kRows = 11;
     TextLines::Line lines_[kRows]{};
     TextLines text_;
@@ -549,7 +562,8 @@ class GpsView : public View {
 
     enum Job : uint8_t { JOB_NONE,
                          JOB_HEARD,
-                         JOB_FIX };
+                         JOB_FIX,
+                         JOB_AUTO }; /* snapshot search, then the tracking loops ("Autonomous") */
 
     NavigationView& nav_;
     RxRadioState radio_state_{
@@ -666,13 +680,38 @@ class GpsView : public View {
     double solve_max_dt_{60.0};
     Solution solve_out_{};
     bool solve_ok_{false};
+    uint8_t solve_kind_{0}; /* 0 snapshot fix, 1 PVT from the tracking loops */
+    int solve_pvt_n_{0};
+    double solve_pvt_trx_{0};
+    bool solve_pvt_eph_{false};
     static msg_t solver_fn(void* arg);
     void finish_solve();
     bool solving() const { return solver_ != nullptr; }
 
     double now_unix() const;   /* UTC from the RTC and the zone */
     double local_unix() const; /* the clock as shown (incl. Mayhem DST), as if it were UTC */
-    double now_gps() const { return unix_to_gps(now_unix()); }
+    /* GPS time: from the satellites once the tracking loops decoded a TOW
+     * (the clock and Zone are then not needed), else the RTC and Zone */
+    double now_gps() const { return unix_to_gps(now_unix()) + (gps_time_ok_ ? gps_off_s_ : 0.0); }
+    double gps_off_s_{0};   /* GPS time from the satellites - RTC-based GPS time */
+    bool gps_time_ok_{false};
+
+    /* "Autonomous": tracking loops (M4) -> subframes, ephemerides, PVT (M0) */
+    const gps_trk::Shared* trk_sh_{nullptr};
+    bool tracking_{false};    /* PGPR reports TRACKING */
+    systime_t auto_t0_{0};    /* Get fix pressed */
+    uint32_t ttff_s_{0};      /* first precise fix, s after Get fix (0 none yet) */
+    uint32_t ttff_coarse_s_{0};
+    uint8_t auto_eph_{0};     /* tracked satellites with an ephemeris (off air or file) */
+    uint8_t auto_synced_{0};  /* tracked with TOW */
+    uint8_t auto_tracked_{0};
+    uint8_t cache_cursor_{0}; /* next EphCollect slot to look at for the SD cache */
+    uint8_t cache_line_{0};   /* line of the record being written (0..2) */
+    uint16_t cache_written_{0};
+    void auto_poll_m4();      /* channels, subframes, measurements; starts a PVT */
+    void auto_finish_pvt();
+    void auto_cache_step();   /* one EPH_AIR.TXT line per call, from the frame handler */
+    void stop_auto();
     void load_position();
     void start_load();
     /* Why a fix cannot be tried now (FixView explains it), or OK. */
