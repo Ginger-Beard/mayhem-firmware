@@ -202,6 +202,7 @@ class HeardView : public View {
     GpsView& main_;
     OptionsField field_depth_;
     Button button_search_;
+    Button button_stop_;
     static constexpr size_t kStatusRows = 2;
     TextLines::Line status_[kStatusRows]{};
     TextLines text_status_;
@@ -222,6 +223,7 @@ class FixView : public View {
     OptionsField field_method_;
     Button button_fix_;
     Button button_save_;
+    bool fix_running_shown_{false}; /* button_fix_ shows "Stop" */
     static constexpr size_t kRows = 11;
     TextLines::Line lines_[kRows]{};
     TextLines text_;
@@ -318,6 +320,9 @@ class GpsView : public View {
     /* Start a snapshot search: assisted (visible PRNs, predicted Doppler)
      * when orbits, a position and the time allow, else all 32 PRNs. */
     bool start_search(Job job, uint8_t k_ms);
+    /* Stop a running search (the M4 drops it at its next work unit). */
+    void stop_search();
+    bool searching() const { return job_ != JOB_NONE && !done_; }
     bool assisted_possible() const;
     void on_status(const GpsRxStatusMessage& m);
     void solve_fix();

@@ -502,11 +502,16 @@ HeardView::HeardView(GpsView& main, Rect r)
     : View{r},
       main_{main},
       field_depth_{{UI_POS_X(0), 0}, 10, {{"Quick 10ms", 0}, {"Deep 20ms", 1}}},
-      button_search_{{UI_POS_X(20), 0, UI_POS_WIDTH(10), UI_POS_HEIGHT(1)}, "Search"},
+      button_search_{{UI_POS_X(17), 0, UI_POS_WIDTH(7), UI_POS_HEIGHT(1)}, "Search"},
+      button_stop_{{UI_POS_X(24), 0, UI_POS_WIDTH(6), UI_POS_HEIGHT(1)}, "Stop"},
       text_status_{{0, UI_POS_Y(1), UI_POS_MAXWIDTH, UI_POS_HEIGHT(kStatusRows)}, status_, kStatusRows, &ui::font::fixed_8x16},
       text_list_{{0, UI_POS_Y(3) + 2, 118, 8 * kListRows}, list_, kListRows, &ui::font::fixed_5x8},
       sky_{{120, UI_POS_Y(3) + 2, 120, 120}} {
-    add_children({&field_depth_, &button_search_, &text_status_, &text_list_, &sky_});
+    add_children({&field_depth_, &button_search_, &button_stop_, &text_status_, &text_list_, &sky_});
+    button_stop_.on_select = [this](Button&) {
+        main_.stop_search();
+        show();
+    };
     field_depth_.set_selected_index(main_.depth_ ? 1 : 0, false);
     field_depth_.on_change = [this](size_t i, OptionsField::value_t) {
         main_.depth_ = static_cast<uint32_t>(i);
@@ -641,6 +646,11 @@ FixView::FixView(GpsView& main, Rect r)
     };
     button_fix_.on_select = [this](Button&) {
         if (field_method_.selected_index_value() != 0) return;
+        if (main_.searching()) { /* the button reads "Stop" while a search runs */
+            main_.stop_search();
+            show();
+            return;
+        }
         main_.fix_tried_ = false;
         main_.fix_ok_ = false;
         main_.start_search(GpsView::JOB_FIX, 20);
@@ -677,6 +687,10 @@ void FixView::focus() {
 
 void FixView::show() {
     char b[TextLines::kCols + 1];
+    if (main_.searching() != fix_running_shown_) {
+        fix_running_shown_ = main_.searching();
+        button_fix_.set_text(fix_running_shown_ ? "Stop" : "Get fix");
+    }
     text_.clear();
     if (field_method_.selected_index_value() != 0) {
         text_.set(0, "Autonomous: NOT AVAILABLE", Color::yellow());
@@ -733,7 +747,7 @@ void FixView::show() {
         }
         {
             Fmt f{b, sizeof(b)};
-            f.s("Error ~").u(static_cast<uint32_t>(std::lround(s.hdop * 15.0f))).s(" m (HDOP ").fixed(static_cast<int32_t>(s.hdop * 10), 1).c(')');
+            f.s("Err est. ~").u(static_cast<uint32_t>(std::lround(s.hdop * 15.0f))).s(" m HDOP ").fixed(static_cast<int32_t>(s.hdop * 10), 1);
             text_.set(3, b, Color::white());
         }
         {
@@ -942,6 +956,18 @@ bool GpsView::start_search(Job job, uint8_t k_ms) {
     results_ = nullptr;
     baseband::gps_rx_config(m);
     return true;
+}
+
+void GpsView::stop_search() {
+    if (!searching()) return;
+    GpsRxConfigMessage m;
+    m.cmd = GpsRxConfigMessage::CMD_STOP;
+    baseband::gps_rx_config(m);
+    job_ = JOB_NONE;
+    awaiting_seq_ = false;
+    results_ = nullptr;
+    done_ = false;
+    solve_pending_ = false;
 }
 
 int GpsView::progress_pct() const {
