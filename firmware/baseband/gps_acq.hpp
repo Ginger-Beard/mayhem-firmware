@@ -666,6 +666,9 @@ class Session {
     Level level() const { return level_; }
     const Result* results() const { return final_; }
     double dt() const { return t_b_ - t_a_; }
+    /* time stamp passed to put() with the first buffer of the snapshot the
+     * results' code phases refer to (B when confirmed, else A) */
+    double t_results() const { return (p_.confirm && t_b_ >= 0) ? t_b_ : t_a_; }
     bool confirming() const { return phase_ == CAPTURE_B || phase_ == SEARCH_B; }
 
    private:

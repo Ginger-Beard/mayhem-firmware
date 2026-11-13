@@ -2594,8 +2594,9 @@ struct WMBusPacketMessage : public Message {
 struct GpsRxConfigMessage : public Message {
     constexpr GpsRxConfigMessage()
         : Message{ID::GpsRxConfig} {}
-    enum Cmd : uint8_t { CMD_STOP = 0,
-                         CMD_SEARCH = 1 };
+    enum Cmd : uint8_t { CMD_STOP = 0, /* stops a search and the tracking */
+                         CMD_SEARCH = 1,
+                         CMD_TRACK = 2 }; /* track the PRNs in prn_mask from the last search's results */
     uint8_t cmd{CMD_STOP};
     uint8_t k_ms{20};      /* snapshot length, 1..20 ms */
     uint8_t half_bins{12}; /* Doppler bins of 500 Hz either side of each centre */
@@ -2603,6 +2604,8 @@ struct GpsRxConfigMessage : public Message {
     uint32_t prn_mask{0};  /* bit p-1: search PRN p */
     int16_t center[32]{};  /* Doppler window centre per PRN, Hz */
     uint8_t confirm{1};    /* report a PRN only if a second snapshot confirms it */
+    uint8_t track{0};      /* CMD_SEARCH: hand the confirmed PRNs to the tracking loops when done ("Autonomous") */
+    uint8_t max_ch{8};     /* tracking channels at most (M4 time) */
 };
 
 /* M4 -> M0: progress, noise statistics, and where the results and the lent
@@ -2614,7 +2617,8 @@ struct GpsRxStatusMessage : public Message {
                            CAPTURING,
                            SEARCHING,
                            REFINING,
-                           DONE };
+                           DONE,
+                           TRACKING }; /* tracking loops running (results of the search that started them stay valid) */
     enum Level : uint8_t { LEVEL_OK = 0,
                            LEVEL_LOW, /* snapshot AC rms below the floor: no search done */
                            LEVEL_HIGH /* clipping: results still reported */ };
@@ -2635,6 +2639,7 @@ struct GpsRxStatusMessage : public Message {
     const void* results{nullptr}; /* gps_rx::Result[32], by PRN - 1 */
     uint8_t* scratch{nullptr};
     uint16_t scratch_size{0};
+    const void* track{nullptr}; /* gps_trk::Shared (channels, subframes, measurements), valid while the image runs */
 };
 
 #endif /*__MESSAGE_H__*/
