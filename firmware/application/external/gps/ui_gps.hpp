@@ -30,8 +30,10 @@
  *           plot when orbits and a position are known
  *   Passes  predicted passes from orbit files (no reception): GPS almanac /
  *           ephemeris and TLE element sets (ISS ...), with a sky plot
+ *   Follow  (from the satellite page) a TLE satellite's downlink, Doppler
+ *           corrected, with a signal meter, tone and the pointing readout
  * Files: /GPS/ALMANAC.TXT (YUMA), /GPS/EPHEM.RNX (RINEX 2/3 navigation),
- * /GPS/TLE.TXT (sdcard/GPS/README.TXT). The baseband (PGPR) does the signal
+ * /GPS/TLE.TXT, /GPS/SATFREQ.TXT (downlinks) (sdcard/GPS/README.TXT). The baseband (PGPR) does the signal
  * processing and lends the app M4 RAM for the orbit tables and the solver, so
  * they do not take the M0 heap. */
 
@@ -55,6 +57,8 @@
 #include "gps_pass.hpp"
 #include "gps_solve.hpp"
 #include "gps_point.hpp"
+#include "gps_freq.hpp"
+#include "gps_follow.hpp"
 #endif
 
 namespace ui::external_app::gps {
@@ -171,7 +175,9 @@ struct SatGeo {
 
 /* What lives in the M4 RAM PGPR lends (GpsRxStatusMessage::scratch). */
 struct GpsScratch {
-    static constexpr size_t kMaxTle = 5;
+    static constexpr size_t kMaxTle = PassList::kMax; /* 12 */
+    static constexpr size_t kMaxFreq = 24;
+    static constexpr uint8_t kNoFreq = 0xFF;
     Orbit orbits[32]; /* per PRN: a fresh ephemeris, else the almanac */
     AlmRec alm[32];   /* the almanac, kept for when an ephemeris goes stale */
     Tle tles[kMaxTle];
@@ -184,6 +190,10 @@ struct GpsScratch {
     PassTrack track;       /* the selected satellite's pass (current or next) and arc */
     uint32_t heard_at[32]; /* unix s of the last confirmation, 0 never */
     uint8_t heard_cn0[32];
+    SatFreq freq[kMaxFreq];    /* /GPS/SATFREQ.TXT */
+    uint8_t tle_freq[kMaxTle]; /* first downlink of each TLE, kNoFreq none */
+    Tle tle_tmp;               /* the loader parses here first */
+    PassList passes;           /* the Passes tab's list */
 };
 
 class GpsView;
@@ -195,6 +205,7 @@ class OrbitLoader {
     enum Stage : uint8_t { IDLE,
                            ALMANAC,
                            EPHEMERIS,
+                           SATFREQ,
                            TLES,
                            DONE };
     OrbitLoader() = default;
@@ -217,12 +228,15 @@ class OrbitLoader {
     char tle_name_[17]{};
     char tle_l1_[72]{};
     uint8_t tle_state_{0};
+    uint16_t line_no_{0};
     bool eof_{false};
     double now_gps_{0};
     YumaParser yuma_{0};
     RinexNavParser rinex_{};
     bool open(Stage s, GpsView& v);
+    bool open_after(Stage s, GpsView& v); /* the next file that exists */
     void close();
+    void take_tle(GpsView& v);
     bool next_line();
     void take(GpsView& v);
 };
@@ -251,11 +265,15 @@ class PassesView : public View {
     static constexpr size_t kSideRows = 14;
     TextLines::Line side_[kSideRows]{};
     TextLines text_side_;
-    static constexpr size_t kPassRows = PassList::kMax;
+    static constexpr size_t kPassRows = 4; /* a window on up to 12, following the selection */
     TextLines::Line pass_lines_[kPassRows]{};
     TextLines text_passes_;
-    PassList passes_{};
-    uint8_t side_prn_[kSideRows]{}; /* side-list row -> PRN index + 1 (0: none) */
+    uint8_t order_[PassList::kMax]{}; /* list position -> TLE index (by time) */
+    uint8_t off_{0};                  /* first list position shown */
+    uint8_t side_prn_[kSideRows]{};   /* side-list row -> PRN index + 1 (0: none) */
+    PassList* pl() const;             /* in the lent RAM (nullptr before it) */
+    size_t npass() const;
+    int pos_of_tle(uint8_t idx) const; /* list position of a TLE, -1 */
     void show_passes();
     void zone_changed();
     int items() const; /* TLE pass rows, then GPS side rows */
@@ -340,7 +358,7 @@ class SatView : public View {
 
    private:
     GpsView& main_;
-    static constexpr size_t kTopRows = 2, kSumRows = 4, kInfoRows = 15;
+    static constexpr size_t kTopRows = 2, kSumRows = 4, kInfoRows = 11;
     TextLines::Line top_[kTopRows]{};
     TextLines text_top_;
     BigText big_dir_;
@@ -352,13 +370,166 @@ class SatView : public View {
     TextLines text_info_;
     TextLines::Line sum_[kSumRows]{};
     TextLines text_sum_;
+    Button button_follow_;
     SignalToken tick_{};
     void refresh();
 };
 
+/* What Follow takes from the GPS app before the app (and with it the lent M4
+ * RAM holding the orbit tables) closes: allocated on the heap by
+ * GpsView::follow(), owned by FollowView. */
+struct FollowCtx {
+    static constexpr size_t kMaxDl = 4;
+    Tle tle{};
+    Sgp4 sgp4{}; /* initialised by FollowView */
+    PassTrack track{};
+    Observer obs{};
+    int32_t utc_off_min{0};
+    uint8_t n_dl{0};
+    SatFreq dl[kMaxDl]{}; /* this satellite's downlinks from SATFREQ.TXT */
+};
+
+/* Follow: the selected satellite's downlink on a stock audio image (NFM, AM
+ * incl. USB/LSB/CW, WFM), the Doppler corrected 4 times a second (the
+ * baseband's DDC shift on NFM / AM, a retune on WFM), a signal meter with
+ * peak hold, min/max and a 40 s history, Voice or Tone (the stock NFM image's
+ * pitch-by-level tone, pulsed faster as the level rises), a level squelch,
+ * and the pointing readout. It replaces the GPS app (so PGPR stops); "GPS"
+ * goes back to it, the title bar's back arrow to the menu. Message IDs
+ * registered: DisplayFrameSync, ChannelStatistics; none of its stock widgets
+ * (gain fields, volume, options, buttons) registers any. */
+class FollowView : public View {
+   public:
+    FollowView(NavigationView& nav, FollowCtx* ctx);
+    ~FollowView();
+    FollowView(const FollowView&) = delete;
+    FollowView& operator=(const FollowView&) = delete;
+    void focus() override;
+    std::string title() const override { return "Follow"; };
+
+   private:
+    /* the meter bar (-110..-10 dB: level, peak hold, min/max, squelch) and
+     * the history strip (one column per 0.2 s, 40 s), two widgets so the
+     * strip repaints only when a column is added */
+    class MeterBar : public Widget {
+       public:
+        MeterBar(Rect r, const Meter& m, const int32_t& sq)
+            : Widget{r}, m_{m}, sq_{sq} {}
+        void paint(Painter& painter) override;
+
+       private:
+        const Meter& m_;
+        const int32_t& sq_;
+    };
+    class HistStrip : public Widget {
+       public:
+        HistStrip(Rect r, const Meter& m, const int32_t& sq)
+            : Widget{r}, m_{m}, sq_{sq} {}
+        void paint(Painter& painter) override;
+
+       private:
+        const Meter& m_;
+        const int32_t& sq_;
+    };
+
+    NavigationView& nav_;
+    FollowCtx* ctx_;
+    RxRadioState radio_state_{ReceiverModel::Mode::NarrowbandFMAudio};
+    uint32_t snd_{0};    /* 0 voice, 1 tone (saved) */
+    int32_t sq_db_{-90}; /* level squelch, dB (saved) */
+    app_settings::SettingsManager settings_;
+
+    Labels labels_{
+        {{UI_POS_X(0), UI_POS_Y(0)}, "LNA:   VGA:   AMP:", Theme::getInstance()->fg_light->foreground},
+        {{UI_POS_X(0), UI_POS_Y(3)}, "Vol:", Theme::getInstance()->fg_light->foreground},
+        {{UI_POS_X(7), UI_POS_Y(3)}, "Sq:", Theme::getInstance()->fg_light->foreground},
+        {{UI_POS_X(15), UI_POS_Y(3)}, "Snd:", Theme::getInstance()->fg_light->foreground}};
+    LNAGainField field_lna_{{UI_POS_X(4), UI_POS_Y(0)}};
+    VGAGainField field_vga_{{UI_POS_X(11), UI_POS_Y(0)}};
+    RFAmpField field_amp_{{UI_POS_X(18), UI_POS_Y(0)}};
+    Text text_ant_{{UI_POS_X(22), UI_POS_Y(0), UI_POS_WIDTH(8), UI_POS_HEIGHT(1)}, ""};
+    TextLines::Line name_[1]{};
+    TextLines text_name_;
+    OptionsField field_dl_;
+    TextLines::Line freq_[1]{};
+    TextLines text_freq_;
+    AudioVolumeField field_volume_{{UI_POS_X(4), UI_POS_Y(3)}};
+    NumberField field_sq_{{UI_POS_X(10), UI_POS_Y(3)}, 4, {-120, 0}, 1, ' '};
+    OptionsField field_snd_{{UI_POS_X(19), UI_POS_Y(3)}, 5, {{"Voice", 0}, {"Tone", 1}}};
+    BigText big_dir_;
+    BigText big_el_;
+    TextLines::Line when_[1]{};
+    TextLines text_when_;
+    BigText big_level_;
+    static constexpr size_t kStatRows = 4;
+    TextLines::Line stat_[kStatRows]{};
+    TextLines text_stat_;
+    Meter meter_{};
+    MeterBar meter_bar_;
+    HistStrip hist_strip_;
+    uint32_t cols_shown_{0};
+    static constexpr size_t kInfoRows = 3;
+    TextLines::Line info_[kInfoRows]{};
+    TextLines text_info_;
+    Button button_reset_;
+    Button button_gps_;
+
+    /* receiver */
+    uint8_t dl_{0};       /* the downlink followed */
+    bool tone_on_{false}; /* the image runs the pitch tone */
+    bool rx_on_{false};
+    Tuner tuner_{};
+    /* the constructor's body, out of line: its locals are not on the stack
+     * while the settings file is read */
+    void setup() __attribute__((noinline));
+    void start_rx(); /* (re)start the image for the downlink and Snd */
+    /* time: the RTC's seconds plus the ticks since the last second */
+    double base_unix_{0};
+    systime_t base_tick_{0};
+    double now_unix() const;
+    SignalToken tick_{};
+    /* schedule */
+    systime_t last_dop_{0};
+    double rr_prev_{0}, rr_prev_t_{0}, rr_dot_{0};
+    Look look_{};
+    bool look_ok_{false};
+    void update_doppler(); /* one SGP4 call + tuning */
+    void show_point();
+    void show_level();
+    void show_info();
+    void show_antenna();
+    int8_t bias_shown_{-1};
+    /* level and sound */
+    int32_t level_{-128};
+    bool have_level_{false};
+    systime_t last_stats_{0};
+    FadeHint hint_{};
+    bool open_{false}; /* voice: squelch open (audio unmuted) */
+    uint8_t beep_phase_{0}, beep_left_{0}, hold_{0};
+    int32_t pitch_sent_{-99999};
+    void set_pitch(int32_t v);
+    void on_stats(int32_t db);
+    void sound_frame();
+    uint8_t frames_{0};
+
+    MessageHandlerRegistration message_handler_frame_sync{
+        Message::ID::DisplayFrameSync,
+        [this](const Message* const) {
+            this->on_frame();
+        }};
+    MessageHandlerRegistration message_handler_stats{
+        Message::ID::ChannelStatistics,
+        [this](const Message* const p) {
+            this->on_stats(static_cast<const ChannelStatisticsMessage*>(p)->statistics.max_db);
+        }};
+    void on_frame();
+};
+
 class GpsView : public View {
    public:
-    GpsView(NavigationView& nav);
+    /* reselect: a TLE catalogue number to select once the files are read
+     * (coming back from Follow), 0 none */
+    GpsView(NavigationView& nav, uint32_t reselect = 0);
     ~GpsView();
 
     GpsView(const GpsView&) = delete;
@@ -374,6 +545,7 @@ class GpsView : public View {
     friend class FixView;
     friend class PositionView;
     friend class SatView;
+    friend class FollowView;
 
     enum Job : uint8_t { JOB_NONE,
                          JOB_HEARD,
@@ -401,9 +573,12 @@ class GpsView : public View {
     /* Lent M4 RAM: orbit tables, TLEs, propagator states, solver work. */
     GpsScratch* mem_{nullptr};
     uint8_t n_alm_{0}, n_eph_{0}, n_tle_{0};
+    uint8_t n_freq_{0}, freq_bad_{0}; /* SATFREQ.TXT: downlinks read, bad lines */
+    uint16_t freq_bad_line_{0};       /* the first bad line's number */
+    uint32_t reselect_{0};
     double eph_toe_newest_{0};
     /* what the card held at the last load (for the plain-language states) */
-    bool alm_file_{false}, eph_file_{false}, tle_file_{false};
+    bool alm_file_{false}, eph_file_{false}, tle_file_{false}, freq_file_{false};
     double alm_toa_{0};         /* the almanac's time of applicability, GPS s */
     double eph_file_newest_{0}; /* newest GPS record in EPHEM.RNX, used or not */
     OrbitLoader loader_{};
@@ -432,6 +607,11 @@ class GpsView : public View {
     bool sel_source(SatSource& src);
     void select(uint8_t kind, uint8_t idx); /* also restarts the pass track */
     void open_selected();                   /* push SatView */
+    /* Follow the selected TLE satellite (from SatView): copies what Follow
+     * needs to the heap, pops SatView and replaces this view; false (nothing
+     * done) without a downlink, a position or heap. */
+    bool follow();
+    uint8_t sel_downlinks() const; /* SATFREQ entries of the selected TLE */
     void sel_name(char* buf, size_t size) const;
     size_t geo_units() const { return 32u + 2u * n_tle_; }
 

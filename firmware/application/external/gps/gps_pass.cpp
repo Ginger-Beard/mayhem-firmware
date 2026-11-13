@@ -260,6 +260,24 @@ void put_span(Fmt& f, double s) {
 
 }  // namespace
 
+void PassList::order(uint8_t* out) const {
+    auto key = [this](size_t i) { /* class, then time */
+                                  if (!done_[i]) return 2.0e12 + static_cast<double>(i);
+                                  if (!ok_[i]) return 3.0e12 + static_cast<double>(i);
+                                  return res_[i].up_at_start ? 0.0 : res_[i].rise;
+    };
+    for (size_t i = 0; i < n_; i++) out[i] = static_cast<uint8_t>(i);
+    for (size_t i = 1; i < n_; i++) { /* insertion sort: stable, at most 12 */
+        const uint8_t v = out[i];
+        size_t j = i;
+        while (j > 0 && key(out[j - 1]) > key(v)) {
+            out[j] = out[j - 1];
+            j--;
+        }
+        out[j] = v;
+    }
+}
+
 void PassList::line(size_t i, double now, char* buf, size_t size) const {
     Fmt f{buf, size};
     if (i >= n_) return;

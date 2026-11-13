@@ -464,6 +464,9 @@ set(EXTCPPSRC
 	external/gps/gps_pass.cpp
 	external/gps/gps_point.cpp
 	external/gps/gps_solve.cpp
+	external/gps/gps_freq.cpp
+	external/gps/gps_follow.cpp
+	external/gps/ui_gps_follow.cpp
 )
 
 set(EXTAPPLIST
