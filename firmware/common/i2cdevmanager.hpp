@@ -64,6 +64,7 @@ class I2cDev {
     inline bool isLocked() { return mtx != 0; }
 
     bool need_del = false;                // device can self destruct, and re-init when new scan discovers it
+    uint8_t users = 0;                    // references from I2CDevManager::acquire_dev_by_model(), guarded by its list mutex: not deleted while > 0
     I2C_DEVMDL model = I2CDEVMDL_NOTSET;  // overwrite it in the init()!!!
     uint8_t query_interval = 5;           // in seconds. can be overriden in init() if necessary
    protected:
@@ -94,6 +95,15 @@ class I2CDevManager {
     static std::vector<uint8_t> get_gev_list_by_addr();      // returns the currently discovered
     static void setEventDispatcher(EventDispatcher* ed) { _eventDispatcher = ed; }
     static EventDispatcher* get_event_dispatcher() { return _eventDispatcher; }
+
+    /* As get_dev_by_model(), but the device cannot be deleted until
+     * release_dev(): removal (too many errors, gone from the bus) waits for
+     * the release. For use across I2C transfers from another thread than the
+     * manager's, which may otherwise delete the device in the middle (a
+     * failing transfer blocks for its timeout). nullptr if none (or the device
+     * is about to be removed). */
+    static I2cDev* acquire_dev_by_model(I2C_DEVMDL model);
+    static void release_dev(I2cDev* dev);
 
    private:
     static uint16_t scan_interval;

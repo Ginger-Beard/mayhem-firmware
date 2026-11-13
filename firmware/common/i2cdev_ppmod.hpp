@@ -95,7 +95,13 @@ class I2cDev_PPmod : public I2cDev {
 
     bool send_poweroff_command();  // sends the command to power off the device. Restarting the esp needs a full power cycle!
 
+    /* App specific (custom) command, e.g. the ESP32 firmware's PPCMD_* ones: writes
+     * [command LE][tx], then reads rx_len bytes of the reply if rx_len > 0. Kept apart
+     * from update()'s own queries, so the reply can't belong to another command. */
+    bool custom_command(uint16_t command, const uint8_t* tx, size_t tx_len, uint8_t* rx, size_t rx_len);
+
    private:
+    Mutex command_mutex{};  // one command/reply pair on the bus at a time (update() vs custom_command())
     uint8_t self_timer = 0;
     uint64_t mask = 0;  // feauture mask, that indicates what the device can do. this will determinate what we will query from the device
 };
