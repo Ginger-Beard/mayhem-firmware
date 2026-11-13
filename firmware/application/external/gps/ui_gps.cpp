@@ -300,9 +300,9 @@ PassesView::PassesView(GpsView& main, Rect r)
       button_load_{{UI_POS_X(24), UI_POS_Y(2), UI_POS_WIDTH(6), UI_POS_HEIGHT(1)}, "Load"},
       labels_off_{{{UI_POS_X(19), UI_POS_Y(1)}, "Off", Theme::getInstance()->fg_light->foreground}},
       field_off_{{UI_POS_X(23), UI_POS_Y(1)}, 4, {-720, 840}, 15, ' '},
-      sky_{{0, UI_POS_Y(3) + 2, 136, 136}},
-      text_side_{{140, UI_POS_Y(3) + 2, 100, 136}, side_, kSideRows, &ui::font::fixed_5x8},
-      text_passes_{{0, UI_POS_Y(3) + 142, UI_POS_MAXWIDTH, UI_POS_HEIGHT(kPassRows)}, pass_lines_, kPassRows, &ui::font::fixed_8x16} {
+      sky_{{0, UI_POS_Y(3) + 2, 120, 120}},
+      text_side_{{124, UI_POS_Y(3) + 2, 116, 120}, side_, kSideRows, &ui::font::fixed_5x8},
+      text_passes_{{0, UI_POS_Y(3) + 126, UI_POS_MAXWIDTH, UI_POS_HEIGHT(kPassRows)}, pass_lines_, kPassRows, &ui::font::fixed_8x16} {
     add_children({&text_head_, &button_pos_, &button_load_, &labels_off_, &field_off_, &sky_, &text_side_, &text_passes_});
     field_off_.set_value(main_.utc_off_min_);
     field_off_.on_change = [this](int32_t v) {

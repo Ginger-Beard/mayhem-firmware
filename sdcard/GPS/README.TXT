@@ -56,10 +56,35 @@ Source (no login; CelesTrak allows one download per data update):
   https://celestrak.org/NORAD/elements/gp.php?GROUP=stations&FORMAT=TLE
 TLEs age: refresh them every few days for minute-accurate pass times.
 
+Heard tab (what the receiver hears)
+-----------------------------------
+"Search" records a snapshot (Quick 10 ms or Deep 20 ms) and searches it for
+GPS satellites. With orbit files, a position and the time it searches only the
+satellites that should be up, around their expected Doppler (faster); without
+them all 32 (Quick: about 1 minute, Deep: about 2 minutes, estimated). The list
+shows each satellite heard with a C/N0 bar (dB-Hz; 38 and up is good) and its
+Doppler in kHz. The second line shows the noise level: aim for 6-30 LSB with
+no "clip" (lower the gains if "gain-" shows, raise them if "gain+" shows), and
+the M4 time of one search step. The sky plot shows satellites predicted above
+the horizon (grey) and those heard (green).
+
+Fix tab (your position)
+-----------------------
+"Snapshot+eph file": needs /GPS/EPHEM.RNX for today, a rough position (within
+about 100 km: the saved position, e.g. your town) and the clock within about
+30 s. "Get fix" records 20 ms, searches the satellites that should be up and
+solves the position (about 10-20 s, estimated). It shows latitude, longitude,
+a rough altitude, the estimated error, satellites used / heard and the age of
+the ephemeris. "Save pos" writes /SETTINGS/position.ini (source "HackRF GPS"),
+which Signature Detect's Setup "Load" and the Passes tab use. 6 or more
+satellites are needed (the extra one checks the result).
+"Autonomous" (decoding the orbits from the signal, no file) is not available
+yet: selecting it shows "NOT AVAILABLE".
+
 Passes tab
 ----------
 Top: your position, UTC, what was loaded. Sky plot: GPS satellites above the
 horizon from the almanac/ephemeris (green, PRN numbers) and TLE satellites
-(orange). Right: GPS satellites by elevation. Bottom: the next pass of each
+(orange). Right: GPS satellites up (PRN, elevation, azimuth). Bottom: the next pass of each
 TLE satellite in the next 24 h: "in 1h05 47d 9m" = rises in 1 h 05 min,
 highest 47 degrees, visible 9 min ("UP" = above the horizon now).

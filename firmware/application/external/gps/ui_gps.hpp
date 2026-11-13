@@ -178,10 +178,10 @@ class PassesView : public View {
     Labels labels_off_;
     NumberField field_off_;
     SkyPlot sky_;
-    static constexpr size_t kSideRows = 17;
+    static constexpr size_t kSideRows = 15;
     TextLines::Line side_[kSideRows]{};
     TextLines text_side_;
-    static constexpr size_t kPassRows = 5;
+    static constexpr size_t kPassRows = 4;
     TextLines::Line pass_lines_[kPassRows]{};
     TextLines text_passes_;
     PassFinder finder_{};
