@@ -41,6 +41,8 @@ namespace nav {
 constexpr uint32_t kParityMask[6] = {0x3B1F3480u, 0x1D8F9A40u, 0x2EC7CD00u, 0x1763E680u, 0x2BB1F340u, 0x0B7A89C0u};
 
 inline uint32_t parity_bits(uint32_t w) { /* w: D29*, D30* and the source data bits d1..d24 */
+    /* D25..D30 include D29*, D30*, D29*, D30*, D30*, D29* (bit 31 = D29*, bit 30 = D30*) */
+    static constexpr int kStar[6] = {31, 30, 31, 30, 30, 31};
     uint32_t p = 0;
     for (int k = 0; k < 6; k++) {
         uint32_t x = w & kParityMask[k];
@@ -50,8 +52,7 @@ inline uint32_t parity_bits(uint32_t w) { /* w: D29*, D30* and the source data b
         x ^= x >> 2;
         x ^= x >> 1;
         uint32_t bit = x & 1u;
-        /* D25, D27, D29 include D30*; D26, D28, D30 include D29* */
-        bit ^= (k % 2 == 0) ? ((w >> 30) & 1u) : ((w >> 31) & 1u);
+        bit ^= (w >> kStar[k]) & 1u;
         p = (p << 1) | bit;
     }
     return p;
