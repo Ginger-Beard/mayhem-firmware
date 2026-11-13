@@ -411,13 +411,17 @@ class Si5351 {
     }
     regvalue_t read_register(const uint8_t reg);
 
+    /* Register writes are idempotent: one retry, which follows the I2C
+     * layer's bus recovery after the first failure. Returns false when the
+     * register could not be written (the clock is then not what was asked). */
     template <size_t N>
-    void write(const std::array<uint8_t, N>& values) {
-        _bus.transmit(_address, values.data(), values.size());
+    bool write(const std::array<uint8_t, N>& values) {
+        return write(values.data(), values.size());
     }
+    bool write(const uint8_t* data, size_t count);
 
-    void write_register(const uint8_t reg, const regvalue_t value) {
-        write(std::array<uint8_t, 2>{
+    bool write_register(const uint8_t reg, const regvalue_t value) {
+        return write(std::array<uint8_t, 2>{
             reg, value});
     }
 
@@ -447,7 +451,8 @@ class Si5351 {
     }
 #endif
 
-    void set_ms_frequency(
+    /* false: a register write failed, the output is not at `frequency`. */
+    bool set_ms_frequency(
         const size_t ms_number,
         const uint32_t frequency,
         const uint32_t vco_frequency,

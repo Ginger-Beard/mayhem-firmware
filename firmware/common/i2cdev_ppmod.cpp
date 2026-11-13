@@ -36,6 +36,7 @@ bool I2cDev_PPmod::init(uint8_t addr_) {
     if (addr_ != I2CDEV_PPMOD_ADDR_1) return false;
     addr = addr_;
     model = I2CDECMDL_PPMOD;
+    chMtxInit(&command_mutex);
     query_interval = 1;  // self timer will handle the update interval per subdevice
     mask = get_features_mask();
     if (mask & (uint64_t)SupportedFeatures::FEAT_SHELL) {
@@ -46,7 +47,8 @@ bool I2cDev_PPmod::init(uint8_t addr_) {
 }
 
 void I2cDev_PPmod::update() {
-    if (isLocked()) return;  // device is busy
+    if (isLocked()) return;                     // device is busy
+    if (!chMtxTryLock(&command_mutex)) return;  // an app's custom_command() is on the bus
     // mask = get_features_mask(); //saved on init. replug device if something changed. //needs to revise when modules come out.
     if (mask & (uint64_t)SupportedFeatures::FEAT_GPS && self_timer % SENSORUPDATETIME == 0) {
         auto data = get_gps_data();
@@ -99,6 +101,20 @@ void I2cDev_PPmod::update() {
     if (self_timer >= 250) {
         self_timer = 0;  // rounding bc of uint8_t overflow
     }
+    chMtxUnlock();
+}
+
+bool I2cDev_PPmod::custom_command(uint16_t command, const uint8_t* tx, size_t tx_len, uint8_t* rx, size_t rx_len) {
+    uint8_t buff[2 + 30];
+    if (tx_len > sizeof(buff) - 2 || rx_len > 128) return false;
+    buff[0] = command & 0xFF;
+    buff[1] = command >> 8;
+    if (tx_len) memcpy(&buff[2], tx, tx_len);
+    chMtxLock(&command_mutex);
+    bool success = i2c_write(nullptr, 0, buff, 2 + tx_len);
+    if (success && rx_len) success = i2c_read(nullptr, 0, rx, rx_len);
+    chMtxUnlock();
+    return success;
 }
 
 bool I2cDev_PPmod::get_shell_get_buffer_data(uint8_t* buff, size_t len) {

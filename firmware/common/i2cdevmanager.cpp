@@ -263,6 +263,28 @@ I2cDev* I2CDevManager::get_dev_by_model(I2C_DEVMDL model) {
     return nullptr;
 }
 
+I2cDev* I2CDevManager::acquire_dev_by_model(I2C_DEVMDL model) {
+    I2cDev* ret = nullptr;
+    chMtxLock(&mutex_list);
+    for (size_t i = 0; i < devlist.size(); i++) {
+        I2cDev* dev = devlist[i].dev.get();
+        if (devlist[i].addr != 0 && dev && !dev->need_del && dev->model == model && dev->users < UINT8_MAX) {
+            dev->users++;
+            ret = dev;
+            break;
+        }
+    }
+    chMtxUnlock();
+    return ret;
+}
+
+void I2CDevManager::release_dev(I2cDev* dev) {
+    if (!dev) return;
+    chMtxLock(&mutex_list);
+    if (dev->users) dev->users--;
+    chMtxUnlock();
+}
+
 std::vector<I2C_DEVMDL> I2CDevManager::get_dev_list_by_model() {
     std::vector<I2C_DEVMDL> ret;
     chMtxLock(&mutex_list);
@@ -342,6 +364,7 @@ msg_t I2CDevManager::timer_fn(void* arg) {
         chMtxLock(&mutex_list);
         size_t cnt = devlist.size();
         devlist.erase(std::remove_if(devlist.begin(), devlist.end(), [](const I2DevListElement& x) {
+                          if (x.dev && x.dev->users) return false;  // acquired: removed on a pass after release_dev()
                           if (x.addr == 0) return true;
                           if (x.dev && x.dev->need_del == true) return true;
                           return false;
@@ -380,9 +403,11 @@ msg_t I2CDevManager::timer_fn(void* arg) {
 };  // namespace i2cdev
 
 extern "C" int oNofityI2cFromShell(uint8_t* buff, size_t len) {
-    i2cdev::I2cDev* dev = i2cdev::I2CDevManager::get_dev_by_model(I2C_DEVMDL::I2CDECMDL_PPMOD);
+    // shell thread: the manager thread must not delete the device during the write
+    i2cdev::I2cDev* dev = i2cdev::I2CDevManager::acquire_dev_by_model(I2C_DEVMDL::I2CDECMDL_PPMOD);
     if (!dev) return 0;  // nothing to send to, so /dev/null
     uint16_t reg = 9;    // COMMAND_SHELL_PPTOMOD_DATA;
-    if (dev->i2c_write((uint8_t*)&reg, 2, buff, len)) return 0;
+    dev->i2c_write((uint8_t*)&reg, 2, buff, len);
+    i2cdev::I2CDevManager::release_dev(dev);
     return 0;  // shoud have an error handler
 }

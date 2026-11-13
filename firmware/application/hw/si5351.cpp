@@ -68,15 +68,21 @@ void Si5351::reset() {
     // are properly configured. This matches HackRF reference firmware.
 }
 
+bool Si5351::write(const uint8_t* data, size_t count) {
+    const systime_t timeout = I2C::timeout_for(count);
+    return _bus.transmit(_address, data, count, timeout) ||
+           _bus.transmit(_address, data, count, timeout);
+}
+
 Si5351::regvalue_t Si5351::read_register(const uint8_t reg) {
     const std::array<uint8_t, 1> tx{reg};
     std::array<uint8_t, 1> rx{0x00};
-    _bus.transmit(_address, tx.data(), tx.size());
-    _bus.receive(_address, rx.data(), rx.size());
+    if (_bus.transmit(_address, tx.data(), tx.size(), I2C::timeout_for(tx.size())))
+        _bus.receive(_address, rx.data(), rx.size(), I2C::timeout_for(rx.size()));
     return rx[0];
 }
 
-void Si5351::set_ms_frequency(
+bool Si5351::set_ms_frequency(
     const size_t ms_number,
     const uint32_t frequency,
     const uint32_t vco_frequency,
@@ -106,10 +112,11 @@ void Si5351::set_ms_frequency(
     /* PRALINE: Use single-byte writes - multi-byte I2C writes seem to fail */
     const uint8_t base_reg = regs[0];
     for (size_t i = 1; i < regs.size(); i++) {
-        write_register(base_reg + i - 1, regs[i]);
+        if (!write_register(base_reg + i - 1, regs[i])) return false; /* the rest would fail the same way */
     }
+    return true;
 #else
-    write(regs);
+    return write(regs);
 #endif
 }
 
