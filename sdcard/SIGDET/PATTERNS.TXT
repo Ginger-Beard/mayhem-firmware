@@ -1,0 +1,20 @@
+# Signature Detect pattern scan table (1 Mb/s GFSK emitters with a fixed sync word).
+# One entry per line, FREQMAN style: comma separated key=value fields, any order.
+#   name=    shown in lists and logs, up to 23 characters, no comma (required)
+#   class=   short tag, up to 4 characters, e.g. TOY (default PAT)
+#   ch=      channel centres in MHz, '/' separated, up to 8, e.g. 2429/2449 (required)
+#   sync=    sync word in hex as sent on air, first bit = MSB of the first digit (required)
+#   bits=    sync length in bits, 8..64 (default: 4 x the hex digits; the last bits are used)
+#   err=     bit errors allowed, 0..3 (at most ceil(bits/16)-1 is used: 40 bits -> 2)
+#   rate=    1M only (default)
+#   inv=     1 if bit 1 is the lower frequency (default 0)
+#   dwell=   milliseconds per channel visit, 20..250 (default 60)
+#   payload= bits after the sync to return with each hit, 0..64 (default 0, debug only)
+# Up to 16 entries, lines up to 160 characters; bad lines are skipped and the first
+# one is shown on the app's Debug screen. '#' starts a comment line.
+#
+# Built into the app already (shown here as an example, keep it commented out):
+# name=RC toy (SLU23T24T23),class=TOY,ch=2429/2449,sync=5527151B97,bits=40,err=2,dwell=60
+#
+# Bench stand-in: rid-test-tx "dtm on 13 0" (BLE Direct Test Mode, PRBS9, 2428 MHz):
+# name=DTM bench C5,class=TST,ch=2428,sync=AA94826E8E00A4FF,bits=64,err=3,dwell=60

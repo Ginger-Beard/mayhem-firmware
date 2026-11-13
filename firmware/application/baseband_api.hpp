@@ -126,6 +126,19 @@ void set_epirb_rx_config(EPIRBRXConfig& message);
 void set_p25tx_data(const uint8_t* dibits, uint16_t frame_length);
 void set_hunter_config(uint32_t threshold, uint32_t hangtime_ms, bool start);
 void set_wmbus_config(uint8_t mode = 0);
+void set_signature_detect(uint32_t sampling_rate, uint8_t mode, uint8_t channel, uint8_t flags);
+/* Pattern mode of the Signature Detect baseband: sync word right aligned (8..64 bits), see
+ * SignatureDetectConfigMessage. tag comes back in every SignatureDetectPatternHitMessage. */
+void set_signature_detect_pattern(uint32_t sampling_rate, uint8_t tag, uint8_t flags, uint64_t sync, uint8_t sync_bits, uint8_t max_errors, uint8_t payload_bits, uint8_t pat_flags);
+/* Wi-Fi Remote ID mode (4 Msps, 802.11b 1 Mb/s): the caller has tuned target = channel centre +
+ * slice_mhz + 1 MHz. wifi_channel comes back in every SignatureDetectWifiMessage. */
+void set_signature_detect_dsss(uint8_t wifi_channel, int8_t slice_mhz, uint8_t flags);
+/* BLE mode of the Signature Detect baseband restricted to one advertiser (track view):
+ * FLAG_TARGET, addr = AdvA in its low 48 bits, most significant byte first. */
+void set_signature_detect_target(uint8_t channel, uint8_t flags, uint64_t addr);
+/* FSK frame mode (MODE_FSK): the caller has tuned target = the rules' frequency; the M4 copies *dwell
+ * while it handles the message. tag is the app's (the dwell). */
+void set_signature_detect_fsk(uint32_t sampling_rate, uint8_t tag, uint8_t flags, const sigdet::FskDwell* dwell);
 
 void request_roger_beep();
 void request_rssi_beep();

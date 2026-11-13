@@ -441,6 +441,21 @@ set(EXTCPPSRC
 	external/subghz_chat/main.cpp
 	external/subghz_chat/ui_subghz_chat.cpp
 	external/subghz_chat/chat_crypto.cpp
+	#signature_detect
+	external/signature_detect/main.cpp
+	external/signature_detect/ui_signature_detect.cpp
+	external/signature_detect/odid_lite.cpp
+	external/signature_detect/sigdet_fmt.cpp
+	external/signature_detect/sigdet_model.cpp
+	external/signature_detect/sigdet_demo.cpp
+	external/signature_detect/sigdet_esp.cpp
+	external/signature_detect/sigdet_rf.cpp
+	external/signature_detect/sigdet_pattern.cpp
+	external/signature_detect/sigdet_sig.cpp
+	external/signature_detect/sigdet_survey.cpp
+	external/signature_detect/sigdet_track.cpp
+	external/signature_detect/sigdet_zwnet.cpp
+	external/signature_detect/sigdet_capture.cpp
 )
 
 set(EXTAPPLIST
@@ -548,5 +563,6 @@ set(EXTAPPLIST
 	wmbus_rx
 	vdl2_rx
 	subghz_chat
+	signature_detect
 )
 

@@ -1,0 +1,20 @@
+# Signature Detect signature class: 902-928 MHz ISM (the 915 MHz sweep only).
+# Energy rules (NB) are low confidence: they say there was energy at that
+# frequency with that timing, not which protocol it was. The 915 sweep has
+# ~81 kHz points, so two emitters closer than ~160 kHz are one.
+#
+# Meshtastic, US frequency slot 94 (925.375 MHz): LoRa 250 kHz chirps, packets
+# 0.6-0.9 s; seen in test recordings.
+NB,label=Mesh 925.375,kind=mesh,f=925.375,bw=250,db=10,valid=real
+# Meshtastic default slot 20 (LongFast, 906.875 MHz).
+NB,label=Mesh 906.875,kind=mesh,f=906.875,bw=250,db=10,valid=doc
+# Utility meters / FHSS FSK devices: ~7 ms bursts, 60-150 kHz wide, a new
+# frequency each time, anywhere in 911-921 MHz (seen in test recordings).
+NB,label=Meter FHSS,kind=meter,f=916,bw=10000,db=12,duty=1-60,valid=real
+# Z-Wave frame receiver: checksum-valid R1 frames (9.6 kb/s) on 908.42 MHz, seen
+# 2026-11-12 on a test network (real). It takes a
+# 1.5 s dwell in each cycle; the NB rules below are the energy fallback.
+ZW,label=Z-Wave,kind=home,rate=9k6,f=908.42,valid=real
+# Z-Wave US: 908.42 and 916.00 MHz.
+NB,label=Z-Wave 908.4,kind=home,f=908.42,bw=200,db=10,duty=0-50,valid=real
+NB,label=Z-Wave 916.0,kind=home,f=916.0,bw=300,db=10,duty=0-50,valid=doc

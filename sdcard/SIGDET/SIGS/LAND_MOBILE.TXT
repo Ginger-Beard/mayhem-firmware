@@ -1,0 +1,19 @@
+# Signature Detect signature class: land-mobile radio (EXAMPLES - edit them).
+# Two custom sweep bands; energy rules only. The sweep's points are ~55-60 kHz
+# apart here, so it cannot tell P25 from NXDN, DMR or analog FM, nor a 12.5 kHz
+# channel from its neighbour: a rule says "a carrier there, with this timing".
+#
+BAND,name=800,lo=851,hi=869,points=320,dwell=300
+BAND,name=UHF,lo=450,hi=465,points=320,dwell=300
+#
+# A continuous narrow carrier in the 800 MHz band, as a trunked control
+# channel looks (example frequency: replace it with a local one).
+NB,label=800 carrier,kind=radio,f=855.000,bw=25,db=6,duty=80-100,valid=doc
+# EXAMPLE placeholder: a P25-style control channel. Replace f= with a local
+# control channel frequency.
+NB,label=P25 CC example,kind=radio,f=851.025,bw=25,db=6,duty=80-100,valid=doc
+# EXAMPLE placeholder: an NXDN-style site beacon (bursts, not continuous).
+# Replace f= and the timing with what a local system does.
+NB,label=NXDN example,kind=radio,f=451.000,bw=25,db=8,duty=1-60,valid=doc
+# EXAMPLE placeholder: a narrow carrier that keys up now and then.
+NB,label=UHF example,kind=radio,f=455.000,bw=25,db=8,valid=doc

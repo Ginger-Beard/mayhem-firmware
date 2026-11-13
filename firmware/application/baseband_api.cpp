@@ -479,6 +479,42 @@ void set_wmbus_config(uint8_t mode) {
     send_message(&message);
 }
 
+void set_signature_detect(uint32_t sampling_rate, uint8_t mode, uint8_t channel, uint8_t flags) {
+    const SignatureDetectConfigMessage message{sampling_rate, mode, channel, flags};
+    send_message(&message);
+}
+
+void set_signature_detect_pattern(uint32_t sampling_rate, uint8_t tag, uint8_t flags, uint64_t sync, uint8_t sync_bits, uint8_t max_errors, uint8_t payload_bits, uint8_t pat_flags) {
+    SignatureDetectConfigMessage message{sampling_rate, SignatureDetectConfigMessage::MODE_GFSK_PATTERN, tag, flags};
+    message.sync_hi = static_cast<uint32_t>(sync >> 32);
+    message.sync_lo = static_cast<uint32_t>(sync);
+    message.sync_bits = sync_bits;
+    message.max_errors = max_errors;
+    message.payload_bits = payload_bits;
+    message.pat_flags = pat_flags;
+    send_message(&message);
+}
+
+void set_signature_detect_target(uint8_t channel, uint8_t flags, uint64_t addr) {
+    SignatureDetectConfigMessage message{4000000, SignatureDetectConfigMessage::MODE_GFSK_BLE, channel,
+                                         static_cast<uint8_t>(flags | SignatureDetectConfigMessage::FLAG_TARGET)};
+    message.sync_hi = static_cast<uint32_t>(addr >> 32);
+    message.sync_lo = static_cast<uint32_t>(addr);
+    send_message(&message);
+}
+
+void set_signature_detect_fsk(uint32_t sampling_rate, uint8_t tag, uint8_t flags, const sigdet::FskDwell* dwell) {
+    SignatureDetectConfigMessage message{sampling_rate, SignatureDetectConfigMessage::MODE_FSK, tag, flags};
+    message.fsk = dwell;
+    send_message(&message);
+}
+
+void set_signature_detect_dsss(uint8_t wifi_channel, int8_t slice_mhz, uint8_t flags) {
+    SignatureDetectConfigMessage message{4000000, SignatureDetectConfigMessage::MODE_DSSS, wifi_channel, flags};
+    message.slice_mhz = slice_mhz;
+    send_message(&message);
+}
+
 static bool baseband_image_running = false;
 static bool rx_fs4_supported = false;
 
