@@ -924,25 +924,29 @@ void HeardView::show() {
             f.s("Preparing: sky first...");
             c = yellow;
         } else if (!mine) {
-            f.s(main_.assisted_possible() ? "Search: assisted" : "Search: all 32 (slow)");
+            f.s(main_.assisted_possible() ? "Search: assisted, then full" : "Search: all 32 (slow)");
             c = Color::light_grey();
         } else if (!main_.done_) {
+            const char* kind = main_.search_kind_ == GpsView::SK_ASSISTED ? "Assisted " : (main_.search_kind_ == GpsView::SK_FULL_AFTER ? "None: full " : "Full ");
             if (st.state == GpsRxStatusMessage::CAPTURING || main_.awaiting_seq_)
-                f.s(st.confirming ? "Confirming: capture" : "Capturing ").u(st.k_ms).s(" ms...");
+                f.s(kind).s(st.confirming ? "confirm..." : "capture...");
             else if (st.confirming)
-                f.s("Confirming ").u(st.done_prn).c('/').u(st.total_prn);
+                f.s(kind).s("confirm ").u(st.done_prn).c('/').u(st.total_prn);
             else
-                f.s(st.state == GpsRxStatusMessage::REFINING ? "Refining " : "Searching ").u(st.done_prn).c('/').u(st.total_prn).c(' ').u(static_cast<uint32_t>(main_.progress_pct())).c('%');
+                f.s(kind).u(st.done_prn).c('/').u(st.total_prn).c(' ').u(static_cast<uint32_t>(main_.progress_pct())).c('%');
             c = yellow;
         } else if (st.level == GpsRxStatusMessage::LEVEL_LOW) {
             f.s("Signal too low: no search");
             c = red;
-        } else if (heard < kMinFixSats) {
-            f.s("Heard ").u(static_cast<uint32_t>(heard)).s(" of ").u(kMinFixSats).s(" for a fix");
-            c = yellow;
         } else {
-            f.s("Heard ").u(static_cast<uint32_t>(heard)).s(" (confirmed)");
-            c = Color::green();
+            const char* kind = main_.search_kind_ == GpsView::SK_ASSISTED ? " assisted" : " full search";
+            if (heard < kMinFixSats) {
+                f.s("Heard ").u(static_cast<uint32_t>(heard)).s(" of ").u(kMinFixSats).c(',').s(kind);
+                c = yellow;
+            } else {
+                f.s("Heard ").u(static_cast<uint32_t>(heard)).c(',').s(kind);
+                c = Color::green();
+            }
         }
         text_status_.set(0, b, c);
     }
@@ -964,7 +968,7 @@ void HeardView::show() {
         } else {
             f.s(" ok");
         }
-        if (st.unit_cycles) f.s(" ").u(st.unit_cycles / 20000u).s("0us"); /* M4 time of one work unit, 10 us steps */
+        if (st.unit_cycles) f.s(" ").fixed(static_cast<int32_t>(st.unit_cycles / 20000u), 1).s("ms"); /* M4 time of one work unit (was shown 10x too small) */
         text_status_.set(1, b, c);
     }
     text_status_.end();
@@ -1297,7 +1301,7 @@ void FixView::show_auto() {
             else if (st.confirming)
                 f.s("Confirming ").u(st.done_prn).c('/').u(st.total_prn);
             else
-                f.s(st.state == GpsRxStatusMessage::REFINING ? "Refining " : "Searching ").u(st.done_prn).c('/').u(st.total_prn).c(' ').u(static_cast<uint32_t>(main_.progress_pct())).c('%');
+                f.s(st.state == GpsRxStatusMessage::REFINING ? "Refining " : (main_.search_kind_ == GpsView::SK_FULL_AFTER ? "Full search " : "Searching ")).u(st.done_prn).c('/').u(st.total_prn).c(' ').u(static_cast<uint32_t>(main_.progress_pct())).c('%');
         } else if (running && st.level == GpsRxStatusMessage::LEVEL_LOW) {
             f.s("Signal too low: no search.");
             c = Color::red();
@@ -1412,7 +1416,7 @@ void FixView::show() {
         else if (st.confirming)
             f.s("Confirming ").u(st.done_prn).c('/').u(st.total_prn);
         else
-            f.s(st.state == GpsRxStatusMessage::REFINING ? "Refining " : "Searching ").u(st.done_prn).c('/').u(st.total_prn).c(' ').u(static_cast<uint32_t>(main_.progress_pct())).c('%');
+            f.s(st.state == GpsRxStatusMessage::REFINING ? "Refining " : (main_.search_kind_ == GpsView::SK_FULL_AFTER ? "Full search " : "Searching ")).u(st.done_prn).c('/').u(st.total_prn).c(' ').u(static_cast<uint32_t>(main_.progress_pct())).c('%');
         text_.set(0, b, yellow);
     } else if (main_.solving() || main_.solve_pending_) {
         text_.set(0, "Solving... (a few seconds;", yellow);
@@ -1775,6 +1779,14 @@ GpsView::GpsView(NavigationView& nav, uint32_t reselect)
     field_lna_.set_value(receiver_model.lna());
     field_vga_.set_value(receiver_model.vga());
     field_amp_.set_value(receiver_model.rf_amp());
+    /* rx_gps.ini (RX settings) restores the saved modulation, frequency, rate and
+     * filter: older files say WFM, which tunes the radio fs/4 = 512 kHz below L1
+     * (ReceiverModel::tuning_offset) and puts every satellite out of the search.
+     * PGPR expects L1 at DC and exactly 2.048 Msps: enforce that here. */
+    receiver_model.settings().mode = ReceiverModel::Mode::SpectrumAnalysis;
+    receiver_model.set_target_frequency(1575420000);
+    receiver_model.set_sampling_rate(2048000);
+    receiver_model.set_baseband_bandwidth(1750000);
 
     /* The receiver is on for as long as the app is open, as in the stock
      * receive apps: ReceiverModel::enable() applies the stored antenna-power
@@ -1970,7 +1982,7 @@ void GpsView::geo_step() {
     if (want_job_ != JOB_NONE) request_search(want_job_, want_kms_);
 }
 
-bool GpsView::start_search(Job job, uint8_t k_ms) {
+bool GpsView::start_search(Job job, uint8_t k_ms, bool force_full) {
     if (!mem_) return false;
     if (!rx_on_) { /* enabled since the app opened; kept as a guard */
         receiver_model.enable();
@@ -1984,7 +1996,7 @@ bool GpsView::start_search(Job job, uint8_t k_ms) {
     m.track = job == JOB_AUTO; /* the confirmed PRNs go straight to the tracking loops */
     m.max_ch = 8;              /* M4: ~60 % with 8 channels (notes, gps-autonomous) */
     int nprn = 0;
-    if (assisted_possible() && geo_ready_) {
+    if (!force_full && assisted_possible() && geo_ready_) {
         /* visible PRNs and their Doppler from the sky cache (at most kGeoPeriodS
          * plus one pass old: the Doppler moves < 1 Hz/s) */
         const double min_el = job == JOB_FIX ? kMinFixEl : 0.0;
@@ -1998,8 +2010,9 @@ bool GpsView::start_search(Job job, uint8_t k_ms) {
         }
         m.half_bins = kAssistedHalfBins;
     }
+    search_kind_ = nprn ? SK_ASSISTED : (force_full ? SK_FULL_AFTER : SK_FULL);
     if (!nprn) {
-        if (job == JOB_FIX) return false; /* Autonomous may search all 32 (slow, no files) */
+        if (job == JOB_FIX && !force_full) return false; /* Autonomous may search all 32 (slow, no files) */
         m.prn_mask = 0xFFFFFFFFu;
         m.half_bins = kColdHalfBins;
         nprn = 32;
@@ -2070,6 +2083,21 @@ void GpsView::on_status(const GpsRxStatusMessage& m) {
     if (awaiting_seq_ && m.state == GpsRxStatusMessage::CAPTURING) {
         awaiting_seq_ = false;
         job_seq_ = m.seq;
+    }
+    if (!awaiting_seq_ && job_ != JOB_NONE && m.seq == job_seq_ && m.state == GpsRxStatusMessage::DONE && !done_ &&
+        search_kind_ == SK_ASSISTED && m.level != GpsRxStatusMessage::LEVEL_LOW && m.results) {
+        /* the assisted search found nothing: the prediction may be wrong (position,
+         * clock, Zone, an old almanac, a large TCXO offset). Search all 32 PRNs over
+         * +-7 kHz instead, 10 ms (enough above ~39 dB-Hz, half the time of 20 ms). */
+        const auto* r = static_cast<const gps_rx::Result*>(m.results);
+        int det = 0;
+        for (int p = 0; p < 32; p++) det += r[p].detected;
+        if (!det) {
+            start_search(job_, 10, true);
+            view_heard_.show();
+            view_fix_.show();
+            return;
+        }
     }
     if (!awaiting_seq_ && job_ != JOB_NONE && m.seq == job_seq_ && m.state == GpsRxStatusMessage::DONE && !done_) {
         done_ = true;

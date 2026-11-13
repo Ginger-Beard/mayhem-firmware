@@ -570,7 +570,11 @@ class GpsView : public View {
         1575420000 /* GPS L1 */,
         1750000 /* baseband filter */,
         2048000 /* 2048 samples = 1 ms = one DMA buffer */,
-        ReceiverModel::Mode::WidebandFMAudio};
+        /* SpectrumAnalysis: the only mode ReceiverModel tunes exactly; every other
+         * mode tunes fs/4 (512 kHz) off and expects the baseband to shift it back,
+         * which PGPR does not (GpsView's constructor enforces this mode again after
+         * the settings file is read) */
+        ReceiverModel::Mode::SpectrumAnalysis};
     /* Time zone of the PortaPack clock: local standard time minus UTC, in
      * minutes (saved; e.g. -300 for US Eastern). With Mayhem's DST setting on,
      * the RTC hardware keeps standard time and this is the standard offset;
@@ -726,7 +730,13 @@ class GpsView : public View {
     void request_search(Job job, uint8_t k_ms);
     /* Start a snapshot search: assisted (visible PRNs, predicted Doppler)
      * when orbits, a position and the time allow, else all 32 PRNs. */
-    bool start_search(Job job, uint8_t k_ms);
+    bool start_search(Job job, uint8_t k_ms, bool force_full = false);
+    /* What the running / last search covered (Heard says it plainly). */
+    enum SearchKind : uint8_t { SK_NONE,
+                                SK_ASSISTED,    /* predicted PRNs and Doppler (almanac, position, time) */
+                                SK_FULL,        /* all 32 PRNs, +-7 kHz (no orbits or position) */
+                                SK_FULL_AFTER }; /* all 32 after an assisted search found none */
+    SearchKind search_kind_{SK_NONE};
     /* Stop a running search (the M4 drops it at its next work unit). */
     void stop_search();
     bool searching() const { return job_ != JOB_NONE && !done_; }
