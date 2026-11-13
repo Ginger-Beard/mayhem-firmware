@@ -479,6 +479,36 @@ void set_wmbus_config(uint8_t mode) {
     send_message(&message);
 }
 
+void set_drone_detect(uint32_t sampling_rate, uint8_t mode, uint8_t channel, uint8_t flags) {
+    const DroneDetectConfigMessage message{sampling_rate, mode, channel, flags};
+    send_message(&message);
+}
+
+void set_drone_detect_pattern(uint32_t sampling_rate, uint8_t tag, uint8_t flags, uint64_t sync, uint8_t sync_bits, uint8_t max_errors, uint8_t payload_bits, uint8_t pat_flags) {
+    DroneDetectConfigMessage message{sampling_rate, DroneDetectConfigMessage::MODE_GFSK_PATTERN, tag, flags};
+    message.sync_hi = static_cast<uint32_t>(sync >> 32);
+    message.sync_lo = static_cast<uint32_t>(sync);
+    message.sync_bits = sync_bits;
+    message.max_errors = max_errors;
+    message.payload_bits = payload_bits;
+    message.pat_flags = pat_flags;
+    send_message(&message);
+}
+
+void set_drone_detect_target(uint8_t channel, uint8_t flags, uint64_t addr) {
+    DroneDetectConfigMessage message{4000000, DroneDetectConfigMessage::MODE_GFSK_BLE, channel,
+                                     static_cast<uint8_t>(flags | DroneDetectConfigMessage::FLAG_TARGET)};
+    message.sync_hi = static_cast<uint32_t>(addr >> 32);
+    message.sync_lo = static_cast<uint32_t>(addr);
+    send_message(&message);
+}
+
+void set_drone_detect_dsss(uint8_t wifi_channel, int8_t slice_mhz, uint8_t flags) {
+    DroneDetectConfigMessage message{4000000, DroneDetectConfigMessage::MODE_DSSS, wifi_channel, flags};
+    message.slice_mhz = slice_mhz;
+    send_message(&message);
+}
+
 static bool baseband_image_running = false;
 static bool rx_fs4_supported = false;
 

@@ -441,6 +441,21 @@ set(EXTCPPSRC
 	external/subghz_chat/main.cpp
 	external/subghz_chat/ui_subghz_chat.cpp
 	external/subghz_chat/chat_crypto.cpp
+	#drone_detect
+	external/drone_detect/main.cpp
+	external/drone_detect/ui_drone_detect.cpp
+	external/drone_detect/odid_lite.cpp
+	external/drone_detect/dd_fmt.cpp
+	external/drone_detect/dd_model.cpp
+	external/drone_detect/dd_demo.cpp
+	external/drone_detect/dd_esp.cpp
+	external/drone_detect/dd_rf.cpp
+	external/drone_detect/dd_pattern.cpp
+	external/drone_detect/dd_sig.cpp
+	external/drone_detect/dd_survey.cpp
+	external/drone_detect/dd_track.cpp
+	external/drone_detect/dd_zwnet.cpp
+	external/drone_detect/dd_capture.cpp
 )
 
 set(EXTAPPLIST
@@ -548,5 +563,6 @@ set(EXTAPPLIST
 	wmbus_rx
 	vdl2_rx
 	subghz_chat
+	drone_detect
 )
 

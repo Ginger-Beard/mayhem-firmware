@@ -35,6 +35,10 @@ add_executable(baseband_test EXCLUDE_FROM_ALL
 	${PROJECT_SOURCE_DIR}/main.cpp
 	${PROJECT_SOURCE_DIR}/dsp_fft_test.cpp
 	${PROJECT_SOURCE_DIR}/spec_an_dsp_test.cpp
+	${PROJECT_SOURCE_DIR}/dd_dsp_test.cpp
+	${PROJECT_SOURCE_DIR}/dd_pattern_test.cpp
+	${PROJECT_SOURCE_DIR}/dd_dsss_test.cpp
+	${PROJECT_SOURCE_DIR}/dd_droneid_test.cpp
 	${COMMON}/dsp_fft.cpp
 )
 
@@ -60,6 +64,7 @@ target_compile_options(baseband_test PRIVATE
 	-DTOOLCHAIN_GCC_ARM
 	-D_RANDOM_TCC=0
 	-DVERSION_STRING=\"${VERSION}\"
+	-DDD_BTLERX_HPP=\"${BASEBAND}/proc_btlerx.hpp\"
 )
 
 add_test(NAME baseband_test

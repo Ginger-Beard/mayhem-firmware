@@ -574,6 +574,15 @@ set(MODE_CPPSRC
 DeclareTargets(PPVW protoview)
 
 
+### Drone detect (BLE Remote ID demodulator + spectrum sweep engine)
+
+set(MODE_CPPSRC
+	proc_drone_detect.cpp
+	spec_an_engine.cpp
+)
+DeclareTargets(PDRN drone_detect)
+
+
 
 
 ###### AFTER THIS LINE ALL LISTED BASEBANDS WILL BE EXTERNAL ON TIER 2, so it'll be external on all tiers

@@ -1,0 +1,16 @@
+# Signature Detect: the built-in "Drones" class (documentation only - this file
+# is not loaded and not listed on the wheel; "Drones" works without an SD card).
+#
+# Drones runs every drone detector of the app, as set in Setup:
+#   - Remote ID over Bluetooth LE (ASTM F3411 / Open Drone ID), BLE dwells
+#     on channels 37 / 39 / 38, with drone and operator positions;
+#   - DJI Bluetooth adverts (presence, dd_ble_vendor.hpp table);
+#   - Remote ID over Wi-Fi 1 Mb/s beacons / NAN on channel 6 (HackRF itself);
+#   - DJI DroneID (OcuSync) burst detector, every ~40 s, presence only;
+#   - pattern scan: the built-in RC toy (FCC ID SLU23T24T23) plus the entries
+#     of /SIGDET/PATTERNS.TXT;
+#   - energy sweeps of 2.4, 5.8, 5.3, 5.1, 1.2 GHz and 915 (or EU 868) MHz with
+#     the analog / digital video, ELRS / Crossfire / R9 / FHSS hop-grid, Wi-Fi
+#     and microwave-oven classifiers.
+# Setup's receiver and band boxes apply to this class only; a class file
+# decides its own receivers. To add a drone pattern entry, use PATTERNS.TXT.
