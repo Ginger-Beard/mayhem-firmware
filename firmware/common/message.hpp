@@ -2620,7 +2620,7 @@ struct GpsRxStatusMessage : public Message {
                            LEVEL_HIGH /* clipping: results still reported */ };
     /* The M4 RAM PGPR lends the app: orbit tables and solver work space
      * (never touched by the M4). */
-    static constexpr uint16_t kScratchSize = 9216;
+    static constexpr uint16_t kScratchSize = 10240;
     uint8_t state{IDLE};
     uint8_t level{LEVEL_OK};
     uint8_t confirming{0}; /* second (confirmation) snapshot under way */

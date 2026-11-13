@@ -27,9 +27,11 @@ against a day of broadcast ephemerides, 2020 and 2026, 7 satellites heard):
   2 weeks        about 3 km typical, 10 km
   1 month        about 10 km typical, 30 km; many fixes refused
   over 30 days   refused ("Almanac is 45 d old, max 30")
-So this file gives fixes until about 2026-12-15, good to a km or two until
-about 2026-11-25. The sky plot and the search only need the almanac to
-within a few degrees: an almanac months old still works there.
+So this file gives fixes until about 2026-12-15 (the Fix tab shows "until
+15 Dec"), good to a km or two until about 2026-11-25: REPLACE IT ABOUT ONCE A
+MONTH to keep the coarse fix working. The sky plot, the search and the
+pointing guide only need the almanac to within a few degrees: an almanac
+months old still works there.
 To refresh it (same folder, same file name), download on a computer:
   https://www.navcen.uscg.gov/sites/default/files/gps/almanac/current_yuma.alm
   (or https://celestrak.org/GPS/almanac/Yuma/<year>/ for older weeks)
@@ -120,6 +122,9 @@ them and solves the position. 6 or more satellites are needed (the sixth
 checks the other five). Two kinds of result:
 - COARSE (default, from the bundled almanac): "COARSE fix from the almanac",
   "almanac 3 d, est. +/-600 m" (about 2 fixes in 3 are within the estimate).
+  Before a fix the tab shows the almanac's age and "until 15 Dec; refresh
+  monthly": after that date the coarse fix is refused until ALMANAC.TXT is
+  replaced (see "The bundled almanac").
 - PRECISE (with a same-day /GPS/EPHEM.RNX): "Err est. ~15 m".
 The solver runs in the background: "Solving..." can take a few seconds and
 the screen and touch keep working ("Stop" cancels). "Save pos" writes
@@ -140,3 +145,24 @@ TLE satellite in the next 24 h: "in 1h05 47d 9m" = rises in 1 h 05 min,
 highest 47 degrees, visible 9 min ("UP" = above the horizon now; "search 35%"
 while it is being computed). The sky is recomputed every few seconds, one
 satellite per display frame, so touch stays responsive.
+
+Selecting a satellite, pointing guide
+-------------------------------------
+On Passes and Heard, touch the sky plot (a yellow frame shows it has the
+wheel) and turn the wheel: it steps through the satellites listed (TLE pass
+rows, then the GPS satellites up; on Heard the heard ones). The selected one
+is highlighted in the list, ringed on the plot, and its pass is drawn as a
+cyan arc. Select (or a second tap on the same row) opens its page:
+- where to point now in big letters ("NW 310 deg", "24 deg up") and in
+  30 s, and a countdown ("rises in 5m12", "peak in 2m05", "sets in 7m30");
+- the pass arc with the satellite ringed where it is now;
+- a plain summary in local time: "Rises 14:02 NW 310", "Peak 14:07 42 up,
+  SW", "Sets 14:12 SE 135" (and the rise time in UTC);
+- details: GPS satellites: health, orbit source and age, Doppler at L1,
+  heard or not (C/N0, how long ago), range; TLE satellites: TLE age, range,
+  closing / receding speed, highest elevation and duration.
+Point the antenna to the compass bearing (true north; a phone compass shows
+magnetic north, which differs by a few degrees in most places) and tilt it up
+by the elevation. TLEs of low satellites go stale in days to weeks: after
+7 days the age shows yellow, after 14 days red "too old to point by".
+Back returns to the tab.

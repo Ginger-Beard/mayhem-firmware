@@ -462,6 +462,7 @@ set(EXTCPPSRC
 	external/gps/gps_orbit.cpp
 	external/gps/gps_sgp4.cpp
 	external/gps/gps_pass.cpp
+	external/gps/gps_point.cpp
 	external/gps/gps_solve.cpp
 )
 

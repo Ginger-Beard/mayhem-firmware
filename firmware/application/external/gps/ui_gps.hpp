@@ -54,6 +54,7 @@
 #include "gps_sgp4.hpp"
 #include "gps_pass.hpp"
 #include "gps_solve.hpp"
+#include "gps_point.hpp"
 #endif
 
 namespace ui::external_app::gps {
@@ -86,12 +87,31 @@ class TextLines : public Widget {
      * unchanged screen is not repainted. */
     void begin() { used_ = 0; }
     void end();
+    /* one row drawn inverted (the wheel selection), -1 for none */
+    void set_highlight(int row);
+    /* a tap on a row (rows are line_height apart) */
+    std::function<void(size_t)> on_row{};
+    bool on_touch(const TouchEvent event) override;
 
    private:
     Line* lines_;
     size_t rows_;
     const Font* font_;
     uint32_t used_{0};
+    int8_t hl_{-1};
+};
+
+/* 8x16 text drawn at twice the size (the pointing readout). */
+class BigText : public Widget {
+   public:
+    BigText(Rect r)
+        : Widget{r} {}
+    void set(const char* text, Color color);
+    void paint(Painter& painter) override;
+
+   private:
+    char text_[16]{};
+    Color color_{Color::white()};
 };
 
 /* Azimuth / elevation plot: north up, the horizon as the outer ring. */
@@ -103,6 +123,7 @@ class SkyPlot : public Widget {
         char label[4];
         Color color;
         bool filled;
+        bool sel; /* the wheel selection: ringed */
     };
     static constexpr size_t kMax = 32;
     SkyPlot(Rect r, const char* title)
@@ -113,7 +134,17 @@ class SkyPlot : public Widget {
         n_ = 0;
         hash_ = 2166136261u;
     }
-    void add(int16_t az, int16_t el, const char* label, Color color, bool filled);
+    void add(int16_t az, int16_t el, const char* label, Color color, bool filled, bool selected = false);
+    /* the selected satellite's pass arc (nullptr: none) and a "now" marker */
+    void set_track(const PassTrack* t) {
+        track_ = t;
+        hash_ = (hash_ ^ (t && t->ready() ? static_cast<uint32_t>(t->pass().rise) : 0u)) * 16777619u;
+    }
+    /* focusable: the wheel then steps through the satellites (the parent view
+     * gets the encoder and Select events) */
+    bool on_touch(const TouchEvent event) override;
+    void on_focus() override { set_dirty(); }
+    void on_blur() override { set_dirty(); }
     /* repaint only if the dots differ from what was last painted */
     void commit() {
         if (hash_ != shown_) {
@@ -127,6 +158,7 @@ class SkyPlot : public Widget {
     Dot dots_[kMax]{};
     size_t n_{0};
     uint32_t hash_{2166136261u}, shown_{0};
+    const PassTrack* track_{nullptr};
     const char* title_; /* drawn top left, e.g. "GPS now" */
 };
 
@@ -148,6 +180,10 @@ struct GpsScratch {
     SolveWork solve;
     SatGeo geo[32];
     SatGeo tle_geo[kMaxTle];
+    Sgp4 sel;              /* the selected TLE satellite */
+    PassTrack track;       /* the selected satellite's pass (current or next) and arc */
+    uint32_t heard_at[32]; /* unix s of the last confirmation, 0 never */
+    uint8_t heard_cn0[32];
 };
 
 class GpsView;
@@ -219,8 +255,15 @@ class PassesView : public View {
     TextLines::Line pass_lines_[kPassRows]{};
     TextLines text_passes_;
     PassList passes_{};
+    uint8_t side_prn_[kSideRows]{}; /* side-list row -> PRN index + 1 (0: none) */
     void show_passes();
     void zone_changed();
+    int items() const; /* TLE pass rows, then GPS side rows */
+    void item(int i, uint8_t& kind, uint8_t& idx) const;
+    void show_selection();
+    bool on_encoder(const EncoderEvent delta) override;
+    bool on_key(const KeyEvent key) override;
+    void tap(uint8_t kind, uint8_t idx);
 };
 
 class HeardView : public View {
@@ -241,6 +284,9 @@ class HeardView : public View {
     TextLines::Line list_[kListRows]{};
     TextLines text_list_;
     SkyPlot sky_;
+    uint8_t list_prn_[kListRows]{}; /* list row -> PRN index + 1 (0: none) */
+    bool on_encoder(const EncoderEvent delta) override;
+    bool on_key(const KeyEvent key) override;
 };
 
 class FixView : public View {
@@ -280,6 +326,36 @@ class PositionView : public View {
     Button button_save_;
 };
 
+/* One satellite: where to point now and in 30 s (compass words), the pass
+ * countdown, the pass arc with a "now" marker, a plain-words summary and the
+ * details (pushed from Passes / Heard with Select or a second tap). */
+class SatView : public View {
+   public:
+    SatView(NavigationView& nav, GpsView& main);
+    ~SatView();
+    SatView(const SatView&) = delete;
+    SatView& operator=(const SatView&) = delete;
+    void focus() override;
+    std::string title() const override { return "Satellite"; };
+
+   private:
+    GpsView& main_;
+    static constexpr size_t kTopRows = 2, kSumRows = 4, kInfoRows = 15;
+    TextLines::Line top_[kTopRows]{};
+    TextLines text_top_;
+    BigText big_dir_;
+    BigText big_el_;
+    TextLines::Line now_[1]{};
+    TextLines text_now_;
+    SkyPlot sky_;
+    TextLines::Line info_[kInfoRows]{};
+    TextLines text_info_;
+    TextLines::Line sum_[kSumRows]{};
+    TextLines text_sum_;
+    SignalToken tick_{};
+    void refresh();
+};
+
 class GpsView : public View {
    public:
     GpsView(NavigationView& nav);
@@ -297,6 +373,7 @@ class GpsView : public View {
     friend class HeardView;
     friend class FixView;
     friend class PositionView;
+    friend class SatView;
 
     enum Job : uint8_t { JOB_NONE,
                          JOB_HEARD,
@@ -345,6 +422,17 @@ class GpsView : public View {
     uint32_t geo_started_{0};
     void geo_restart();
     void geo_step();
+
+    /* The wheel selection (shared by Passes and Heard) and its pass track. */
+    enum SelKind : uint8_t { SEL_NONE,
+                             SEL_GPS,
+                             SEL_TLE };
+    SelKind sel_kind_{SEL_NONE};
+    uint8_t sel_idx_{0}; /* PRN index or TLE index */
+    bool sel_source(SatSource& src);
+    void select(uint8_t kind, uint8_t idx); /* also restarts the pass track */
+    void open_selected();                   /* push SatView */
+    void sel_name(char* buf, size_t size) const;
     size_t geo_units() const { return 32u + 2u * n_tle_; }
 
     saved_position::Position pos_{};
