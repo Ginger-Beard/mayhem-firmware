@@ -215,6 +215,286 @@ struct Fields {
     bool key(const char* k) const { return equals(kb, ke, k); }
 };
 
+/* Hex digits (1..max_digits) into bytes, MSB first; bits = 4 x digits. */
+bool parse_hex_bits(const char* b, const char* e, size_t max_digits, uint8_t* out, uint8_t& bits) {
+    const size_t n = static_cast<size_t>(e - b);
+    if (!n || n > max_digits) return false;
+    memset(out, 0, (max_digits + 1) / 2);
+    for (size_t i = 0; i < n; i++) {
+        const int d = hex_digit(b[i]);
+        if (d < 0) return false;
+        out[i / 2] = static_cast<uint8_t>(out[i / 2] | (d << ((i & 1) ? 0 : 4)));
+    }
+    bits = static_cast<uint8_t>(4 * n);
+    return true;
+}
+
+/* 1..4 hex digits. */
+bool parse_hex_u16(const char* b, const char* e, uint16_t& out) {
+    if (b == e || e - b > 4) return false;
+    uint32_t v = 0;
+    for (; b < e; b++) {
+        const int d = hex_digit(*b);
+        if (d < 0) return false;
+        v = (v << 4) | static_cast<uint32_t>(d);
+    }
+    out = static_cast<uint16_t>(v);
+    return true;
+}
+
+/* Bits/s: digits (9600), or with k as the decimal point (9k6, 40k, 1k2). */
+bool parse_rate(const char* b, const char* e, uint32_t& out) {
+    const char* k = b;
+    while (k < e && *k != 'k') k++;
+    uint32_t whole = 0, frac = 0;
+    if (k == e) {
+        if (!parse_uint(b, e, 1000000, whole)) return false;
+        out = whole;
+    } else {
+        if (!parse_uint(b, k, 1000, whole)) return false;
+        if (k + 1 < e && !parse_uint(k + 1, e, 9, frac)) return false;
+        if (e - k > 2) return false;
+        out = whole * 1000 + frac * 100;
+    }
+    return out >= 600 && out <= 250000;
+}
+
+bool parse_int8(const char* b, const char* e, int8_t& out) {
+    bool neg = b < e && *b == '-';
+    uint32_t v;
+    if (!parse_uint(neg ? b + 1 : b, e, 64, v)) return false;
+    out = static_cast<int8_t>(neg ? -static_cast<int32_t>(v) : static_cast<int32_t>(v));
+    return true;
+}
+
+bool parse_bool01(const char* b, const char* e, bool& out) {
+    if (equals(b, e, "1")) return out = true, true;
+    if (equals(b, e, "0")) return out = false, true;
+    return false;
+}
+
+/* The fields of an FSK line (README "FSK RULES"; sigdb [[framing.validity]]
+ * names). nullptr if fine, else why. */
+const char* parse_fsk(Fields& f, FskRuleDef& d, dd::FskRule& r) {
+    using namespace dd;
+    d = FskRuleDef{};
+    d.bw_khz = 200;
+    d.valid = SV_DOC;
+    r = FskRule{};
+    r.coding = FSK_NRZ;
+    r.len_size = 1;
+    r.len_counts = FSK_CNT_WHOLE;
+    r.cov_to = kFskBeforeCheck;
+    r.chk_pos = kFskLast;
+    uint8_t pre[2] = {}, sync[4] = {};
+    uint8_t pre_bits = 0, sync_bits = 0;
+    uint32_t pre_min = 2, err = 255, minf = 0, v = 0;
+    bool label = false, have_len = false, have_lmin = false, have_poly = false;
+    bool refin = false, refout = false;
+    while (f.next()) {
+        if (!f.has_eq) return "no '=' in a field";
+        if (f.key("label")) {
+            if (!copy_label(f.vb, f.ve, d.label, sizeof(d.label))) return "label length";
+            label = true;
+        } else if (f.key("kind")) {
+            if (!parse_kind(f.vb, f.ve, d.kind)) return "unknown kind";
+        } else if (f.key("valid")) {
+            if (!parse_valid(f.vb, f.ve, d.valid)) return "valid: real/standin/doc";
+        } else if (f.key("f")) {
+            if (!parse_mhz(f.vb, f.ve, d.f_khz)) return "bad f";
+        } else if (f.key("bw")) {
+            if (!parse_uint(f.vb, f.ve, 1000, v) || v < 16) return "bw: 16..1000 kHz";
+            d.bw_khz = static_cast<uint16_t>(v);
+        } else if (f.key("dev")) {
+            uint32_t lo, hi;
+            if (!parse_range(f.vb, f.ve, 500, lo, hi) || !hi) return "dev: lo-hi kHz";
+            d.dev_lo = static_cast<uint16_t>(lo);
+            d.dev_hi = static_cast<uint16_t>(hi);
+        } else if (f.key("rate")) {
+            if (!parse_rate(f.vb, f.ve, d.rate)) return "rate: 600..250000";
+        } else if (f.key("code")) {
+            if (equals(f.vb, f.ve, "nrz"))
+                r.coding = FSK_NRZ;
+            else if (equals(f.vb, f.ve, "manchester"))
+                r.coding = FSK_MAN;
+            else if (equals(f.vb, f.ve, "manchester_inverted"))
+                r.coding = FSK_MAN_INV;
+            else if (equals(f.vb, f.ve, "differential_manchester"))
+                r.coding = FSK_DMAN;
+            else
+                return "unknown code";
+        } else if (f.key("order")) {
+            if (equals(f.vb, f.ve, "lsb_first"))
+                r.flags |= FSK_F_LSB;
+            else if (!equals(f.vb, f.ve, "msb_first"))
+                return "order: msb/lsb_first";
+        } else if (f.key("pre")) {
+            if (!parse_hex_bits(f.vb, f.ve, 4, pre, pre_bits) || (pre_bits & 7)) return "pre: 2 or 4 hex";
+        } else if (f.key("pre_min")) {
+            if (!parse_uint(f.vb, f.ve, 255, pre_min)) return "bad pre_min";
+        } else if (f.key("sync")) {
+            if (!parse_hex_bits(f.vb, f.ve, 8, sync, sync_bits) || sync_bits < 8) return "sync: 2..8 hex";
+        } else if (f.key("err")) {
+            if (!parse_uint(f.vb, f.ve, 16, err)) return "err: 0..16";
+        } else if (f.key("len")) {
+            have_len = true;
+            if (equals(f.vb, f.ve, "carrier")) {
+                r.len_mode = FSK_LEN_CARRIER;
+            } else if (f.vb < f.ve && *f.vb == '@') {
+                if (!parse_uint(f.vb + 1, f.ve, 62, v)) return "len: N, @K, carrier";
+                r.len_mode = FSK_LEN_FIELD;
+                r.len_off = static_cast<uint8_t>(v);
+            } else {
+                if (!parse_uint(f.vb, f.ve, kFskMaxBytes, v) || !v) return "len: N, @K, carrier";
+                r.len_mode = FSK_LEN_FIXED;
+                r.len_min = r.len_max = static_cast<uint8_t>(v);
+            }
+        } else if (f.key("lsize")) {
+            if (!parse_uint(f.vb, f.ve, 2, v) || !v) return "lsize: 1 or 2";
+            r.len_size = static_cast<uint8_t>(v);
+        } else if (f.key("lcount")) {
+            if (equals(f.vb, f.ve, "whole_frame"))
+                r.len_counts = FSK_CNT_WHOLE;
+            else if (equals(f.vb, f.ve, "after_field"))
+                r.len_counts = FSK_CNT_AFTER;
+            else if (equals(f.vb, f.ve, "payload"))
+                r.len_counts = FSK_CNT_PAYLOAD;
+            else
+                return "unknown lcount";
+        } else if (f.key("ladj")) {
+            if (!parse_int8(f.vb, f.ve, r.len_adj)) return "ladj: -64..64";
+        } else if (f.key("lend") || f.key("cend")) {
+            const uint8_t bit = f.key("lend") ? FSK_F_LEN_LE : FSK_F_CHK_LE;
+            if (equals(f.vb, f.ve, "little"))
+                r.flags |= bit;
+            else if (!equals(f.vb, f.ve, "big"))
+                return "endian: big/little";
+        } else if (f.key("lmin") || f.key("lmax")) {
+            if (!parse_uint(f.vb, f.ve, kFskMaxBytes, v) || !v) return "lmin/lmax: 1..64";
+            if (f.key("lmin")) {
+                r.len_min = static_cast<uint8_t>(v);
+                have_lmin = true;
+            } else {
+                r.len_max = static_cast<uint8_t>(v);
+            }
+        } else if (f.key("check")) {
+            if (equals(f.vb, f.ve, "none"))
+                r.check = FSK_CHK_NONE;
+            else if (equals(f.vb, f.ve, "xor8"))
+                r.check = FSK_CHK_XOR8;
+            else if (equals(f.vb, f.ve, "sum8"))
+                r.check = FSK_CHK_SUM8;
+            else if (equals(f.vb, f.ve, "crc8"))
+                r.check = FSK_CHK_CRC8;
+            else if (equals(f.vb, f.ve, "crc16"))
+                r.check = FSK_CHK_CRC16;
+            else
+                return "unknown check";
+        } else if (f.key("seed") || f.key("poly") || f.key("xorout")) {
+            uint16_t x;
+            if (!parse_hex_u16(f.vb, f.ve, x)) return "seed/poly/xorout hex";
+            if (f.key("seed"))
+                r.seed = x;
+            else if (f.key("poly"))
+                r.poly = x, have_poly = true;
+            else
+                r.xorout = x;
+        } else if (f.key("refin") || f.key("refout")) {
+            bool b;
+            if (!parse_bool01(f.vb, f.ve, b)) return "refin/refout: 0/1";
+            (f.key("refin") ? refin : refout) = b;
+        } else if (f.key("cfrom")) {
+            if (!parse_uint(f.vb, f.ve, 63, v)) return "cfrom: 0..63";
+            r.cov_from = static_cast<uint8_t>(v);
+        } else if (f.key("cto")) {
+            if (equals(f.vb, f.ve, "before_check"))
+                r.cov_to = kFskBeforeCheck;
+            else if (parse_uint(f.vb, f.ve, 63, v))
+                r.cov_to = static_cast<uint8_t>(v);
+            else
+                return "cto: before_check/K";
+        } else if (f.key("cpos")) {
+            if (equals(f.vb, f.ve, "last"))
+                r.chk_pos = kFskLast;
+            else if (parse_uint(f.vb, f.ve, 63, v))
+                r.chk_pos = static_cast<uint8_t>(v);
+            else
+                return "cpos: last/K";
+        } else if (f.key("min")) {
+            if (!parse_uint(f.vb, f.ve, 10, minf) || !minf) return "min: 1..10";
+        } else if (f.key("post")) {
+            if (!equals(f.vb, f.ve, "zwave")) return "post: zwave";
+            d.post = FSK_POST_ZWAVE;
+        } else {
+            return "unknown key";
+        }
+    }
+    if (!label) return "no label";
+    if (!d.f_khz) return "no f";
+    if (!d.rate) return "no rate";
+    if (!sync_bits) return "no sync";
+    if (!have_len) return "no len";
+    if (refin) r.flags |= FSK_F_REFIN;
+    if (refout) r.flags |= FSK_F_REFOUT;
+    if ((r.check == FSK_CHK_CRC8 || r.check == FSK_CHK_CRC16) && !have_poly) return "crc: needs poly";
+    if (r.check == FSK_CHK_CRC8 || r.check <= FSK_CHK_SUM8) {
+        if (r.seed > 0xFF || r.poly > 0xFF || r.xorout > 0xFF) return "8 bit check: 2 hex";
+    }
+    if (r.len_mode != FSK_LEN_FIXED) {
+        if (!r.len_max) r.len_max = kFskMaxBytes;
+        if (!have_lmin) r.len_min = r.len_mode == FSK_LEN_CARRIER ? 2 : 1;
+        if (r.len_min > r.len_max) return "lmin over lmax";
+        if (r.len_mode == FSK_LEN_FIELD && r.len_off + r.len_size > r.len_max) return "len field past lmax";
+    }
+    /* front end: boxcar D, chips per sample, discriminator smoothing */
+    /* the receiver sums the 4 Msps samples in groups of 4 (the fs/4 shift):
+     * a boxcar of 4 k, k = 1000 / bw rounded (4 MS/s / 4 k out) */
+    const uint32_t k = (1000u + d.bw_khz / 2) / d.bw_khz;
+    d.decim = static_cast<uint8_t>(4 * (k < 1 ? 1 : (k > 62 ? 62 : k)));
+    const uint32_t fs2 = kFskInputRate / d.decim;
+    d.chip_hz = d.rate * fsk_chips_per_bit(r.coding);
+    if (d.chip_hz * 4 > fs2) return "rate too high for bw";
+    const uint32_t spc10 = fs2 * 10 / d.chip_hz;
+    const uint32_t ma = (spc10 + 13) / 26;
+    d.ma = static_cast<uint8_t>(ma < 1 ? 1 : (ma > 8 ? 8 : ma));
+    if (d.dev_hi && d.dev_hi * 1000u * 4 >= fs2) return "dev too wide for bw";
+    if (!fsk_pattern(pre, static_cast<uint8_t>(pre_bits / 8), static_cast<uint8_t>(pre_min > 255 ? 255 : pre_min), sync, sync_bits, r.coding, r.pattern, r.chips))
+        return "sync too long";
+    r.max_err = static_cast<uint8_t>(err != 255 ? err : r.chips / 12);
+    if (r.max_err * 4 > r.chips) return "err over chips/4";
+    /* default: 3 frames without a check, 2 with an 8 bit one (a chance pass
+     * is 1 in 256: one seen on a test recording by the R2 rule), 1 with
+     * crc16 */
+    d.min_frames = static_cast<uint8_t>(minf ? minf : (r.check == FSK_CHK_NONE ? 3 : (r.check == FSK_CHK_CRC16 ? 1 : 2)));
+    d.check = r.check;
+    return nullptr;
+}
+
+/* Rule d (its M4 part r) joins the dwell with the same f, boxcar and chip
+ * rate that has room, else a new one; the rule's index is its tag. */
+void fsk_place(SigClass& c, FskRuleDef& d, dd::FskRule& r) {
+    size_t g = 0;
+    for (; g < c.nfskg; g++) {
+        const FskGroup& x = c.fskg[g];
+        if (x.f_khz == d.f_khz && x.dwell.decim == d.decim && x.dwell.chip_hz == d.chip_hz && x.dwell.nrules < dd::kFskRulesPerDwell) break;
+    }
+    if (g == c.nfskg) {
+        FskGroup& x = c.fskg[c.nfskg++];
+        x = FskGroup{};
+        x.f_khz = d.f_khz;
+        x.bw_khz = d.bw_khz;
+        x.dwell.chip_hz = d.chip_hz;
+        x.dwell.decim = d.decim;
+        x.dwell.ma = d.ma;
+    }
+    FskGroup& x = c.fskg[g];
+    r.tag = c.nfsk;
+    d.group = static_cast<uint8_t>(g);
+    d.slot = x.dwell.nrules;
+    x.dwell.rules[x.dwell.nrules++] = r;
+    c.fsk[c.nfsk++] = d;
+}
+
 bool pattern_hit(const SigBytes& p, const uint8_t* d, size_t n) {
     if (n < p.n) return false;
     for (size_t i = 0; i < p.n; i++)
@@ -223,6 +503,15 @@ bool pattern_hit(const SigBytes& p, const uint8_t* d, size_t n) {
 }
 
 }  // namespace
+
+/* Z-Wave R1 (ITU-T G.9959; observed on 76 frames of a test network):
+ * 9.6 kb/s Manchester, preamble 0x55 (10 bytes or more), SOF 0xF0, the
+ * length byte at offset 7 counting the whole frame, XOR checksum seeded
+ * 0xFF over every byte before it. The ZW line overrides label, kind, valid
+ * and f. */
+const char* const kZwFskFields =
+    "label=Z-Wave,f=908.42,bw=200,dev=10-40,rate=9600,code=manchester,pre=55,pre_min=10,sync=F0,"
+    "len=@7,lmin=10,lmax=64,check=xor8,seed=FF,post=zwave";
 
 const char* sig_kind_name(uint8_t kind) {
     return kKindNames[kind < SK_COUNT ? kind : 0];
@@ -243,6 +532,7 @@ void SigParser::begin(SigClass& cls, PatternTable* pat) {
     memcpy(name, cls.name, sizeof(name));
     cls = SigClass{};
     memcpy(cls.name, name, sizeof(name));
+    cls.zw_rule = -1;
     cls_ = &cls;
     pat_ = pat;
     if (pat_) pat_->begin_file(false);
@@ -474,7 +764,7 @@ const char* SigParser::parse_line(const char* line, size_t len) {
     }
 
     if (equals(tb, te, "ZW")) {
-        if (c.rx & RX_ZW) return "one ZW rule a class";
+        if (c.zw_rule >= 0) return "one ZW rule a class";
         ZwRule r{};
         r.f_khz = 908420;
         r.kind = SK_HOME;
@@ -498,9 +788,44 @@ const char* SigParser::parse_line(const char* line, size_t len) {
             }
         }
         if (!label) return "no label";
+        if (c.nfsk >= kSigMaxFsk) return "over 4 FSK rules";
+        /* the built-in Z-Wave R1 FSK rule, with this line's f, label, kind, valid */
+        const char* zf = kZwFskFields;
+        Fields zfi{zf, zf + strlen(zf), nullptr, nullptr, nullptr, nullptr, false};
+        FskRuleDef& d = fsk_def_;
+        dd::FskRule& m4 = fsk_m4_;
+        if (parse_fsk(zfi, d, m4)) return "ZW: built-in rule";
+        d.f_khz = r.f_khz;
+        d.kind = r.kind;
+        d.valid = r.valid;
+        memcpy(d.label, r.label, sizeof(d.label));
+        d.line = static_cast<uint16_t>(c.report.lines);
+        c.zw_rule = static_cast<int8_t>(c.nfsk);
+        fsk_place(c, d, m4);
         c.zw = r;
         c.rx |= RX_ZW;
         c.report.zw++;
+        return nullptr;
+    }
+
+    if (equals(tb, te, "FSK")) {
+        if (c.nfsk >= kSigMaxFsk) return "over 4 FSK rules";
+        FskRuleDef& d = fsk_def_;
+        dd::FskRule& m4 = fsk_m4_;
+        const char* why = parse_fsk(f, d, m4);
+        if (why) return why;
+        if (d.post == FSK_POST_ZWAVE) {
+            if (c.zw_rule >= 0) return "one Z-Wave rule";
+            c.zw_rule = static_cast<int8_t>(c.nfsk);
+            c.zw.f_khz = d.f_khz;
+            c.zw.kind = d.kind;
+            c.zw.valid = d.valid;
+            memcpy(c.zw.label, d.label, sizeof(c.zw.label));
+            c.rx |= RX_ZW;
+        }
+        d.line = static_cast<uint16_t>(c.report.lines);
+        fsk_place(c, d, m4);
+        c.report.fsk++;
         return nullptr;
     }
 

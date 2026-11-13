@@ -75,6 +75,7 @@ enum class Kind : uint8_t {
     DroneId,    // DJI DroneID (OcuSync) bursts: presence only, one entity for all, key mac = 00 00 'D' 'I' 0 0
     Zwave,      // Z-Wave network (dd_zwnet.hpp, PDRN MODE_ZWAVE), key mac = 'Z' 'W' home ID; label "ZW <home ID>"
     Sig,        // signature class rule (dd_sig.hpp): BLE advert (key: its address) or NB energy (key 00 00 'N' 'B' rule 0); presence only
+    Fsk,        // FSK rule (dd_sig.hpp, PDRN MODE_FSK): one entity per rule, key mac = 00 00 'F' 'S' rule 0; label = the rule's
 };
 
 constexpr uint32_t kStaleSeconds = 10;

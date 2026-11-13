@@ -106,7 +106,7 @@ void RecentEntriesTable<external_app::drone_detect::Tracker>::draw(
 
     /* A signature hit has no source letters or distance to show: its label
      * takes the Src column too, its kind tag (TRKR ...) the Dist column. */
-    const bool sig = entry.kind == Kind::Sig || entry.kind == Kind::Zwave;
+    const bool sig = entry.kind == Kind::Sig || entry.kind == Kind::Zwave || entry.kind == Kind::Fsk;
     char name[24];
     entity_name(entry, name, sizeof(name));
     size_t col = columns.at(0).second;
@@ -1729,6 +1729,11 @@ void DroneDetectView::report(Tracker::Event ev, const Entity& e) {
         report_sig(ev, e);
         return;
     }
+    if (e.kind == Kind::Fsk) {
+        /* The rule's frames stopped (kExpireSeconds): a summary row. */
+        if (ev == Tracker::EV_DROPPED) fsk_row("FSK_SUM", e.mac[4], nullptr);
+        return;
+    }
     if (e.kind == Kind::Zwave) {
         /* The network went quiet (kExpireSeconds): a summary row. */
         if (ev == Tracker::EV_DROPPED && sig_mem_) {
@@ -1933,6 +1938,7 @@ void DroneDetectView::select_class(size_t index) {
      * and name are still loaded: their SIG_DROP / ZW_SUM rows name it. */
     tracker_.drop_kind(Kind::Sig);
     tracker_.drop_kind(Kind::Zwave);
+    tracker_.drop_kind(Kind::Fsk);
     /* ... and every built-in detector's (RID_DROP / DJI_DROP / PAT_DROP /
      * DID_DROP rows): the new class lists only what it asks for. */
     tracker_.drop_kind(Kind::RemoteId);
@@ -1996,6 +2002,8 @@ void DroneDetectView::load_class() {
     }
     m.ble.clear();
     m.nrg.clear();
+    for (auto& x : m.fsk) x = FskSeen{};
+    fsk_cursor_ = 0;
     apply_options();
     configure(); /* FLAG_FWD_ADV for BLE rules */
 }
@@ -2241,18 +2249,18 @@ void DroneDetectView::heartbeat_row() {
     using I = int32_t;
     static constexpr const char* kKeys[] = {
         "up_s", "cyc_ms", "cpu", "ble_aa", "ble_ok", "ble_crc", "rid_ok", "rid_fwd", "other_fwd", "other_dup", "other_lost", "dji_ok",
-        "drops", "drops_ble", "drops_sweep", "drops_switch", "drops_pat", "drops_wifi", "qf", "qf_rid", "zw_syncs", "zw_ok", "zw_bad", "m0_stack_free_w", "rid_skip", "wifi_frames", "wifi_fcs_ok", "wifi_fcs_bad", "wifi_beacon", "wifi_probe", "wifi_action",
+        "drops", "drops_ble", "drops_sweep", "drops_switch", "drops_pat", "drops_wifi", "qf", "qf_rid", "fsk_syncs", "fsk_ok", "fsk_bad", "m0_stack_free_w", "rid_skip", "wifi_frames", "wifi_fcs_ok", "wifi_fcs_bad", "wifi_beacon", "wifi_probe", "wifi_action",
         "wifi_rid", "pat_hits", "pat_rx", "did_cands", "did_dets", "slices", "stalls", "partial", "i2c_faults", "i2c_recov",
         "clk_err", "entities", "heap_core", "heap_free", "rows", "lost", "log_err", "bytes", "srv_drop", "srv_ble", "srv_nrg", "usb_drop",
-        "lna", "vga", "amp"};
+        "lna", "vga", "amp", "fsk_nochk", "fsk_rx"};
     const I v[] = {I(now_s()), cycle_ms_, m.cpu_pct, I(m.aa_hits), I(m.ok), I(m.crc_bad), I(m.rid_ok), I(m.rid_fwd), I(m.other_fwd),
-                   m.other_dup, m.other_qf, I(m.vendor_ok), m.drops, m.drops_ble, m.drops_sweep, m.drops_switch, m.drops_pat, m.drops_wifi, m.q_fail, m.qf_rid, I(m.zw_syncs), I(m.zw_ok), I(m.zw_bad + m.zw_qf), I(get_free_stack_space()), I(rid_skip_), I(m.wifi_frames), I(m.wifi_fcs_ok),
+                   m.other_dup, m.other_qf, I(m.vendor_ok), m.drops, m.drops_ble, m.drops_sweep, m.drops_switch, m.drops_pat, m.drops_wifi, m.q_fail, m.qf_rid, I(m.fsk_syncs), I(m.fsk_ok), I(m.fsk_bad + m.fsk_qf), I(get_free_stack_space()), I(rid_skip_), I(m.wifi_frames), I(m.wifi_fcs_ok),
                    I(m.wifi_fcs_bad), I(m.wifi_beacon), I(m.wifi_probe), I(m.wifi_action), I(m.wifi_rid), I(m.pat_hits),
                    I(pat_hits_rx_), I(m.did_cands), I(m.did_dets), I(slice_rx_), stalls_, partial_, I(i2c.faults), I(i2c.recoveries),
                    I(portapack::clock_manager.sampling_frequency_errors()), I(tracker_.size()), I(chCoreStatus()), I(heap_free),
                    I(log_rows_ + 2), I(log_lost_), I(log_errs_), I(log_bytes_), sig_mem_ ? I(sig_mem_->budget.dropped()) : 0,
                    sig_mem_ ? I(sig_mem_->ble.used()) : 0, sig_mem_ ? I(sig_mem_->nrg.used()) : 0, I(usb_dropped_),
-                   I(receiver_model.lna()), I(receiver_model.vga()), I(receiver_model.rf_amp())};
+                   I(receiver_model.lna()), I(receiver_model.vga()), I(receiver_model.rf_amp()), I(m.fsk_nochk), I(fsk_rx_)};
     static_assert(sizeof(kKeys) / sizeof(kKeys[0]) == sizeof(v) / sizeof(v[0]), "heartbeat keys");
     /* Two rows (HB: system, BLE, drops; HB2: Wi-Fi, pattern, DroneID,
      * sweep, bus, memory, log), each well under 512 bytes. */
@@ -2691,6 +2699,22 @@ void DetailView::refresh() {
         line(6).s("Header fields only (log)");
         line(7).s("first ").d(main_.now_s() - e->first_s).s("s ago");
         lines_[6].color = Theme::getInstance()->fg_medium->foreground;
+    } else if (e->kind == Kind::Fsk) {
+        /* The rule: frequency, rate, what the frames showed, validity. */
+        const SigClass* c = main_.sig_ready() ? &main_.sig_mem_->cls : nullptr;
+        const uint8_t r = e->mac[4];
+        line(1).s("FSK rule ").s(main_.sig_name_.c_str());
+        if (c && r < c->nfsk) {
+            const FskRuleDef& d = c->fsk[r];
+            const FskSeen& x = main_.sig_mem_->fsk[r];
+            line(2).s(x.checked ? "Check passed: presence" : "Sync + length only: low conf");
+            lines_[2].color = Color::yellow();
+            line(3).d(static_cast<int32_t>(d.f_khz / 1000)).c('.').d2(static_cast<int32_t>(d.f_khz % 1000 / 10)).s(" MHz ").d(static_cast<int32_t>(d.rate)).s(" b/s");
+            line(4).s("frames ").d(static_cast<int32_t>(x.frames)).s("  len ").d(x.len);
+            line(5).s("dev ").d1(x.dev_hz / 100).s("k off ").d1(x.off_hz / 100).s("k");
+            line(6).s("rate ").d(static_cast<int32_t>(x.rate_bps)).s(" valid: ").s(sig_valid_name(d.valid));
+        }
+        line(7).s("first ").d(main_.now_s() - e->first_s).s("s ago");
     } else if (e->kind == Kind::Sig) {
         /* Class, kind, source, the rule and how it was validated. */
         const bool nb = (e->sources & SRC_RF) != 0;
@@ -2758,30 +2782,127 @@ void DetailView::refresh() {
 
 /* ---------------------------------------------------------------- Z-Wave */
 
-/* A Z-Wave dwell (PDRN MODE_ZWAVE) on the class's ZW frequency, 4 Msps, the
- * channel at +fs/4 as for BLE. keep: the dwell before was Z-Wave too (a
- * class with nothing else): the receiver runs on, unconfigured. */
+/* An FSK dwell (PDRN MODE_FSK): the class's next FSK group (frequency,
+ * front end, its rules; Z-Wave is one), 4 Msps, the channel at +fs/4 as for
+ * BLE. One group a visit, in turn. keep: the dwell before was the same lone
+ * group (a class with nothing else): the receiver runs on, unconfigured. */
 void DroneDetectView::start_zw(bool rate_switch, bool keep) {
     phase_band_ = kZw;
+    const uint8_t groups = sig_ready() ? sig_mem_->cls.nfskg : 0;
     const bool alone = (mode() & 2) && !sweeps_on() && !patterns_on() && !wifi_on(); /* no BLE, nothing else */
-    phase_dwell_ms_ = alone ? 5000 : kZwDwellMs;
-    if (keep) return;
+    phase_dwell_ms_ = alone ? (groups > 1 ? 2500 : 5000) : kZwDwellMs;
+    if (keep && groups <= 1) return;
+    if (groups) fsk_cursor_ = static_cast<uint8_t>((fsk_cursor_ + 1) % groups);
     if (rate_switch || !portapack::clock_manager.sampling_frequency_ok()) { /* see start_ble() */
         receiver_model.set_sampling_rate(sampling_rate);
         if (sweep_) sweep_->invalidate_rates();
     }
-    const uint32_t khz = sig_ready() ? sig_mem_->cls.zw.f_khz : 908420;
-    receiver_model.set_target_frequency(static_cast<rf::Frequency>(khz) * 1000);
+    fsk_radio(fsk_cursor_);
+}
+
+/* Tune to FSK group g and hand its plan to the M4 (it copies it). */
+void DroneDetectView::fsk_radio(uint8_t g) {
+    if (!sig_ready() || g >= sig_mem_->cls.nfskg) {
+        baseband::set_drone_detect_fsk(sampling_rate, 0, 0, nullptr);
+        return;
+    }
+    const FskGroup& x = sig_mem_->cls.fskg[g];
+    receiver_model.set_target_frequency(static_cast<rf::Frequency>(x.f_khz) * 1000);
     const uint8_t flags = reset_pending_ ? DroneDetectConfigMessage::FLAG_RESET_STATS : 0;
     reset_pending_ = false;
-    baseband::set_drone_detect(sampling_rate, DroneDetectConfigMessage::MODE_ZWAVE, 0, flags);
+    baseband::set_drone_detect_fsk(sampling_rate, g, flags, &x.dwell);
+}
+
+/* A frame from the M4: the Z-Wave rule's go to on_zwave (header checks,
+ * networks); any other rule's: listed by label once it has min= frames in
+ * kFskWindowMs (a rule with a check: every frame passed it; without one:
+ * sync and length only, shown as low confidence, '?'). FSK_NEW once a
+ * session, FSK_FRM (at most one a second a rule), FSK_SUM when it stops. */
+void DroneDetectView::on_fsk(const DroneDetectFskMessage& message) {
+    fsk_rx_++;
+    if (!sig_ready() || message.tag >= sig_mem_->cls.nfsk) return;
+    const FskRuleDef& d = sig_mem_->cls.fsk[message.tag];
+    if (d.post == FSK_POST_ZWAVE) {
+        on_zwave(message);
+        return;
+    }
+    if (track_ && phase_band_ == kTrack) {
+        const TrackTarget& t = track_->target();
+        if (t.kind == TrackTarget::FSK_RULE && t.rule == message.tag) track_->on_ble(message.rssi_cdb);
+    }
+    constexpr uint32_t kFskWindowMs = 60000;
+    FskSeen& x = sig_mem_->fsk[message.tag];
+    const uint32_t now = uptime_ms();
+    if (x.n_win && now - x.t_win > kFskWindowMs) x.n_win = 0;
+    if (!x.n_win) x.t_win = now;
+    if (x.n_win < 255) x.n_win++;
+    x.frames++;
+    x.t_last = now;
+    x.len = message.len;
+    x.rssi_cdb = message.rssi_cdb;
+    x.off_hz = message.off_hz;
+    x.dev_hz = message.dev_hz;
+    x.rate_bps = message.rate_bps;
+    x.checked = message.flags & DroneDetectFskMessage::FLAG_CHECKED;
+    const bool confirmed_now = !x.listed && x.n_win >= d.min_frames;
+    if (confirmed_now) x.listed = true;
+    if (!x.listed) return;
+    const uint8_t mac[6] = {0, 0, 'F', 'S', message.tag, 0};
+    char label[24];
+    Fmt{label, sizeof(label)}.s(d.label).s(x.checked ? "" : "?");
+    const int32_t db = message.rssi_cdb / 100;
+    if (tracker_.ingest_sig(mac, SRC_RF, static_cast<int8_t>(db < -127 ? -127 : db), message.tag, d.kind, sig_kind_tag(d.kind), label, now_s(), Kind::Fsk))
+        list_.set_dirty();
+    if (!x.reported) {
+        x.reported = true;
+        fsk_row("FSK_NEW", message.tag, &message);
+    }
+    if (now - x.t_row >= 1000 || x.frames == 1) {
+        fsk_row("FSK_FRM", message.tag, &message);
+        x.t_row = now;
+        x.skipped = 0;
+    } else if (x.skipped < 0xFFFF) {
+        x.skipped++;
+    }
+    if (opt_.alert && confirmed_now && opt_.beep_low) beep();
+}
+
+/* FSK_NEW / FSK_FRM / FSK_SUM: id = F<rule>, label, kind, f kHz, bw kHz,
+ * level dBFS, own position; detail: rule, frame length, check (ok or none),
+ * measured deviation, carrier offset and bit rate, Manchester violations, the
+ * frame's first <= 8 bytes in hex (device identifiers: the user's own log,
+ * as BLE addresses; never shared unscrubbed), frames so far. */
+void DroneDetectView::fsk_row(const char* event, uint8_t rule, const DroneDetectFskMessage* m) {
+    if (!log_on() || !sig_ready() || rule >= sig_mem_->cls.nfsk) return;
+    const FskRuleDef& d = sig_mem_->cls.fsk[rule];
+    const FskSeen& x = sig_mem_->fsk[rule];
+    char row[256];
+    Fmt f{row, sizeof(row)};
+    row_begin(f, event, "F");
+    f.s(",F").d(rule + 1).c(',').s(d.label, Fmt::Esc::Csv).c(',').s(sig_kind_name(d.kind));
+    f.c(',').d(static_cast<int32_t>(d.f_khz)).c(',').d(d.bw_khz).c(',').d((m ? m->rssi_cdb : x.rssi_cdb) / 100).s(",dBFS,");
+    int32_t lat, lon;
+    if (own_position(lat, lon))
+        f.e7(lat).c(',').e7(lon);
+    else
+        f.c(',');
+    f.c(',');
+    f.s("rule=").d(rule + 1).s(";valid=").s(sig_valid_name(d.valid));
+    if (m) {
+        f.s(";len=").d(m->len).s(";check=").s((m->flags & DroneDetectFskMessage::FLAG_CHECKED) ? "ok" : "none");
+        f.s(";dev_khz=").d1(m->dev_hz / 100).s(";off_khz=").d1(m->off_hz / 100).s(";rate=").d(static_cast<int32_t>(m->rate_bps));
+        f.s(";viol=").d(m->violations).s(";hex=").hex(m->hdr, m->nhdr < 8 ? m->nhdr : 8);
+        if (x.skipped) f.s(";skipped=").d(x.skipped);
+    }
+    f.s(";frames=").d(static_cast<int32_t>(x.frames));
+    log_line(row);
 }
 
 /* A checksum-valid frame from the M4: header sanity (zw_parse), the network
  * table (listed from its 2nd valid frame: kZwConfirmMs), a list entry keyed
  * by home ID ("ZW <home ID>": the user's own log and screen, as BLE
  * addresses), ZW_NEW once per network, ZW_FRM per frame. No payload. */
-void DroneDetectView::on_zwave(const DroneDetectZwaveMessage& message) {
+void DroneDetectView::on_zwave(const DroneDetectFskMessage& message) {
     zw_rx_++;
     ZwHeader h;
     if (!zw_parse(message.hdr, message.nhdr, message.len, h)) {
@@ -2891,6 +3012,12 @@ bool DroneDetectView::target_of(const Entity& e, TrackTarget& t) const {
             t.kind = TrackTarget::ZW_NET;
             memcpy(t.addr, e.mac + 2, 4);
             return true;
+        case Kind::Fsk:
+            if (!sig_ready() || e.mac[4] >= sig_mem_->cls.nfsk) return false;
+            t.kind = TrackTarget::FSK_RULE;
+            t.rule = e.mac[4];
+            t.f_khz = sig_mem_->cls.fsk[t.rule].f_khz;
+            return true;
         case Kind::BleVendor:
             t.kind = TrackTarget::BLE_ADDR;
             memcpy(t.addr, e.mac, 6);
@@ -2941,9 +3068,10 @@ void DroneDetectView::track_radio(const TrackTarget& t, uint8_t ble_channel) {
         baseband::set_drone_detect(sampling_rate, DroneDetectConfigMessage::MODE_METER, kTrackBwLog2[t.bw < kTrackBws ? t.bw : 0], 0);
         return;
     }
-    if (t.kind == TrackTarget::ZW_NET) {
-        receiver_model.set_target_frequency(static_cast<rf::Frequency>(sig_ready() ? sig_mem_->cls.zw.f_khz : 908420) * 1000);
-        baseband::set_drone_detect(sampling_rate, DroneDetectConfigMessage::MODE_ZWAVE, 0, 0);
+    if (t.kind == TrackTarget::ZW_NET || t.kind == TrackTarget::FSK_RULE) {
+        /* the rule's dwell (Z-Wave: the ZW rule's) */
+        const int r = t.kind == TrackTarget::ZW_NET ? (sig_ready() ? sig_mem_->cls.zw_rule : -1) : t.rule;
+        fsk_radio(sig_ready() && r >= 0 && r < sig_mem_->cls.nfsk ? sig_mem_->cls.fsk[r].group : 0xFF);
         return;
     }
     receiver_model.set_target_frequency(ble_channel_frequency(ble_channel));
@@ -3069,7 +3197,7 @@ TrackView::TrackView(NavigationView& nav, DroneDetectView& main, const TrackTarg
     const bool freq = target_.kind == TrackTarget::FREQ;
     field_freq_.hidden(!freq);
     field_bw_.hidden(!freq);
-    field_ble_.hidden(freq || target_.kind == TrackTarget::ZW_NET);
+    field_ble_.hidden(freq || target_.kind == TrackTarget::ZW_NET || target_.kind == TrackTarget::FSK_RULE);
     button_listen_.hidden(!freq);
     field_lna_.set_value(receiver_model.lna());
     field_vga_.set_value(receiver_model.vga());
@@ -3139,7 +3267,7 @@ TrackView::TrackView(NavigationView& nav, DroneDetectView& main, const TrackTarg
         auto& main = main_;
         auto& n = nav_;
         CaptureContext c{};
-        main_.capture_base(c, target_.kind == TrackTarget::FREQ ? "track" : (target_.kind == TrackTarget::ZW_NET ? "zwave" : "ble"), target_.label,
+        main_.capture_base(c, target_.kind == TrackTarget::FREQ ? "track" : (target_.kind == TrackTarget::ZW_NET ? "zwave" : (target_.kind == TrackTarget::FSK_RULE ? "fsk" : "ble")), target_.label,
                            main_.uptime_ms());
         main_.capture_of_target(target_, c);
         n.pop();
@@ -3178,6 +3306,8 @@ void TrackView::show_target() {
         f.s(target_.label).s(" bw ").d(kTrackBwKhz[target_.bw < kTrackBws ? target_.bw : 0]).s("k");
     } else if (target_.kind == TrackTarget::ZW_NET) {
         f.s("Z-Wave net ").hex(target_.addr, 4);
+    } else if (target_.kind == TrackTarget::FSK_RULE) {
+        f.s("FSK ").s(target_.label);
     } else if (target_.kind == TrackTarget::BLE_ADDR) {
         f.hex(target_.addr, 6, ':');
     } else {
@@ -3220,7 +3350,7 @@ void TrackView::frame(uint32_t now_ms) {
     stats_.tick(now_ms);
     /* BLE: the advertising channel in turn, a second each (one channel can
      * sit in a fade). */
-    if (target_.kind != TrackTarget::FREQ && target_.kind != TrackTarget::ZW_NET && now_ms - hop_ms_ >= 1000) {
+    if (target_.kind != TrackTarget::FREQ && target_.kind != TrackTarget::ZW_NET && target_.kind != TrackTarget::FSK_RULE && now_ms - hop_ms_ >= 1000) {
         hop_ms_ = now_ms;
         ble_idx_ = static_cast<uint8_t>((ble_idx_ + 1) % 3);
         retune();
@@ -3269,7 +3399,7 @@ void TrackView::update_status() {
         l.color = Color::white();
     } else {
         const uint32_t r = rate_.rate100(now_ms);
-        f.d(static_cast<int32_t>(r / 100)).c('.').d2(static_cast<int32_t>(r % 100)).s(target_.kind == TrackTarget::ZW_NET ? " frm/s  last " : " pkt/s  last ");
+        f.d(static_cast<int32_t>(r / 100)).c('.').d2(static_cast<int32_t>(r % 100)).s(target_.kind == TrackTarget::ZW_NET || target_.kind == TrackTarget::FSK_RULE ? " frm/s  last " : " pkt/s  last ");
         if (stats_.last_ms())
             f.d1(static_cast<int32_t>((now_ms - stats_.last_ms()) / 100)).c('s');
         else
@@ -3300,6 +3430,8 @@ void TrackView::log_row(const char* event) {
         f.hex(target_.addr, 6, ':');
     else if (target_.kind == TrackTarget::ZW_NET)
         f.hex(target_.addr, 4);
+    else if (target_.kind == TrackTarget::FSK_RULE)
+        f.s("fsk").d(target_.rule + 1);
     else
         f.s("rule").d(target_.rule);
     f.c(',').s(target_.label, Fmt::Esc::Csv).s(",track,");
@@ -3384,6 +3516,12 @@ void DroneDetectView::capture_of_target(const TrackTarget& t, CaptureContext& c)
         c.f_hz = static_cast<uint64_t>(sig_ready() ? sig_mem_->cls.zw.f_khz : 908420) * 1000;
         c.rate = 500000;
         x.s("home=").hex(t.addr, 4);
+    } else if (t.kind == TrackTarget::FSK_RULE) {
+        const bool ok = sig_ready() && t.rule < sig_mem_->cls.nfsk;
+        const uint32_t bw = ok ? sig_mem_->cls.fsk[t.rule].bw_khz : 200;
+        c.f_hz = static_cast<uint64_t>(t.f_khz) * 1000;
+        c.rate = cap_rate_for(bw);
+        x.s("rule=").d(t.rule + 1).s(";bw_khz=").d(static_cast<int32_t>(bw));
     } else {
         c.f_hz = 2402000000ull;
         c.rate = 2000000;
@@ -3398,7 +3536,7 @@ void DroneDetectView::capture_of_target(const TrackTarget& t, CaptureContext& c)
 bool DroneDetectView::capture_of(const Entity& e, CaptureContext& c) const {
     TrackTarget t;
     if (!target_of(e, t)) return false;
-    static constexpr const char* kKinds[] = {"remote_id", "wifi_oui", "rf", "pattern", "dji_ble", "droneid", "zwave", "sig"};
+    static constexpr const char* kKinds[] = {"remote_id", "wifi_oui", "rf", "pattern", "dji_ble", "droneid", "zwave", "sig", "fsk"};
     const size_t k = static_cast<size_t>(e.kind);
     const char* kind = k < sizeof(kKinds) / sizeof(kKinds[0]) ? kKinds[k] : "?";
     if (e.kind == Kind::Sig) kind = (e.sources & SRC_RF) ? "nb" : "ble";
@@ -4199,7 +4337,7 @@ void DebugView::show_stats() {
             if (sr.bad_line)
                 f.s("SIG ln").d(sr.bad_line).c(' ').s(sr.why);
             else
-                f.s("SIG b").d(sr.ble).s(" n").d(sr.nb).s(" bd").d(sr.bands).s(" p").d(sr.pat);
+                f.s("SIG b").d(sr.ble).s(" n").d(sr.nb).s(" bd").d(sr.bands).s(" p").d(sr.pat).s(" f").d(main_.sig_mem_->cls.nfsk);
         } else if (r.bad_line)
             f.s("PAT ln").d(r.bad_line).c(' ').s(r.why);
         else

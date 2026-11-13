@@ -45,6 +45,7 @@
 #include "fifo.hpp"
 #include "spec_an_shared.hpp"
 #include "dd_wifi_rid.hpp"
+#include "dd_fsk.hpp"
 
 #include "utility.hpp"
 
@@ -190,7 +191,7 @@ class Message {
         DroneDetectWifi = 130,
         DroneDetectDroneId = 131,
         DroneDetectMeter = 132,
-        DroneDetectZwave = 133,
+        DroneDetectFsk = 133,
         MAX
     };
 
@@ -2180,7 +2181,7 @@ struct DroneDetectConfigMessage : public Message {
     static constexpr uint8_t MODE_BURST = 3;         // reserved
     static constexpr uint8_t MODE_GFSK_PATTERN = 4;  // 4 Msps GFSK front end, sync word search (sync_* below)
     static constexpr uint8_t MODE_DSSS = 5;          // 4 Msps 802.11b 1 Mb/s receiver on a slice of a Wi-Fi channel (Wi-Fi Remote ID)
-    static constexpr uint8_t MODE_ZWAVE = 8;         // 4 Msps Z-Wave R1 receiver (9.6 kb/s FSK Manchester, dd_zwave.hpp), the M0 tunes target = 908.42 MHz
+    static constexpr uint8_t MODE_FSK = 8;           // 4 Msps narrowband FSK frame receiver (dd_fsk_rx.hpp) with the rules of *fsk (Z-Wave R1 is one), the M0 tunes target = the rules' f; channel: the app's tag
     static constexpr uint8_t MODE_METER = 7;         // 4 Msps track meter (fox hunt): gap-free power at the target, channel = log2 of the boxcar (2, 4, 6, 8)
     static constexpr uint8_t MODE_DRONEID = 6;       // 15.36 Msps DJI DroneID burst detector (presence only), LO on the DroneID centre (HackRF Pro only)
     static constexpr uint8_t FLAG_PASS_ALL = 0x01;   // BLE: forward every CRC valid advert, not only Remote ID (never in MODE_DSSS)
@@ -2218,6 +2219,9 @@ struct DroneDetectConfigMessage : public Message {
     uint8_t max_errors{0};
     uint8_t payload_bits{0};
     uint8_t pat_flags{0};
+    /* MODE_FSK only: the dwell's front end and rules, copied by the M4 while it handles this message
+     * (the M0 waits for it): no lifetime beyond the call. */
+    const dd::FskDwell* fsk{nullptr};
 };
 
 // One Remote ID frame (or, with FLAG_PASS_ALL, any CRC valid BLE advert), by value. M4 -> M0.
@@ -2259,7 +2263,7 @@ struct DroneDetectStatsMessage : public Message {
      * (dd_sig.hpp, dd_survey.hpp), so that none of them needs the M0 heap. */
     static constexpr uint16_t kScratchRf = 4608;
     static constexpr uint16_t kScratchMap = 10752;
-    static constexpr uint16_t kScratchSig = 6144;
+    static constexpr uint16_t kScratchSig = 7168;
     static constexpr uint16_t kScratchSize = kScratchRf + kScratchMap + kScratchSig;
 
     uint32_t aa_hits{0};  // access address syncs that started a packet
@@ -2355,11 +2359,12 @@ struct DroneDetectStatsMessage : public Message {
     uint32_t other_fwd{0};  // queued to the M0
     uint16_t other_dup{0};  // not forwarded: same address and payload within 1 s
     uint16_t other_qf{0};   // lost to a full (or locked) application queue or the rate cap
-    /* Z-Wave (MODE_ZWAVE), since the last FLAG_RESET_STATS. */
-    uint32_t zw_syncs{0};   // preamble + SOF found
-    uint32_t zw_ok{0};      // checksum valid frames (queued or lost: zw_qf)
-    uint16_t zw_bad{0};     // bad length or checksum
-    uint16_t zw_qf{0};      // valid frames lost to a full application queue
+    /* FSK rules (MODE_FSK, Z-Wave included), since the last FLAG_RESET_STATS. */
+    uint32_t fsk_syncs{0};  // a rule's pattern found
+    uint32_t fsk_ok{0};     // frames with a passing check (queued or lost: fsk_qf)
+    uint16_t fsk_bad{0};    // bad length or check
+    uint16_t fsk_qf{0};     // frames lost to a full application queue
+    uint32_t fsk_nochk{0};  // frames of rules without a check (sync + length only)
 };
 
 // One DJI DroneID burst detection (MODE_DRONEID), by value. M4 -> M0. Presence only: a burst of the
@@ -2386,28 +2391,35 @@ struct DroneDetectMeterMessage : public Message {
         : Message{ID::DroneDetectMeter} {}
 
     uint32_t t_ms{0};
-    int16_t peak_cdb{-12000};  // strongest 256 us block of the interval, centi-dB re full scale (|x| = 128)
-    int16_t mean_cdb{-12000};  // mean of the interval
-    int16_t floor_cdb{-12000}; // pulse detector floor
-    uint16_t pulses{0};        // pulse starts (+6 dB over the floor) in the interval
-    uint32_t clip{0};          // raw I / Q samples at |x| >= 120 in the interval
-    uint32_t period_us{0};     // median pulse start-to-start (last <= 8), 0 = unknown
+    int16_t peak_cdb{-12000};   // strongest 256 us block of the interval, centi-dB re full scale (|x| = 128)
+    int16_t mean_cdb{-12000};   // mean of the interval
+    int16_t floor_cdb{-12000};  // pulse detector floor
+    uint16_t pulses{0};         // pulse starts (+6 dB over the floor) in the interval
+    uint32_t clip{0};           // raw I / Q samples at |x| >= 120 in the interval
+    uint32_t period_us{0};      // median pulse start-to-start (last <= 8), 0 = unknown
     uint32_t last_period_us{0};
-    uint32_t width_us{0};      // last pulse width
-    uint8_t log2d{0};          // boxcar 2^log2d of 4 Msps
+    uint32_t width_us{0};  // last pulse width
+    uint8_t log2d{0};      // boxcar 2^log2d of 4 Msps
 };
 
-// One checksum-valid Z-Wave frame (MODE_ZWAVE): its length and first <= 16 bytes (the header: home ID,
-// source, frame control, length, destination, routing header, command class), never more. M4 -> M0.
-struct DroneDetectZwaveMessage : public Message {
-    constexpr DroneDetectZwaveMessage()
-        : Message{ID::DroneDetectZwave} {}
+// One FSK frame (MODE_FSK): a rule's frame whose check passed (or, for a rule without a check, sync and length
+// only), its length and first <= 16 bytes (Z-Wave: the header), never more. M4 -> M0.
+struct DroneDetectFskMessage : public Message {
+    static constexpr uint8_t FLAG_CHECKED = 0x01;  // the rule's check passed
+
+    constexpr DroneDetectFskMessage()
+        : Message{ID::DroneDetectFsk} {}
 
     uint32_t t_ms{0};
-    int16_t rssi_cdb{-12000}; // mean power over the frame, centi-dB re full scale (|x| = 128) in the 200 kHz channel
-    uint8_t len{0};           // the frame's length byte
-    uint8_t nhdr{0};          // bytes in hdr
-    uint8_t violations{0};    // Manchester chip pairs that were not complementary
+    uint32_t rate_bps{0};      // bit rate the chip clock settled to
+    int16_t rssi_cdb{-12000};  // mean power over the frame, centi-dB re full scale (|x| = 128) in the dwell's channel
+    int16_t off_hz{0};         // carrier offset
+    uint16_t dev_hz{0};        // mean |deviation| over the frame
+    uint8_t tag{0};            // the rule (FskRule::tag, the app's index)
+    uint8_t len{0};            // frame bytes after the sync, the check included (Z-Wave: the length byte)
+    uint8_t nhdr{0};           // bytes in hdr
+    uint8_t violations{0};     // Manchester chip pairs that were not complementary
+    uint8_t flags{0};
     uint8_t hdr[16]{};
 };
 

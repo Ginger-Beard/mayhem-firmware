@@ -111,6 +111,20 @@ static_assert(offsetof(DdOptions, man_lat) == sizeof(uint64_t), "DdOptions: 8 fl
 /* What lives in the M4 RAM PDRN lends (DroneDetectStatsMessage::kScratchSig):
  * the selected signature class, its NB rules' dwell state and the survey
  * log's tables. Not the M0 heap. */
+/* What the app has seen of one FSK rule (not the Z-Wave one: ZwNets). */
+struct FskSeen {
+    uint32_t frames;        /* frames this session */
+    uint32_t t_win, t_last; /* uptime ms: the listing window's start, the last frame */
+    uint32_t t_row;         /* the last FSK_FRM row */
+    uint32_t rate_bps;
+    int16_t rssi_cdb, off_hz;
+    uint16_t dev_hz;
+    uint16_t skipped; /* FSK_FRM rows left out since the last one (1 a second at most) */
+    uint8_t n_win;    /* frames in the window */
+    uint8_t len;
+    bool listed, reported, checked;
+};
+
 struct SigMemory {
     SigClass cls{};
     SigParser parser{}; /* only while a class loads */
@@ -119,6 +133,7 @@ struct SigMemory {
     BleSurvey ble{};
     NrgSurvey nrg{};
     ZwNets zw{}; /* Z-Wave networks heard (home ID, nodes) */
+    FskSeen fsk[kSigMaxFsk]{};
     RowBudget budget{};
 };
 
@@ -172,7 +187,7 @@ class DroneDetectView : public View {
     static constexpr uint8_t kWifi = 0xFC;    /* phase_band_ of a Wi-Fi dwell */
     static constexpr uint8_t kDid = 0xFB;     /* phase_band_ of a DJI DroneID dwell */
     static constexpr uint8_t kTrack = 0xFA;   /* phase_band_ while the track view is open: the cycle is paused */
-    static constexpr uint8_t kZw = 0xF9;      /* phase_band_ of a Z-Wave dwell (PDRN MODE_ZWAVE) */
+    static constexpr uint8_t kZw = 0xF9;      /* phase_band_ of an FSK dwell (PDRN MODE_FSK; Z-Wave and the class's FSK rules) */
     static constexpr uint8_t kSetupBands = 6;
 
     struct BandStat {
@@ -263,9 +278,11 @@ class DroneDetectView : public View {
     uint32_t sweep_ms_{0};
     uint32_t pat_ms_{0};
     uint32_t wifi_ms_{0};
-    uint32_t zw_ms_{0};  /* Z-Wave airtime */
-    uint32_t zw_rx_{0};  /* DroneDetectZwaveMessages received */
-    uint32_t zw_bad_{0}; /* ... failing the header sanity checks */
+    uint32_t zw_ms_{0};     /* Z-Wave airtime */
+    uint32_t zw_rx_{0};     /* DroneDetectFskMessages of the Z-Wave rule */
+    uint32_t fsk_rx_{0};    /* DroneDetectFskMessages received */
+    uint8_t fsk_cursor_{0}; /* the FSK dwell (SigClass::fskg) last visited */
+    uint32_t zw_bad_{0};    /* ... failing the header sanity checks */
 
     /* Wi-Fi Remote ID dwells (PDRN DSSS mode). */
     uint8_t ble_since_wifi_{0};                 /* BLE dwells since the last Wi-Fi dwell */
@@ -485,11 +502,14 @@ class DroneDetectView : public View {
     bool capture_of(const Entity& e, CaptureContext& c) const;
     void capture_of_target(const TrackTarget& t, CaptureContext& c) const;
     void on_meter(const DroneDetectMeterMessage& message);
-    /* Z-Wave. */
-    bool zw_on() const { return sig_ready() && (sig_mem_->cls.rx & RX_ZW) && !rf_paused_; }
+    /* FSK rules (Z-Wave is one). */
+    bool zw_on() const { return sig_ready() && sig_mem_->cls.nfskg && !rf_paused_; }
     void start_zw(bool rate_switch, bool keep);
-    void on_zwave(const DroneDetectZwaveMessage& message);
+    void fsk_radio(uint8_t group);
+    void on_fsk(const DroneDetectFskMessage& message);
+    void on_zwave(const DroneDetectFskMessage& message);
     void zw_row(const char* event, const ZwNet& n, const ZwHeader* h, int16_t rssi_cdb);
+    void fsk_row(const char* event, uint8_t rule, const DroneDetectFskMessage* m);
     void update_async_tx();
     bool rf_memory(bool on);
     void pause_rf(bool on);
@@ -533,10 +553,10 @@ class DroneDetectView : public View {
         [this](Message* const p) {
             this->on_droneid(*static_cast<const DroneDetectDroneIdMessage*>(p));
         }};
-    MessageHandlerRegistration message_handler_zwave{
-        Message::ID::DroneDetectZwave,
+    MessageHandlerRegistration message_handler_fsk{
+        Message::ID::DroneDetectFsk,
         [this](Message* const p) {
-            this->on_zwave(*static_cast<const DroneDetectZwaveMessage*>(p));
+            this->on_fsk(*static_cast<const DroneDetectFskMessage*>(p));
         }};
     MessageHandlerRegistration message_handler_meter{
         Message::ID::DroneDetectMeter,

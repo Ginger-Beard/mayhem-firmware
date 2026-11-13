@@ -201,12 +201,12 @@ void DroneDetectProcessor::execute(const buffer_c8_t& buffer) {
         }
     }
 #ifdef PRALINE
-    else if (mode_ == DroneDetectConfigMessage::MODE_ZWAVE) {
+    else if (mode_ == DroneDetectConfigMessage::MODE_FSK) {
         if (settle_left_) {
             settle_left_--;
             hop_skips_++;
         } else {
-            zwave_.feed(reinterpret_cast<const int8_t*>(buffer.p), buffer.count, zwave_callback, this);
+            fsk_.feed(reinterpret_cast<const int8_t*>(buffer.p), buffer.count, fsk_callback, this);
         }
     } else if (mode_ == DroneDetectConfigMessage::MODE_METER) {
         if (settle_left_) {
@@ -386,11 +386,12 @@ void DroneDetectProcessor::send_stats(uint32_t elapsed) {
     stats_message.other_dup = other_dup_;
     stats_message.other_qf = other_qf_;
 #ifdef PRALINE
-    const auto& zs = zwave_.stats();
-    stats_message.zw_syncs = zs.syncs;
-    stats_message.zw_ok = zs.ok;
-    stats_message.zw_bad = static_cast<uint16_t>(zs.bad_len + zs.bad_sum);
-    stats_message.zw_qf = zw_qf_;
+    const auto& zs = fsk_.stats();
+    stats_message.fsk_syncs = zs.syncs;
+    stats_message.fsk_ok = zs.ok;
+    stats_message.fsk_bad = static_cast<uint16_t>(zs.bad_len + zs.bad_sum);
+    stats_message.fsk_qf = fsk_qf_;
+    stats_message.fsk_nochk = zs.nocheck;
 #endif
     const auto& ws = dsss_stats();
     stats_message.wifi_triggers = ws.triggers;
@@ -496,8 +497,8 @@ void DroneDetectProcessor::apply_config() {
         other_fwd_ = 0;
         other_dup_ = other_qf_ = 0;
 #ifdef PRALINE
-        zwave_.clear_stats();
-        zw_qf_ = 0;
+        fsk_.clear_stats();
+        fsk_qf_ = 0;
 #endif
         rid_ok_ = 0;
         drops_base_ = shared_memory.m4_buffer_missed;
@@ -548,9 +549,10 @@ void DroneDetectProcessor::apply_config() {
         return;
     }
 #ifdef PRALINE
-    /* Z-Wave: a fresh receiver (a retune), its counters kept. */
-    if (mode == DroneDetectConfigMessage::MODE_ZWAVE) {
-        if (mode_ != mode) zwave_.reset();
+    /* FSK rules: a fresh receiver with the dwell's plan (a retune), its
+     * counters kept. */
+    if (mode == DroneDetectConfigMessage::MODE_FSK) {
+        fsk_.configure(req_fsk_);
         settle_left_ = hop_settle_buffers;
         since_hop_ = 0;
         mode_ = mode;
@@ -568,7 +570,7 @@ void DroneDetectProcessor::apply_config() {
 #else
     /* The app is a stub off the HackRF Pro: no track meter or Z-Wave in
      * this image (its 32 KB). */
-    if (mode == DroneDetectConfigMessage::MODE_ZWAVE || mode == DroneDetectConfigMessage::MODE_METER) {
+    if (mode == DroneDetectConfigMessage::MODE_FSK || mode == DroneDetectConfigMessage::MODE_METER) {
         mode_ = DroneDetectConfigMessage::MODE_IDLE;
         return;
     }
@@ -592,17 +594,23 @@ void DroneDetectProcessor::apply_config() {
 }
 
 #ifdef PRALINE
-/* A checksum-valid Z-Wave frame: its header to the M0. */
-void DroneDetectProcessor::zwave_callback(void* ctx, const dd::ZwaveFrame& f) {
+/* An FSK frame (check passed, or a rule without a check): its first bytes
+ * and measurements to the M0. */
+void DroneDetectProcessor::fsk_callback(void* ctx, const dd::FskFrame& f) {
     auto* self = static_cast<DroneDetectProcessor*>(ctx);
-    auto& m = self->zw_message;
+    auto& m = self->fsk_message;
     m.t_ms = self->t_ms_;
     m.rssi_cdb = dd::PowerMeter::to_cdb(f.power);
+    m.rate_bps = f.rate_bps > 0.0f ? static_cast<uint32_t>(f.rate_bps + 0.5f) : 0;
+    m.off_hz = static_cast<int16_t>(f.off_hz < -32000.0f ? -32000 : (f.off_hz > 32000.0f ? 32000 : static_cast<int32_t>(f.off_hz)));
+    m.dev_hz = static_cast<uint16_t>(f.dev_hz > 65000.0f ? 65000 : static_cast<uint32_t>(f.dev_hz));
+    m.tag = f.tag;
     m.len = f.len;
     m.nhdr = f.nhdr;
     m.violations = f.violations;
+    m.flags = f.checked ? DroneDetectFskMessage::FLAG_CHECKED : 0;
     memcpy(m.hdr, f.hdr, sizeof(m.hdr));
-    if (!self->push(m)) self->zw_qf_++;
+    if (!self->push(m)) self->fsk_qf_++;
 }
 
 /* Track meter (MODE_METER): every buffer through the boxcar; a report about
@@ -1054,6 +1062,14 @@ void DroneDetectProcessor::on_message(const Message* const message) {
                 req_pattern_.rate = static_cast<dd::PatternRate>((m.pat_flags >> DroneDetectConfigMessage::PAT_RATE_SHIFT) & 3);
                 req_pattern_.tag = m.channel;
             }
+#ifdef PRALINE
+            if (m.mode == DroneDetectConfigMessage::MODE_FSK) {
+                if (m.fsk)
+                    req_fsk_ = *m.fsk;
+                else
+                    req_fsk_.nrules = 0;
+            }
+#endif
             config_pending_ = true;
             break;
         }

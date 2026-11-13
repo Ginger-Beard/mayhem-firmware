@@ -503,6 +503,12 @@ void set_drone_detect_target(uint8_t channel, uint8_t flags, uint64_t addr) {
     send_message(&message);
 }
 
+void set_drone_detect_fsk(uint32_t sampling_rate, uint8_t tag, uint8_t flags, const dd::FskDwell* dwell) {
+    DroneDetectConfigMessage message{sampling_rate, DroneDetectConfigMessage::MODE_FSK, tag, flags};
+    message.fsk = dwell;
+    send_message(&message);
+}
+
 void set_drone_detect_dsss(uint8_t wifi_channel, int8_t slice_mhz, uint8_t flags) {
     DroneDetectConfigMessage message{4000000, DroneDetectConfigMessage::MODE_DSSS, wifi_channel, flags};
     message.slice_mhz = slice_mhz;

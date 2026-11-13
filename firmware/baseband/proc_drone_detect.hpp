@@ -26,7 +26,7 @@
 #include "spec_an_engine.hpp"
 #include "dd_dsp.hpp"
 #include "dd_meter.hpp"
-#include "dd_zwave.hpp"
+#include "dd_fsk_rx.hpp"
 #include "dd_dsss.hpp"
 #include "dd_droneid.hpp"
 #include "dd_ble_vendor.hpp"
@@ -257,11 +257,12 @@ class DroneDetectProcessor : public BasebandProcessor {
     uint32_t tgt_window_count_{0};
 #ifdef PRALINE
     void execute_meter(const buffer_c8_t& buffer);
-    /* Z-Wave (MODE_ZWAVE). */
-    dd::ZwaveRx zwave_{};
-    DroneDetectZwaveMessage zw_message{};
-    uint16_t zw_qf_{0};
-    static void zwave_callback(void* ctx, const dd::ZwaveFrame& f);
+    /* FSK frame rules (MODE_FSK; Z-Wave R1 is one). */
+    dd::FskRx fsk_{};
+    dd::FskDwell req_fsk_{};
+    DroneDetectFskMessage fsk_message{};
+    uint16_t fsk_qf_{0};
+    static void fsk_callback(void* ctx, const dd::FskFrame& f);
 #endif
     dd::RidDedup dedup_{};
     dd::VendorDedup vendor_dedup_{};
