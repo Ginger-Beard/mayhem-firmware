@@ -5,8 +5,15 @@
 # is listed ("ZW <home ID>") after 2 checksum-valid frames.
 ZW,label=Z-Wave,kind=home,rate=9k6,f=908.42,valid=real
 #
+# The ZW line is the built-in FSK rule with the Z-Wave header checks and the
+# network table (README "FSK RULES"); written out it reads:
+# FSK,label=Z-Wave,kind=home,valid=real,f=908.42,bw=200,dev=10-40,rate=9600,code=manchester,pre=55,pre_min=10,sync=F0,len=@7,lmin=10,lmax=64,check=xor8,seed=FF,post=zwave
+# Generic FSK rules for R2 / R3 (documents only, never seen here) are in
+# ZWAVE_FSK.TXT.
+#
 # Energy fallback (needs the 915 MHz sweep, which takes airtime from the
 # frame receiver; uncomment to use):
 # NB,label=Z-Wave 908.4,kind=home,f=908.42,bw=200,db=10,duty=0-50,valid=real
-# Z-Wave R3 (100 kb/s GFSK) at 916.00 MHz: not decoded yet, energy only.
+# Z-Wave R3 (100 kb/s GFSK) at 916.00 MHz: see ZWAVE_FSK.TXT for a frame rule;
+# energy only here:
 # NB,label=Z-Wave 916.0,kind=home,f=916.0,bw=300,db=10,duty=0-50,valid=doc
