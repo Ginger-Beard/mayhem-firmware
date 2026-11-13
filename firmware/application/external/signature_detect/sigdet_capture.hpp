@@ -97,10 +97,15 @@ struct CapSidecar {
     const CaptureContext* ctx;
     const char* firmware;
     const char* build;
-    uint32_t uptime_ms;    /* at the start of the capture */
-    uint32_t dropped_pct;  /* the stock capture thread's dropped share, 0..99 (highest seen while recording) */
-    uint32_t bb_filter_hz; /* baseband (anti-alias) filter */
-    uint64_t target_hz;    /* the target's own frequency when the capture is tuned off it, else 0 */
+    uint32_t uptime_ms;       /* at the start of the capture */
+    uint32_t dropped_pct;     /* dropped_bytes / received_bytes, %, 1 if any was dropped, 0..99 */
+    uint64_t received_bytes;  /* bytes the baseband streamed for the file (written + dropped) */
+    uint64_t dropped_bytes;   /* ... dropped for want of an empty buffer (the SD writes fell behind) */
+    uint32_t dropped_buffers; /* dropped_bytes in write buffers (rounded up) */
+    uint32_t write_size;      /* the capture thread's write buffer, bytes */
+    uint32_t wall_ms;         /* recording start to stop, wall clock (duration_ms is from the data) */
+    uint32_t bb_filter_hz;    /* baseband (anti-alias) filter */
+    uint64_t target_hz;       /* the target's own frequency when the capture is tuned off it, else 0 */
 };
 
 /* The .SIG sidecar text (key=value lines, CRLF); returns its length. */

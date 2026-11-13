@@ -3883,6 +3883,14 @@ void SigdetCaptureView::stage(const char* text, const Style* style) {
     text_status_.set(text);
 }
 
+/* Dropped share of the recording from the capture thread's byte counters:
+ * 0, else at least 1 %. */
+uint32_t SigdetCaptureView::drop_pct() const {
+    if (!drop_bytes_ || !recv_bytes_) return 0;
+    const uint64_t p = drop_bytes_ * 100u / recv_bytes_;
+    return p < 1 ? 1 : (p > 100 ? 100 : static_cast<uint32_t>(p));
+}
+
 /* RecordView asks before it starts (its Record button). Not yet: the SD work
  * of a start (folder, name, CAP_START row) runs on the next tick, before the
  * capture thread exists; then that tick starts the recording itself. */
@@ -3909,11 +3917,24 @@ void SigdetCaptureView::poll() {
     }
     if (record_view_.is_active()) {
         if (step_ != STEP_REC) return; /* not ours (cannot happen: the hook) */
-        const uint32_t d = record_view_.dropped_percent();
-        if (d > dropped_pct_) dropped_pct_ = d;
-        if (duration_ms() && chTimeNow() * 1000u / CH_FREQUENCY - t0_ms_ >= duration_ms()) record_view_.stop();
+        /* the live drop share on the status line (no SD access) */
+        uint64_t rx, dr;
+        if (record_view_.stream_bytes(rx, dr)) {
+            recv_bytes_ = rx;
+            drop_bytes_ = dr;
+        }
+        const uint32_t el = chTimeNow() * 1000u / CH_FREQUENCY - t0_ms_;
+        const uint32_t pct = drop_pct();
+        Fmt s{buf_, 48};
+        s.s(duration_ms() ? "REC auto " : "REC ").d(static_cast<int32_t>(el / 1000)).s("s drop ").d(static_cast<int32_t>(pct)).c('%');
+        stage(buf_, pct > 1 ? Theme::getInstance()->fg_red : Theme::getInstance()->fg_yellow);
+        if (duration_ms() && el >= duration_ms()) {
+            wall_ms_ = el;
+            record_view_.stop();
+        }
         return;
     }
+    if (step_ == STEP_REC && !wall_ms_) wall_ms_ = chTimeNow() * 1000u / CH_FREQUENCY - t0_ms_; /* stopped by the button or an error */
     if (step_ == STEP_PREP) {
         prepare_and_start();
         return;
@@ -3929,6 +3950,8 @@ void SigdetCaptureView::prepare_and_start() {
     stage("rec: CAP_START row", Theme::getInstance()->fg_yellow);
     state_ = static_cast<uint8_t>(option_state_.selected_index_value());
     dropped_pct_ = 0;
+    recv_bytes_ = drop_bytes_ = 0;
+    wall_ms_ = 0;
     pair_ = pairs_.next(state_);
     rtc_time::now(t0_rtc_);
     lna_ = receiver_model.lna();
@@ -4019,7 +4042,13 @@ void SigdetCaptureView::finish_step() {
 #endif
         sc_.build = __DATE__ " " __TIME__;
         sc_.uptime_ms = t0_ms_;
+        dropped_pct_ = drop_pct();
         sc_.dropped_pct = dropped_pct_;
+        sc_.received_bytes = recv_bytes_;
+        sc_.dropped_bytes = drop_bytes_;
+        sc_.dropped_buffers = static_cast<uint32_t>((drop_bytes_ + kWriteSize - 1) / kWriteSize);
+        sc_.write_size = kWriteSize;
+        sc_.wall_ms = wall_ms_;
         sc_.bb_filter_hz = bb_filter_hz_;
         sc_.target_hz = static_cast<uint64_t>(receiver_model.target_frequency()) != ctx_.f_hz ? ctx_.f_hz : 0;
         const size_t n = cap_sidecar(buf_, sizeof(buf_), sc_);
@@ -4034,9 +4063,11 @@ void SigdetCaptureView::finish_step() {
         stage("save 3/3: CAP_STOP row", Theme::getInstance()->fg_yellow);
         log_row("CAP_STOP", sc_.duration_ms, bytes_);
         step_ = STEP_IDLE;
+        /* red: not saved, or samples dropped (> 1 %: no use for timing) */
         Fmt s{buf_, 48};
-        s.s(moved_ && sig_ok_ ? "saved " : "SAVE FAILED ").s(base_).c(' ').d1(static_cast<int32_t>(sc_.duration_ms / 100)).s("s ").d(static_cast<int32_t>(bytes_ / 1000000)).s("MB stk").d(static_cast<int32_t>(get_free_stack_space()));
-        stage(buf_, moved_ && sig_ok_ ? Theme::getInstance()->fg_green : Theme::getInstance()->fg_red);
+        s.s(moved_ && sig_ok_ ? "saved " : "SAVE FAILED ").s(base_).c(' ').d1(static_cast<int32_t>(sc_.duration_ms / 100)).s("s ").d(static_cast<int32_t>(bytes_ / 1000000)).s("MB");
+        s.s(" drop ").d(static_cast<int32_t>(dropped_pct_)).s("% stk").d(static_cast<int32_t>(get_free_stack_space()));
+        stage(buf_, moved_ && sig_ok_ && dropped_pct_ <= 1 ? Theme::getInstance()->fg_green : Theme::getInstance()->fg_red);
     }
 }
 
