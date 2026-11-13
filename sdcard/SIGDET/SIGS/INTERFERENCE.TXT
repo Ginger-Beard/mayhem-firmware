@@ -1,0 +1,15 @@
+# Signature Detect signature class: interference signatures (energy rules only).
+# Two custom sweep bands over teeth of a pulsed comb.
+#
+# Pulsed comb: lines every 2.334 MHz from ~110 to 470 MHz, on for ~2 ms every
+# 102.4 ms (a Wi-Fi beacon interval), traced to the ESP32-MDK add-on (gone when
+# it was unplugged). The sweep revisits a point every few ms, so a 2 ms pulse
+# shows in some looks only: duty low, period ~102 ms when two pulses fall in
+# one dwell.
+BAND,name=UHF,lo=455,hi=470,points=320,dwell=300
+BAND,name=VHF,lo=134,hi=149,points=320,dwell=300
+NB,label=Comb 462.16,kind=noise,f=462.160,bw=200,db=12,duty=1-40,period=80-125,valid=real
+NB,label=Comb 147.05,kind=noise,f=147.050,bw=200,db=12,duty=1-40,period=80-125,valid=real
+NB,label=Comb 135.38,kind=noise,f=135.380,bw=200,db=12,duty=1-40,period=80-125,valid=real
+# Not expressible here: the HF switching-supply comb (67.85 kHz spacing, 2-15
+# MHz) and the 120 Hz mains buzz need HF reception and envelope analysis.

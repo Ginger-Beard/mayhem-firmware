@@ -44,6 +44,7 @@
 #include "dsp_iir.hpp"
 #include "fifo.hpp"
 #include "spec_an_shared.hpp"
+#include "sigdet_wifi_rid.hpp"
 
 #include "utility.hpp"
 
@@ -182,6 +183,14 @@ class Message {
         WMBusPacketMessageID = 123,
         VDL2Frame = 124,
         SubGhzChatPacket = 125,
+        SignatureDetectConfig = 126,
+        SignatureDetectRid = 127,
+        SignatureDetectStats = 128,
+        SignatureDetectPatternHit = 129,
+        SignatureDetectWifi = 130,
+        SignatureDetectDroneId = 131,
+        SignatureDetectMeter = 132,
+        SignatureDetectZwave = 133,
         MAX
     };
 
@@ -2161,6 +2170,271 @@ struct SubGhzChatPacketMessage : public Message {
 
     uint8_t length{0};
     uint8_t data[MAX_LENGTH]{};
+};
+
+// Signature Detect (external app signature_detect, baseband PSDT). M0 -> M4.
+struct SignatureDetectConfigMessage : public Message {
+    static constexpr uint8_t MODE_IDLE = 0;
+    static constexpr uint8_t MODE_GFSK_BLE = 1;
+    static constexpr uint8_t MODE_SWEEP = 2;         // reserved: sweeps are entered with SpecAnConfig
+    static constexpr uint8_t MODE_BURST = 3;         // reserved
+    static constexpr uint8_t MODE_GFSK_PATTERN = 4;  // 4 Msps GFSK front end, sync word search (sync_* below)
+    static constexpr uint8_t MODE_DSSS = 5;          // 4 Msps 802.11b 1 Mb/s receiver on a slice of a Wi-Fi channel (Wi-Fi Remote ID)
+    static constexpr uint8_t MODE_ZWAVE = 8;         // 4 Msps Z-Wave R1 receiver (9.6 kb/s FSK Manchester, sigdet_zwave.hpp), the M0 tunes target = 908.42 MHz
+    static constexpr uint8_t MODE_METER = 7;         // 4 Msps track meter (fox hunt): gap-free power at the target, channel = log2 of the boxcar (2, 4, 6, 8)
+    static constexpr uint8_t MODE_DRONEID = 6;       // 15.36 Msps DJI DroneID burst detector (presence only), LO on the DroneID centre (HackRF Pro only)
+    static constexpr uint8_t FLAG_PASS_ALL = 0x01;   // BLE: forward every CRC valid advert, not only Remote ID (never in MODE_DSSS)
+    static constexpr uint8_t FLAG_RESET_STATS = 0x02;
+    static constexpr uint8_t FLAG_CONJUGATE = 0x04;    // bring-up aid: mirror the spectrum (I/Q swapped)
+    static constexpr uint8_t FLAG_WIFI_LEGACY = 0x08;  // MODE_DSSS bench aid: also forward French / legacy DJI drone IEs (raw)
+    static constexpr uint8_t FLAG_TARGET = 0x80;       // MODE_GFSK_BLE: forward every advert of AdvA = sync_hi:sync_lo (low 48 bits, MSB first) and nothing else (track view)
+    static constexpr uint8_t FLAG_FWD_ADV = 0x40;      // MODE_GFSK_BLE: also forward other CRC valid adverts with AdvData (SOURCE_BLE_OTHER; deduplicated per address and payload for 1 s, rate capped)
+    static constexpr uint8_t SEARCH_SHIFT = 4;         // MODE_DSSS flags bits 4-5: search phases - 1 (1..3 = 2..4), 0 = the image's default (bring-up)
+    static constexpr uint8_t SEARCH_MASK = 0x30;
+    static constexpr uint8_t PAT_INVERT = 0x01;   // pat_flags: bit 1 = negative deviation
+    static constexpr uint8_t PAT_RATE_SHIFT = 1;  // pat_flags bits 1-2: sigdet::PatternRate (only 0, 1 Mb/s, is built)
+
+    constexpr SignatureDetectConfigMessage(
+        uint32_t sampling_rate,
+        uint8_t mode,
+        uint8_t channel,
+        uint8_t flags)
+        : Message{ID::SignatureDetectConfig},
+          sampling_rate{sampling_rate},
+          mode{mode},
+          channel{channel},
+          flags{flags} {}
+
+    uint32_t sampling_rate;
+    uint8_t mode;
+    uint8_t channel;  // BLE channel index, 37..39; MODE_GFSK_PATTERN: the app's tag, copied into the hits; MODE_DSSS: Wi-Fi channel number; MODE_DRONEID: the app's tag, copied into the detections
+    uint8_t flags;
+    int8_t slice_mhz{0};  // MODE_DSSS: slice centre - channel centre, -2 or +2 (the M0 tunes target = channel + slice + 1 MHz)
+    /* MODE_GFSK_PATTERN only: sync word right aligned (last bit in bit 0 of sync_lo), 8..64 bits,
+     * bit errors allowed (the M4 clamps it to ceil(sync_bits / 16) - 1), payload bits returned. */
+    uint32_t sync_hi{0};
+    uint32_t sync_lo{0};
+    uint8_t sync_bits{0};
+    uint8_t max_errors{0};
+    uint8_t payload_bits{0};
+    uint8_t pat_flags{0};
+};
+
+// One Remote ID frame (or, with FLAG_PASS_ALL, any CRC valid BLE advert), by value. M4 -> M0.
+// Other sources (an ESP32 WiFi RID feed later) send the same message with adv[] made up as
+// 1E 16 FA FF 0D counter message(25), so the app has one parser for all of them.
+struct SignatureDetectRidMessage : public Message {
+    static constexpr uint8_t SOURCE_BLE = 0;
+    static constexpr uint8_t SOURCE_WIFI_BEACON = 1;
+    static constexpr uint8_t SOURCE_WIFI_NAN = 2;
+    static constexpr uint8_t SOURCE_ESP32_BLE = 3;
+    static constexpr uint8_t SOURCE_BLE_VENDOR = 4;  // on-board BLE, not Remote ID: a drone maker's advert (sigdet_ble_vendor.hpp)
+    static constexpr uint8_t SOURCE_BLE_OTHER = 5;   // on-board BLE, any other advert (FLAG_FWD_ADV: signature rules, survey log)
+    static constexpr uint8_t SOURCE_SHELL = 7;
+    static constexpr size_t ADV_MAX = 31;
+
+    constexpr SignatureDetectRidMessage()
+        : Message{ID::SignatureDetectRid} {}
+
+    uint32_t t_ms{0};     // baseband time of the packet's end
+    int16_t rssi_cdb{0};  // in-channel power, centi-dB re full scale of the int8 samples
+    int16_t cfo_khz{0};   // carrier offset from the channel centre
+    uint8_t chan{0};      // BLE channel index
+    uint8_t pdu_type{0};  // PDU header byte 0 (type in the low nibble, TxAdd in bit 6)
+    uint8_t source{SOURCE_BLE};
+    uint8_t addr[6]{};       // AdvA, most significant byte first
+    uint8_t adv_len{0};      // bytes in adv[]
+    uint8_t adv[ADV_MAX]{};  // AdvData
+};
+
+// Counters of the Signature Detect baseband, every 500 ms. M4 -> M0.
+struct SignatureDetectStatsMessage : public Message {
+    constexpr SignatureDetectStatsMessage()
+        : Message{ID::SignatureDetectStats} {}
+
+    /* The M4 RAM that PSDT lends the app (scratch below): the first kScratchRf
+     * bytes hold the RF detector's arrays and the spec_an::Sweep, the next
+     * kScratchMap a map view (GeoMapView, ~10 KB) while one is open, the last
+     * kScratchSig the signature class rules and the survey log's tables
+     * (sigdet_sig.hpp, sigdet_survey.hpp), so that none of them needs the M0 heap. */
+    static constexpr uint16_t kScratchRf = 4608;
+    static constexpr uint16_t kScratchMap = 10752;
+    static constexpr uint16_t kScratchSig = 6144;
+    static constexpr uint16_t kScratchSize = kScratchRf + kScratchMap + kScratchSig;
+
+    uint32_t aa_hits{0};  // access address syncs that started a packet
+    uint32_t crc_bad{0};  // ... that failed the CRC
+    uint32_t ok{0};       // CRC valid adverts
+    uint32_t rid_ok{0};   // ... of them carrying Open Drone ID
+    uint16_t drops{0};    // DMA buffers the M4 missed (all causes)
+    uint16_t cpu_pct{0};  // share of the M4 spent in execute() over the period
+    uint8_t chan{0};
+    uint8_t mode{0};
+    /* Diagnostics. Counters are since the last FLAG_RESET_STATS, max_* since the last stats message. */
+    uint32_t triggers{0};        // access address pattern matches that ran the soft check
+    uint32_t len_bad{0};         // syncs that failed the length check
+    uint16_t max_exec_us{0};     // longest execute()
+    uint16_t max_lag_us{0};      // latest end of an execute() after its buffer was complete (>= 512 at 4 Msps: one lost)
+    uint16_t max_start_us{0};    // latest start of an execute() after its buffer was complete (wake-up latency)
+    uint16_t slow_execs{0};      // execute() calls over 400 us
+    uint16_t hop_skips{0};       // buffers discarded while a retune settles
+    uint16_t drops_hop{0};       // drops within 16 buffers of a channel change
+    uint16_t drops_late{0};      // drops right after an execute() that ended past its deadline
+    uint16_t q_fail{0};          // messages to the M0 lost to a full application queue
+    uint16_t sync_capped{0};     // triggers ignored at the per-buffer soft check cap
+    uint16_t dup_suppressed{0};  // Remote ID frames not forwarded: same advert within 300 ms
+    uint16_t rate_capped{0};     // frames not forwarded: over 8 per 100 ms
+    uint16_t scratch_size{0};    // bytes at scratch: M4 RAM the app may use as working memory (never touched by the M4)
+    uint8_t* scratch{nullptr};   // valid while the PSDT image runs
+    /* Drops by phase (the sum is `drops`): demodulating BLE, sweeping, or within 8 buffers of
+     * a phase change (sample rate switch). */
+    uint16_t drops_ble{0};
+    uint16_t drops_sweep{0};
+    uint16_t drops_switch{0};
+    /* Lost pushes by message (q_fail is their sum), and by cause: the event thread held the
+     * queue's lock (the rest: queue full). */
+    uint16_t qf_rid{0};
+    uint16_t qf_stats{0};
+    uint16_t qf_lock{0};
+    uint16_t q_peak{0};   // most bytes queued at a push since the last stats message
+    uint32_t rid_fwd{0};  // Remote ID frames (or pass-all adverts) queued to the M0
+    /* Pattern mode (MODE_GFSK_PATTERN) and DJI adverts, since the last FLAG_RESET_STATS. */
+    uint32_t pat_cands{0};    // clean 16 bit pieces: full distance counted
+    uint32_t pat_matches{0};  // ... within the allowed errors (all phases)
+    uint32_t pat_hits{0};     // merged hits (one per packet)
+    uint32_t pat_fwd{0};      // ... queued to the M0
+    uint16_t pat_capped{0};   // matches lost to the per-block candidate list
+    uint16_t pat_rcap{0};     // hits not forwarded: over 8 per 100 ms
+    uint16_t drops_pat{0};    // drops while in pattern mode (part of `drops`)
+    uint16_t vendor_dup{0};   // DJI adverts not forwarded: same advert within 1 s
+    uint32_t vendor_ok{0};    // CRC valid adverts matching the DJI table (not Remote ID)
+    uint32_t vendor_fwd{0};   // ... queued to the M0
+    /* Wi-Fi Remote ID (MODE_DSSS), counters only (no frame content), since the last FLAG_RESET_STATS. */
+    uint32_t wifi_triggers{0};     // SYNC detections
+    uint32_t wifi_frames{0};       // SFDs found: 1 Mb/s long preamble frames seen
+    uint32_t wifi_hdr_bad{0};      // ... PLCP header CRC failed
+    uint32_t wifi_filtered{0};     // ... not a beacon / probe response / action frame (dropped at byte 0)
+    uint32_t wifi_fcs_bad{0};      // ... FCS failed
+    uint32_t wifi_fcs_ok{0};       // ... FCS valid
+    uint32_t wifi_beacon{0};       // FCS valid by type: beacons
+    uint32_t wifi_probe{0};        // ... probe responses
+    uint32_t wifi_action{0};       // ... action frames
+    uint32_t wifi_rid{0};          // ... carrying Remote ID (ODID vendor IE or NAN)
+    uint32_t wifi_fwd{0};          // Remote ID frames queued to the M0
+    uint16_t wifi_sync_lost{0};    // triggers without SFD
+    uint16_t wifi_hdr_2m{0};       // PLCP headers of 2 Mb/s frames (not demodulated)
+    uint16_t wifi_legacy{0};       // French / legacy DJI IE beacons (forwarded with FLAG_WIFI_LEGACY only)
+    uint16_t wifi_dup{0};          // Remote ID frames not forwarded: same frame within 300 ms
+    uint16_t wifi_rcap{0};         // ... over the rate cap
+    uint16_t wifi_busy{0};         // FCS valid frames dropped: both hand-off slots to the event thread busy
+    uint16_t wifi_qf{0};           // Remote ID frames lost to a full (or locked) application queue
+    uint16_t wifi_overflows{0};    // input ring overflows (backlog dropped)
+    uint16_t wifi_backlog{0};      // most samples waiting in the input ring (since the last stats message)
+    uint16_t wifi_max_step_us{0};  // longest demodulator step (since the last stats message)
+    uint16_t drops_wifi{0};        // drops while in MODE_DSSS (part of `drops`)
+    /* Measured cost of the DSSS demodulator (DWT cycles, mean over the last
+     * stats period, 0 if none): per group of 4 samples in each state, per
+     * CFO pass; and the search mode in use (2, 3, 4). */
+    uint16_t wifi_cyc_search{0};
+    uint16_t wifi_cyc_sync{0};
+    uint16_t wifi_cyc_lock{0};
+    uint16_t wifi_cyc_cfo{0};
+    uint8_t wifi_phases{0};
+    uint32_t wifi_shed{0};  // Search groups run on 2 phases to shed load (mode 3), since the last FLAG_RESET_STATS
+    /* DJI DroneID detector (MODE_DRONEID), counters since the last FLAG_RESET_STATS, max / mean since the last stats message. */
+    uint32_t did_cands{0};      // energy bursts of DroneID duration (535..720 us)
+    uint32_t did_evals{0};      // ... captured and tested by stage B (CP fold + ZC root 600)
+    uint32_t did_dets{0};       // ... passed: SignatureDetectDroneIdMessage sent (or lost: did_qf)
+    uint16_t did_skips{0};      // candidates not captured: snapshot still frozen for stage B, or a buffer lost mid-burst
+    uint16_t did_capped{0};     // candidates captured but not tested: over the stage B rate cap
+    uint16_t did_b_max_us{0};   // longest stage B (event thread, CPU time incl. preemption by the baseband thread)
+    uint16_t did_b_mean_us{0};  // mean stage B
+    uint16_t drops_did{0};      // drops while in MODE_DRONEID (part of `drops`)
+    uint16_t did_qf{0};         // detections lost to a full (or locked) application queue
+    /* Other adverts (FLAG_FWD_ADV), since the last FLAG_RESET_STATS. */
+    uint32_t other_fwd{0};  // queued to the M0
+    uint16_t other_dup{0};  // not forwarded: same address and payload within 1 s
+    uint16_t other_qf{0};   // lost to a full (or locked) application queue or the rate cap
+    /* Z-Wave (MODE_ZWAVE), since the last FLAG_RESET_STATS. */
+    uint32_t zw_syncs{0};  // preamble + SOF found
+    uint32_t zw_ok{0};     // checksum valid frames (queued or lost: zw_qf)
+    uint16_t zw_bad{0};    // bad length or checksum
+    uint16_t zw_qf{0};     // valid frames lost to a full application queue
+};
+
+// One DJI DroneID burst detection (MODE_DRONEID), by value. M4 -> M0. Presence only: a burst of the
+// OcuSync DroneID shell (duration, CP structure, Zadoff-Chu root 600 reference symbol); the payload is
+// not demodulated (O4 payloads are encrypted anyway).
+struct SignatureDetectDroneIdMessage : public Message {
+    constexpr SignatureDetectDroneIdMessage()
+        : Message{ID::SignatureDetectDroneId} {}
+
+    uint32_t t_ms{0};      // baseband time at the end of stage B (the burst ended up to ~20 ms before)
+    int16_t level_cdb{0};  // mean burst power over the on-time, centi-dB re full scale (|x| = 128 int8)
+    int16_t snr_cdb{0};    // on-time power over the energy floor, centi-dB
+    int16_t cfo_hz{0};     // fractional carrier offset, Hz (within +-7.5 kHz; whole subcarriers are not resolved)
+    uint16_t zc_milli{0};  // ZC root 600 correlation x 1000 (detect at >= 60; real bursts ~150-990)
+    uint16_t cp_milli{0};  // CP coherence x 1000
+    uint16_t dur_us{0};    // on-time
+    uint8_t nsym{0};       // layout: 8 symbols (O1 / O4) or 9 (O2)
+    uint8_t tag{0};        // SignatureDetectConfigMessage::channel of the dwell
+};
+
+// Track meter report (MODE_METER, sigdet_meter.hpp), every ~50 ms. M4 -> M0.
+struct SignatureDetectMeterMessage : public Message {
+    constexpr SignatureDetectMeterMessage()
+        : Message{ID::SignatureDetectMeter} {}
+
+    uint32_t t_ms{0};
+    int16_t peak_cdb{-12000};   // strongest 256 us block of the interval, centi-dB re full scale (|x| = 128)
+    int16_t mean_cdb{-12000};   // mean of the interval
+    int16_t floor_cdb{-12000};  // pulse detector floor
+    uint16_t pulses{0};         // pulse starts (+6 dB over the floor) in the interval
+    uint32_t clip{0};           // raw I / Q samples at |x| >= 120 in the interval
+    uint32_t period_us{0};      // median pulse start-to-start (last <= 8), 0 = unknown
+    uint32_t last_period_us{0};
+    uint32_t width_us{0};  // last pulse width
+    uint8_t log2d{0};      // boxcar 2^log2d of 4 Msps
+};
+
+// One checksum-valid Z-Wave frame (MODE_ZWAVE): its length and first <= 16 bytes (the header: home ID,
+// source, frame control, length, destination, routing header, command class), never more. M4 -> M0.
+struct SignatureDetectZwaveMessage : public Message {
+    constexpr SignatureDetectZwaveMessage()
+        : Message{ID::SignatureDetectZwave} {}
+
+    uint32_t t_ms{0};
+    int16_t rssi_cdb{-12000};  // mean power over the frame, centi-dB re full scale (|x| = 128) in the 200 kHz channel
+    uint8_t len{0};            // the frame's length byte
+    uint8_t nhdr{0};           // bytes in hdr
+    uint8_t violations{0};     // Manchester chip pairs that were not complementary
+    uint8_t hdr[16]{};
+};
+
+// One Wi-Fi Remote ID frame (MODE_DSSS), by value. M4 -> M0. Only the first wire_size() bytes are
+// queued (MessageQueue::push_prefix): a typical ODID beacon is ~150 bytes of the 280.
+struct SignatureDetectWifiMessage : public Message {
+    constexpr SignatureDetectWifiMessage()
+        : Message{ID::SignatureDetectWifi} {}
+
+    sigdet::SignatureDetectWifiRid rid{};
+
+    size_t wire_size() const { return sizeof(Message) + rid.wire_size(); }
+};
+
+// One pattern hit (MODE_GFSK_PATTERN), by value. M4 -> M0.
+struct SignatureDetectPatternHitMessage : public Message {
+    constexpr SignatureDetectPatternHitMessage()
+        : Message{ID::SignatureDetectPatternHit} {}
+
+    uint32_t t_ms{0};        // baseband time of the hit
+    uint32_t payload_hi{0};  // payload bits right aligned, first bit received in the MSB of the payload_bits
+    uint32_t payload_lo{0};
+    int16_t rssi_cdb{0};  // in-channel power over sync and payload, centi-dB re full scale
+    uint8_t tag{0};       // SignatureDetectConfigMessage::channel of the dwell
+    uint8_t errors{0};    // sync bits wrong
+    uint8_t phase{0};     // sample phase, 0..3
+    uint8_t payload_bits{0};
 };
 
 struct TetraBurstMessage : public Message {

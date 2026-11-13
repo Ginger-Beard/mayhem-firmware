@@ -50,6 +50,17 @@ class MessageQueue {
         return push(&message, sizeof(message));
     }
 
+    /* Only the first len (<= sizeof(T)) bytes of message: for a message
+     * ending in a variable length payload whose receiver reads no further
+     * than its length field says (the rest of its buffer is stale). */
+    template <typename T>
+    bool push_prefix(const T& message, size_t len) {
+        static_assert(sizeof(T) <= Message::MAX_SIZE, "Message::MAX_SIZE too small for message type");
+        static_assert(std::is_base_of<Message, T>::value, "type is not based on Message");
+
+        return push(&message, len < sizeof(message) ? len : sizeof(message));
+    }
+
     template <typename T>
     bool push_and_wait(const T& message) {
         const bool result = push(message);
@@ -73,6 +84,11 @@ class MessageQueue {
         return fifo.is_empty();
     }
 
+    /* Bytes queued (records and their length headers), e.g. for a fill gauge. */
+    size_t len() const {
+        return fifo.len();
+    }
+
     void reset() {
         fifo.reset();
     }
@@ -93,10 +109,6 @@ class MessageQueue {
     Message* pop(std::array<uint8_t, Message::MAX_SIZE>& buf) {
         Message* const p = reinterpret_cast<Message*>(buf.data());
         return fifo.out_r(buf.data(), buf.size()) ? p : nullptr;
-    }
-
-    size_t len() const {
-        return fifo.len();
     }
 
     bool push(const void* const buf, const size_t len) {

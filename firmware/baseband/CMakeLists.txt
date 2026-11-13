@@ -574,6 +574,15 @@ set(MODE_CPPSRC
 DeclareTargets(PPVW protoview)
 
 
+### Signature Detect (BLE Remote ID demodulator + spectrum sweep engine)
+
+set(MODE_CPPSRC
+	proc_signature_detect.cpp
+	spec_an_engine.cpp
+)
+DeclareTargets(PSDT signature_detect)
+
+
 
 
 ###### AFTER THIS LINE ALL LISTED BASEBANDS WILL BE EXTERNAL ON TIER 2, so it'll be external on all tiers

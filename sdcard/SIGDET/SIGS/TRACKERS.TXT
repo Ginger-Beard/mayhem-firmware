@@ -1,0 +1,26 @@
+# Signature Detect signature class: Bluetooth LE item trackers (BLE dwells only).
+# Format: /SIGDET/README.TXT. valid=real: seen in test recordings;
+# valid=doc: from documents (published research, vendor / IETF specs) only.
+# The first matching rule wins, so the specific Apple rules come first.
+# Add beep=1 to a rule to beep when it is found (with "Beep on drone").
+#
+# Apple Find My, offline finding (AirTag or Find My accessory away from its
+# owner, or near it with the short form): manufacturer data 004C, TLV 0x12.
+BLE,label=Apple Find My,kind=tracker,cid=004C,mfr=12,valid=doc
+# AirTag that was never set up (or was removed from its account): Apple TLV
+# 0x07 length 0x19 "proximity pairing", but not an audio model (AirPods and
+# Beats have prefix byte 01 or a model code whose second byte is 20).
+BLE,label=AirTag not setup,kind=tracker,cid=004C,mfr=0719,minlen=27,not=????01/????????20,valid=real
+# Samsung SmartTag / SmartThings Find: service data 0xFD5A.
+BLE,label=Samsung SmartTag,kind=tracker,sdata=FD5A,valid=real
+# Tile: service UUIDs 0xFEED, 0xFEEC, 0xFD84.
+BLE,label=Tile,kind=tracker,uuid=FEED,valid=doc
+BLE,label=Tile,kind=tracker,uuid=FEEC,valid=doc
+BLE,label=Tile,kind=tracker,uuid=FD84,valid=doc
+# Chipolo: service UUID 0xFE33.
+BLE,label=Chipolo,kind=tracker,uuid=FE33,valid=doc
+# Google Find My Device network tags: service data 0xFEAA with frame type
+# 0x40 or 0x41 (plain Eddystone uses 0x00-0x30 and is not a tracker).
+BLE,label=Google FMDN tag,kind=tracker,sdata=FEAA,sd=40&FE,valid=doc
+# DULT, the cross-vendor unwanted-tracking standard: service data 0xFCB2.
+BLE,label=DULT tracker,kind=tracker,sdata=FCB2,valid=doc

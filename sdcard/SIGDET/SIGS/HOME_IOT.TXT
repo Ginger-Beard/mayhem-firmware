@@ -1,0 +1,36 @@
+# Signature Detect signature class: household IoT (BLE lights and beacons,
+# Zigbee and Z-Wave energy). BLE dwells plus the 2.4 GHz and 915 MHz sweeps.
+# Format: /SIGDET/README.TXT. valid=real: seen in test recordings;
+# valid=doc: from documents only.
+#
+# Govee smart lights: manufacturer data 0x8802 (H6008 bulbs, name
+# ihoment_H6008_...) and 0x8803 (H6046 / H6056 light bars).
+BLE,label=Govee bulb,kind=light,cid=8802,valid=real
+BLE,label=Govee light bar,kind=light,cid=8803,valid=real
+# Windows PC: Microsoft CDP beacon, company 0x0006, scenario type 0x01.
+BLE,label=Windows CDP,kind=phone,cid=0006,mfr=01,valid=real
+# Samsung TV / monitor / appliance beacon: company 0x0075, header 42 04.
+BLE,label=Samsung beacon,kind=home,cid=0075,mfr=4204,valid=real
+# Apple Nearby Info (iPhone / Mac nearby): Apple TLV 0x10.
+BLE,label=Apple device,kind=phone,cid=004C,mfr=10,valid=doc
+# Google Fast Pair (headphones and speakers): service UUID 0xFE2C.
+BLE,label=Fast Pair,kind=audio,uuid=FE2C,valid=doc
+# Matter device waiting to be commissioned: service data 0xFFF6.
+BLE,label=Matter setup,kind=home,sdata=FFF6,valid=doc
+# Amazon devices (Echo, Fire TV, Sidewalk): company 0x0171.
+BLE,label=Amazon device,kind=home,cid=0171,valid=doc
+#
+# Zigbee (802.15.4) channels 15, 20 and 25, energy only: Zigbee PRO frames
+# were decoded on these channels in test recordings. A Wi-Fi burst or
+# a BLE connection on the same frequency reads the same (low confidence).
+NB,label=Zigbee ch15,kind=home,f=2425,bw=2000,db=8,duty=0-40,valid=real
+NB,label=Zigbee ch20,kind=home,f=2450,bw=2000,db=8,duty=0-40,valid=real
+NB,label=Zigbee ch25,kind=home,f=2475,bw=2000,db=8,duty=0-40,valid=real
+# Z-Wave frame receiver: checksum-valid R1 frames (9.6 kb/s) on 908.42 MHz, seen
+# 2026-11-12 on a test network (real). It takes a
+# 1.5 s dwell in each cycle; the NB rules below are the energy fallback.
+ZW,label=Z-Wave,kind=home,rate=9k6,f=908.42,valid=real
+# Z-Wave US (e.g. a garage door controller): 908.42 MHz
+# (9.6 / 40 kb/s) and 916.00 MHz (100 kb/s), short frames.
+NB,label=Z-Wave 908.4,kind=home,f=908.42,bw=200,db=10,duty=0-50,valid=real
+NB,label=Z-Wave 916.0,kind=home,f=916.0,bw=300,db=10,duty=0-50,valid=doc
