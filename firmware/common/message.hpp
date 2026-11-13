@@ -182,6 +182,8 @@ class Message {
         WMBusPacketMessageID = 123,
         VDL2Frame = 124,
         SubGhzChatPacket = 125,
+        GpsRxConfig = 126,
+        GpsRxStatus = 127,
         MAX
     };
 
@@ -2300,4 +2302,53 @@ struct WMBusPacketMessage : public Message {
     uint16_t length = 0;
     uint8_t data[500] = {0};
 };
+
+/* GPS receiver (PGPR baseband, HackRF Pro). M0 -> M4: start a snapshot
+ * capture and a search, or stop. */
+struct GpsRxConfigMessage : public Message {
+    constexpr GpsRxConfigMessage()
+        : Message{ID::GpsRxConfig} {}
+    enum Cmd : uint8_t { CMD_STOP = 0,
+                         CMD_SEARCH = 1 };
+    uint8_t cmd{CMD_STOP};
+    uint8_t k_ms{20};      /* snapshot length, 1..20 ms */
+    uint8_t half_bins{12}; /* Doppler bins of 500 Hz either side of each centre */
+    uint8_t refine{1};     /* refine detected PRNs (snapshot fix) */
+    uint32_t prn_mask{0};  /* bit p-1: search PRN p */
+    int16_t center[32]{};  /* Doppler window centre per PRN, Hz */
+    uint8_t confirm{1};    /* report a PRN only if a second snapshot confirms it */
+};
+
+/* M4 -> M0: progress, noise statistics, and where the results and the lent
+ * RAM are (valid while the PGPR image runs). */
+struct GpsRxStatusMessage : public Message {
+    constexpr GpsRxStatusMessage()
+        : Message{ID::GpsRxStatus} {}
+    enum State : uint8_t { IDLE = 0,
+                           CAPTURING,
+                           SEARCHING,
+                           REFINING,
+                           DONE };
+    enum Level : uint8_t { LEVEL_OK = 0,
+                           LEVEL_LOW, /* snapshot AC rms below the floor: no search done */
+                           LEVEL_HIGH /* clipping: results still reported */ };
+    /* The M4 RAM PGPR lends the app: orbit tables and solver work space
+     * (never touched by the M4). */
+    static constexpr uint16_t kScratchSize = 10240;
+    uint8_t state{IDLE};
+    uint8_t level{LEVEL_OK};
+    uint8_t confirming{0}; /* second (confirmation) snapshot under way */
+    uint8_t done_prn{0};   /* PRNs searched */
+    uint8_t total_prn{0};  /* PRNs requested */
+    uint8_t k_ms{0};
+    uint16_t rms_x10{0};          /* noise rms of the snapshot, LSB x 10 */
+    uint16_t clip_permille{0};    /* samples at full scale, per mille */
+    uint32_t seq{0};              /* search number (results belong to it) */
+    uint32_t unit_cycles{0};      /* average M4 cycles of one work unit (one 1 ms block of one Doppler bin) */
+    uint32_t units{0};            /* work units done in this search */
+    const void* results{nullptr}; /* gps_rx::Result[32], by PRN - 1 */
+    uint8_t* scratch{nullptr};
+    uint16_t scratch_size{0};
+};
+
 #endif /*__MESSAGE_H__*/

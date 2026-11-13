@@ -441,6 +441,14 @@ set(EXTCPPSRC
 	external/subghz_chat/main.cpp
 	external/subghz_chat/ui_subghz_chat.cpp
 	external/subghz_chat/chat_crypto.cpp
+	#gps (receiver; HackRF Pro)
+	external/gps/main.cpp
+	external/gps/ui_gps.cpp
+	external/gps/gps_orbit.cpp
+	external/gps/gps_sgp4.cpp
+	external/gps/gps_pass.cpp
+	external/gps/gps_point.cpp
+	external/gps/gps_solve.cpp
 )
 
 set(EXTAPPLIST
@@ -548,5 +556,6 @@ set(EXTAPPLIST
 	wmbus_rx
 	vdl2_rx
 	subghz_chat
+	gps
 )
 

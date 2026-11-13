@@ -574,6 +574,16 @@ set(MODE_CPPSRC
 DeclareTargets(PPVW protoview)
 
 
+### GPS receiver (L1 C/A snapshot acquisition; HackRF Pro only: needs the LPC4330's RAM)
+
+if(BOARD STREQUAL "PRALINE")
+	set(MODE_CPPSRC
+		proc_gps_rx.cpp
+	)
+	DeclareTargets(PGPR gps_rx)
+endif()
+
+
 
 
 ###### AFTER THIS LINE ALL LISTED BASEBANDS WILL BE EXTERNAL ON TIER 2, so it'll be external on all tiers
