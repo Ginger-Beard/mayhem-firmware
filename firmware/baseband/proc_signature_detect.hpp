@@ -26,7 +26,7 @@
 #include "spec_an_engine.hpp"
 #include "sigdet_dsp.hpp"
 #include "sigdet_meter.hpp"
-#include "sigdet_zwave.hpp"
+#include "sigdet_fsk_rx.hpp"
 #include "sigdet_dsss.hpp"
 #include "sigdet_droneid.hpp"
 #include "sigdet_ble_vendor.hpp"
@@ -257,11 +257,12 @@ class SignatureDetectProcessor : public BasebandProcessor {
     uint32_t tgt_window_count_{0};
 #ifdef PRALINE
     void execute_meter(const buffer_c8_t& buffer);
-    /* Z-Wave (MODE_ZWAVE). */
-    sigdet::ZwaveRx zwave_{};
-    SignatureDetectZwaveMessage zw_message{};
-    uint16_t zw_qf_{0};
-    static void zwave_callback(void* ctx, const sigdet::ZwaveFrame& f);
+    /* FSK frame rules (MODE_FSK; Z-Wave R1 is one). */
+    sigdet::FskRx fsk_{};
+    sigdet::FskDwell req_fsk_{};
+    SignatureDetectFskMessage fsk_message{};
+    uint16_t fsk_qf_{0};
+    static void fsk_callback(void* ctx, const sigdet::FskFrame& f);
 #endif
     sigdet::RidDedup dedup_{};
     sigdet::VendorDedup vendor_dedup_{};

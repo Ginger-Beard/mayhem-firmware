@@ -503,6 +503,12 @@ void set_signature_detect_target(uint8_t channel, uint8_t flags, uint64_t addr) 
     send_message(&message);
 }
 
+void set_signature_detect_fsk(uint32_t sampling_rate, uint8_t tag, uint8_t flags, const sigdet::FskDwell* dwell) {
+    SignatureDetectConfigMessage message{sampling_rate, SignatureDetectConfigMessage::MODE_FSK, tag, flags};
+    message.fsk = dwell;
+    send_message(&message);
+}
+
 void set_signature_detect_dsss(uint8_t wifi_channel, int8_t slice_mhz, uint8_t flags) {
     SignatureDetectConfigMessage message{4000000, SignatureDetectConfigMessage::MODE_DSSS, wifi_channel, flags};
     message.slice_mhz = slice_mhz;

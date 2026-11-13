@@ -136,6 +136,9 @@ void set_signature_detect_dsss(uint8_t wifi_channel, int8_t slice_mhz, uint8_t f
 /* BLE mode of the Signature Detect baseband restricted to one advertiser (track view):
  * FLAG_TARGET, addr = AdvA in its low 48 bits, most significant byte first. */
 void set_signature_detect_target(uint8_t channel, uint8_t flags, uint64_t addr);
+/* FSK frame mode (MODE_FSK): the caller has tuned target = the rules' frequency; the M4 copies *dwell
+ * while it handles the message. tag is the app's (the dwell). */
+void set_signature_detect_fsk(uint32_t sampling_rate, uint8_t tag, uint8_t flags, const sigdet::FskDwell* dwell);
 
 void request_roger_beep();
 void request_rssi_beep();

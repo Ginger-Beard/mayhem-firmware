@@ -71,9 +71,16 @@
  *     /SIGDET/PATTERNS.TXT format (sigdet_pattern.hpp), up to kPatFileEntries
  *
  *   ZW,label=Z-Wave,kind=home,rate=9k6,f=908.42,valid=real
- *     Z-Wave frame receiver (PSDT MODE_ZWAVE): checksum-valid R1 frames
- *     (9.6 kb/s FSK, Manchester) on f (default 908.42 MHz, US). One per class;
- *     rate 9k6 only. A network is listed after 2 valid frames of its home ID.
+ *     Z-Wave frame receiver: the built-in FSK rule kZwFskFields (R1, 9.6 kb/s
+ *     Manchester, XOR checksum) on f (default 908.42 MHz, US) with the Z-Wave
+ *     header checks and network table (post=zwave). One per class; rate 9k6
+ *     only. A network is listed after 2 valid frames of its home ID.
+ *
+ *   FSK,label=...,f=...,rate=...,sync=...,len=...[,...]
+ *     Narrowband FSK frame rule (PSDT MODE_FSK, common/sigdet_fsk.hpp): the
+ *     grammar is in /SIGDET/README.TXT ("FSK RULES") and parse_fsk(). Up to
+ *     kSigMaxFsk FSK + ZW rules a class; rules with the same f, bw and chip
+ *     rate share a dwell (up to sigdet::kFskRulesPerDwell).
  *
  *   RX,ble,wifi,droneid,rid,dji,rfcls   receivers and built-in drone
  *     detectors a class asks for: ble (BLE dwells without BLE rules), wifi
@@ -91,6 +98,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "sigdet_fsk.hpp"
 #include "sigdet_pattern.hpp"
 #include "sigdet_rf.hpp"
 
@@ -104,6 +112,7 @@ constexpr size_t kSigPatBytes = 8;
 constexpr size_t kSigLineMax = 200;
 constexpr size_t kSigMaxLines = 300;
 constexpr size_t kSigNameLen = 16; /* class name (file stem) incl. the terminator */
+constexpr size_t kSigMaxFsk = 4;   /* FSK + ZW rules, and so dwells, a class */
 
 enum SigKind : uint8_t {
     SK_OTHER,
@@ -201,11 +210,43 @@ struct ZwRule {
     char label[kSigLabelLen];
 };
 
+/* FskRuleDef::post */
+enum : uint8_t {
+    FSK_POST_NONE,
+    FSK_POST_ZWAVE, /* Z-Wave header checks + network table (sigdet_zwnet), the ZW rule */
+};
+
+/* One FSK rule as the app keeps it; the M4's part (sigdet::FskRule) is in its
+ * dwell's plan: fskg[group].dwell.rules[slot]. */
+struct FskRuleDef {
+    uint32_t f_khz;
+    uint32_t rate;    /* bits/s */
+    uint32_t chip_hz; /* rate x chips per bit */
+    uint16_t bw_khz;
+    uint16_t dev_lo, dev_hi; /* kHz, 0-0 = not given */
+    uint16_t line;
+    uint8_t decim, ma;
+    uint8_t kind, valid;
+    uint8_t min_frames; /* frames before it is listed */
+    uint8_t post;       /* FSK_POST_* */
+    uint8_t group;      /* its dwell, SigClass::fskg */
+    uint8_t slot;       /* ... and its place in it */
+    uint8_t check;      /* sigdet::FskCheck */
+    char label[kSigLabelLen];
+};
+
+/* One FSK dwell: a frequency, a front end and up to 4 rules. */
+struct FskGroup {
+    uint32_t f_khz;
+    uint16_t bw_khz;
+    sigdet::FskDwell dwell;
+};
+
 struct SigReport {
     uint16_t lines;
-    uint8_t ble, nb, bands, pat, zw; /* rules loaded */
-    uint8_t bad;                     /* lines rejected */
-    uint16_t bad_line;               /* first rejected line (1 based), 0 if none */
+    uint8_t ble, nb, bands, pat, zw, fsk; /* rules loaded */
+    uint8_t bad;                          /* lines rejected */
+    uint16_t bad_line;                    /* first rejected line (1 based), 0 if none */
     bool truncated;
     char why[20];
 };
@@ -220,8 +261,15 @@ struct SigClass {
     NbRule nb[kSigMaxNb];
     SigBand bands[kSigMaxBands];
     ZwRule zw;
+    uint8_t nfsk, nfskg;
+    int8_t zw_rule; /* the ZW rule's index in fsk[], -1 none */
+    FskRuleDef fsk[kSigMaxFsk];
+    FskGroup fskg[kSigMaxFsk];
     SigReport report;
 };
+
+/* The built-in Z-Wave R1 rule (the ZW line), as FSK fields. */
+extern const char* const kZwFskFields;
 
 /* Reads a class file in pieces of any size: begin(), feed() ..., finish().
  * PAT lines go into the pattern table (begin_file without the built-in toy
@@ -242,6 +290,8 @@ class SigParser {
     char line_[kSigLineMax + 1]{};
     size_t len_{0};
     bool long_{false};
+    FskRuleDef fsk_def_{}; /* an FSK / ZW line being parsed (off the stack) */
+    sigdet::FskRule fsk_m4_{};
 
     void end_line();
     void reject(uint16_t line, const char* why);

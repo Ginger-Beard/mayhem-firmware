@@ -89,8 +89,14 @@ ZW   Z-Wave frame receiver (one per class): ZW,label=Z-Wave,kind=home,rate=9k6,f
      FSK, Manchester). A network is listed as "ZW <home ID>" after 2 valid frames
      of it (a single corrupted frame can pass the 8 bit checksum). Alone in a
      class it listens all the time; with other receivers it gets a 1.5 s dwell per
-     cycle. rate: 9k6 only (40 kb/s and 100 kb/s are not decoded yet). Header
-     fields are logged, never the payload.
+     cycle. rate: 9k6 only. Header fields are logged, never the payload.
+     It is the built-in FSK rule (see FSK RULES) with the Z-Wave header checks
+     and network table, i.e. the same as
+       FSK,label=Z-Wave,kind=home,valid=real,f=908.42,bw=200,dev=10-40,rate=9600,
+       code=manchester,pre=55,pre_min=10,sync=F0,len=@7,lmin=10,lmax=64,
+       check=xor8,seed=FF,post=zwave        (one line; counts as an FSK rule)
+
+FSK  narrowband FSK / GFSK frame rule: see FSK RULES below.
 
 RX   receivers and built-in drone detectors a class asks for:
        RX,ble,wifi,droneid,rid,dji,rfcls
@@ -106,6 +112,99 @@ RX   receivers and built-in drone detectors a class asks for:
      (BLE_SEEN with sd=FFFA for Remote ID). A class change drops every entry of
      the old class from the list (with its *_DROP row).
 
+FSK RULES
+  One line per rule, up to 4 FSK + ZW rules per class (all lines up to 200
+  characters). A frame counts when its validity check passes; a rule is
+  listed after min= such frames within 60 s (default 1 with crc16, 2 with an
+  8 bit check). A rule without a check (check=none) counts sync + a
+  plausible length only, needs 3 frames by default and is shown with '?'
+  (low confidence).
+  Receive only. Field names follow sigdb's [[framing.validity]] (DESIGN.md
+  7.5); offsets count from the first byte after the sync word.
+
+  FSK,label=..,f=..,rate=..,sync=..,len=..[,key=value ...]
+  key      value                            sigdb field              default
+  label=   up to 19 characters              detection label          (required)
+  kind=    as BLE rules                     sig_kind                 other
+  valid=   real | standin | doc             evidence level           doc
+  f=       centre, MHz, up to 3 decimals    rf.channels_mhz          (required)
+  bw=      channel width, kHz, 16..1000     detection bw_khz         200
+           (the receiver's boxcar is 4 k samples of 4 Msps, k = 1000/bw
+           rounded: 4 MS/s / 4k out, first nulls at +-that; 200 -> 200 kS/s,
+           500 -> 500 kS/s, 100 -> 100 kS/s, 50 -> 50 kS/s)
+  dev=     lo-hi, kHz, expected deviation   modulation.deviation_hz  (none)
+           (checked against bw: hi must be under a quarter of the output
+           rate; frames are not rejected on it, the measured value is logged)
+  rate=    bits/s, 600..250000; 9600, 9k6,  validity symbol_rate_hz  (required)
+           40k, 1k2 (the BIT rate: Manchester sends 2 chips a bit)
+  code=    nrz | manchester (bit b -> chips b, not b; Z-Wave) |
+           manchester_inverted (not b, b; IEEE 802.3) |
+           differential_manchester (a transition mid-bit always; 0 = a
+           transition at the bit start too, 1 = none)
+                                            validity line_coding     nrz
+  order=   msb_first | lsb_first            validity bit_order       msb_first
+  pre=     preamble unit as sent, 2 or 4    validity preamble_hex    (none)
+           hex digits (55, AAAA)
+  pre_min= preamble bytes the sender sends  validity                 2
+           (at least); the receiver matches preamble_min_bytes
+           the last min(2, pre_min) bytes of
+           it before the sync, less when the 64 chip search window is full
+  sync=    sync word / start of frame as    validity sync_hex        (required)
+           sent, 2..8 hex digits (8..32 bits, MSB = first bit on air)
+  err=     chips of preamble + sync allowed -                        chips/12
+           wrong, 0..16 (at most chips/4)
+  len=     N (1..64: fixed bytes after the sync, check included) |
+           @K (a length field at offset K) |
+           carrier (until the level drops by 9 dB, at most lmax bytes)
+                                            validity length_field.offset (required)
+  lsize=   length field bytes, 1 | 2        length_field.size        1
+  lcount=  whole_frame (the field counts every byte after the sync, itself
+           and the check included) | after_field (the bytes after the field,
+           check included) | payload (the bytes after the field, check not
+           included)                        length_field.counts      whole_frame
+  ladj=    added to the field, -64..64      length_field.adjust      0
+  lend=    big | little (lsize=2)           length_field.endian      big
+  lmin=    total bytes after the sync, at least (1..64)   -          1 (carrier 2)
+  lmax=    ... at most (1..64)                            -          64
+  check=   none | xor8 | sum8 | crc8 | crc16              check.type none
+  seed=    hex (xor8 / sum8: the start value; crc: init)  check.seed 0
+  poly=    hex, crc8 / crc16 (required for them; normal   check.poly -
+           form, top bit implied: 1021 = CCITT, 8005, 07, 31)
+  xorout=  hex                                            check.xor_out 0
+  refin=   0 | 1                                          check.reflect_in 0
+  refout=  0 | 1                                          check.reflect_out 0
+  cfrom=   first covered byte, 0..63                      check.coverage_from 0
+  cto=     before_check | K: the LAST covered byte K (inclusive)
+                                                          check.coverage_to before_check
+  cpos=    last | K: the first check byte                 check.position last
+  cend=    big | little (crc16 byte order)                check.endian big
+  min=     frames within 60 s before it is      -          crc16: 1, xor8 /
+           listed, 1..10 (an 8 bit check passes             sum8 / crc8: 2,
+           1 random frame in 256)                           none: 3
+  post=    zwave: Z-Wave header checks + network table    -          (none)
+           (what the ZW line uses; one per class)
+  8 bit checks take 2 hex digits at most; crc16 4. The check is over
+  bytes cfrom..cto and compared with the bytes at cpos.
+  Errors (shown on the Debug page as "SIG ln<n> <why>"): no label, no f, no
+  rate, no sync, no len, rate too high for bw (fewer than 4 samples a chip),
+  dev too wide for bw, sync too long (over 64 chips), err over chips/4, crc:
+  needs poly, 8 bit check: 2 hex, lmin over lmax, len field past lmax, over 4
+  FSK rules, one Z-Wave rule, and the per key messages.
+  Dwells: rules with the same f, bw (boxcar) and chip rate share one dwell
+  (up to 4 rules, every rule's pattern searched at once; with two identical
+  patterns the first rule wins). Different frequencies or rates get their own
+  dwell, one dwell per cycle in turn (1.5 s each; a class with only FSK
+  rules: 5 s, or 2.5 s each when it has several dwells).
+  Rates: the receiver needs 4 or more samples a chip and is tested from
+  9.6 kb/s Manchester to 100 kb/s NRZ; practical range 1.2 kb/s (bw=50) to
+  100 kb/s (bw=500). Above ~40 kb/s it integrates the middle half of each
+  chip (GFSK smear); 100 kb/s needs ~12 dB SNR in the 500 kHz channel.
+  Frame bytes: the first 16 go to the app; FSK_FRM logs the first 8 as hex.
+  Those bytes usually hold the device's address / serial: they stay in your
+  own log (as BLE addresses do); share logs only through sigdb's scrub.
+  Example (Z-Wave R2, 40 kb/s NRZ, documents only):
+    FSK,label=Z-Wave R2,kind=home,valid=doc,f=908.42,bw=200,dev=10-40,rate=40k,pre=55,pre_min=10,sync=F0,len=@7,lmin=10,lmax=64,check=xor8,seed=FF
+
 WHAT EACH SHIPPED CLASS RUNS
   Drones (built in)  everything, as set in Setup: Remote ID (BLE, Wi-Fi), DJI
                      BLE presence, DroneID, pattern scan (+ PATTERNS.TXT),
@@ -115,6 +214,9 @@ WHAT EACH SHIPPED CLASS RUNS
                      MHz sweeps (NB rules: Zigbee, Z-Wave energy), Z-Wave frames
   ISM_900            915 MHz sweep (NB rules), Z-Wave frames
   ZWAVE              Z-Wave frames only (100 % on 908.42 MHz)
+  ZWAVE_FSK          Z-Wave R1 as a generic FSK rule (no header checks; one
+                     entry for the rule), R2 40 kb/s and R3 100 kb/s rules
+                     (documents only): two dwells, 908.42 and 916.00 MHz
   LAND_MOBILE        two custom sweep bands, NB rules
   INTERFERENCE       two custom sweep bands, NB rules
   None of the file classes has rid, dji or rfcls: no drone detections there.
@@ -208,13 +310,14 @@ Events
            wifi_frames). detail: up_s, cyc_ms (cycle time), cpu (M4 %),
            ble_aa / ble_ok / ble_crc (BLE syncs, CRC good, CRC bad), rid_ok,
            rid_fwd, other_fwd / other_dup / other_lost (other adverts),
-           dji_ok, drops, drops_ble, qf (M4->M0 queue full), qf_rid, zw_syncs / zw_ok / zw_bad (Z-Wave preambles, valid frames, bad or lost), wifi_frames,
+           dji_ok, drops, drops_ble, qf (M4->M0 queue full), qf_rid, fsk_syncs / fsk_ok / fsk_bad (FSK rules incl. Z-Wave: patterns found, frames with a passing check, bad length / check or lost; were zw_*), wifi_frames,
            wifi_fcs_ok, wifi_fcs_bad, wifi_beacon / _probe / _action, wifi_rid,
            pat_hits, pat_rx, did_cands, did_dets, slices (sweep replies),
            stalls, partial, i2c_faults, i2c_recov, clk_err, entities (list),
            heap_core / heap_free (M0 bytes), rows / lost / log_err / bytes
            (this log), srv_drop (survey rows over the rate limit), srv_ble /
-           srv_nrg (survey table entries), usb_drop, lna, vga, amp, gps
+           srv_nrg (survey table entries), usb_drop, lna, vga, amp, fsk_nochk (frames
+           of FSK rules without a check), fsk_rx (FSK frames the app got), gps
            (fix|nofix|none), survey, class_ok, class_bad_line, m0_stack_free_w (the
            UI thread's stack never used since boot, in 4-byte words, as sysinfo). Counters run
            from the app start.
@@ -249,6 +352,15 @@ Events
            multicast, ack, routed), routed, ackreq, seq, len, cc (command class
            byte, when the frame has one), rep / hop (routed frames: repeaters,
            hop), nodes, frames, node_ids
+  FSK_NEW / FSK_FRM / FSK_SUM   FSK rules (src F): FSK_NEW once per rule and
+           session (when it is listed), FSK_FRM per frame (at most one a second
+           a rule; skipped= counts the rest), FSK_SUM 60 s after the last frame.
+           id = F<rule number>, label, kind, freq_khz, bw_khz, level dBFS (the
+           frame's mean power), own position; detail rule, valid, len (bytes
+           after the sync), check (ok | none), dev_khz (measured mean
+           deviation), off_khz (carrier offset), rate (bit rate the clock
+           settled to), viol (Manchester violations), hex (the first <= 8
+           bytes: device identifiers, local only), frames.
   TRK_START / TRK / TRK_STOP   the Track view (fox hunt), TRK once a second:
            src M (meter at a frequency) or B (BLE target); id frequency kHz,
            address or rule<n>; label the target; kind track; freq_khz /
@@ -352,7 +464,8 @@ The .SIG sidecar, format 1: key=value lines (CRLF), in this order:
   pair=P01                  shared by the OFF and ON files of a pair
   label=door_remote
   target_kind=zwave         manual, track, rf, nb, ble, energy, zwave, pattern,
-                            droneid, remote_id, dji_ble, sig
+                            droneid, remote_id, dji_ble, sig, fsk (target_extra
+                            rule=<n>;bw_khz=<bw>)
   target_label=ZW 1A2B3C4D  the detection's name (local file: addresses and home
                             IDs may appear here)
   target_extra=home=1A2B3C4D;...   key=value;... about the target: bw_khz,

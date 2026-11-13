@@ -46,7 +46,8 @@ struct TrackTarget {
         FREQ,     /* MODE_METER at f_khz, bandwidth bw */
         BLE_ADDR, /* one advertiser (FLAG_TARGET) */
         BLE_RULE, /* the class's BLE rule `rule` (rotating addresses): every advert, rate capped */
-        ZW_NET,   /* a Z-Wave network: home ID in addr[0..3], valid frames only (PSDT MODE_ZWAVE) */
+        ZW_NET,   /* a Z-Wave network: home ID in addr[0..3], valid frames only (PSDT MODE_FSK, the ZW rule) */
+        FSK_RULE, /* the class's FSK rule `rule` at f_khz: its frames (PSDT MODE_FSK) */
     };
     Kind kind{FREQ};
     uint32_t f_khz{462160};
