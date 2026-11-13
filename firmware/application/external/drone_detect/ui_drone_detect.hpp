@@ -868,7 +868,7 @@ class DdCaptureView : public View {
         u"CAPTMP",
         u"/SIGDET/CAPTURES",
         RecordView::FileType::RawS16,
-        16384,
+        kWriteSize,
         3};
     Text text_status_{{UI_POS_X(0), UI_POS_Y(4), UI_POS_WIDTH(22), UI_POS_HEIGHT(1)}, ""};
     Button button_dd_{{UI_POS_X(23), UI_POS_Y(4), UI_POS_WIDTH(7), UI_POS_HEIGHT(1)}, "Detect"};
@@ -882,7 +882,12 @@ class DdCaptureView : public View {
      * was the "MsgDblReg" halt of build-capture. Polled once a second
      * instead (a signal, which takes any number of listeners). */
     SignalToken tick_token_{};
-    uint32_t dropped_pct_{0}; /* the stock capture thread's dropped share, highest seen in this recording */
+    uint32_t dropped_pct_{0}; /* dropped share of this recording, % (from the byte counters) */
+    uint64_t recv_bytes_{0};  /* the capture thread's counters, last read (each tick and at our stop) */
+    uint64_t drop_bytes_{0};
+    uint32_t wall_ms_{0};                         /* start to stop, wall clock */
+    static constexpr uint32_t kWriteSize = 16384; /* record_view_'s write buffer */
+    uint32_t drop_pct() const;
     uint32_t bb_filter_hz_{0};
 };
 

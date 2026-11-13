@@ -458,8 +458,17 @@ The .SIG sidecar, format 1: key=value lines (CRLF), in this order:
   uptime_ms=1234567         PortaPack uptime at the start
   duration_ms=10000         from the data size (bytes / bytes per second)
   bytes=20000000            data file size
-  dropped_pct=0             samples dropped by the stock capture thread, %
-                            (0..99, the highest it showed while recording)
+  dropped_pct=0             samples dropped while recording, % of
+                            received_bytes (1 if any at all; > 1: the file's
+                            timing is not continuous, don't use it for timing)
+  received_bytes=20000000   bytes the baseband streamed for the file
+  dropped_bytes=0           ... of them dropped (no empty buffer: the SD writes
+                            fell behind); stream bytes, before any C8
+                            conversion of the file
+  dropped_buffers=0         dropped_bytes in write buffers (rounded up)
+  write_size=16384          the capture thread's write buffer, bytes
+  wall_ms=10000             start to stop, wall clock (duration_ms comes from
+                            the data: a short duration_ms means drops)
   state=off                 off or on
   pair=P01                  shared by the OFF and ON files of a pair
   label=door_remote

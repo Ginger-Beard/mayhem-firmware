@@ -117,6 +117,17 @@ size_t cap_sidecar(char* out, size_t cap, const CapSidecar& s) {
     eol();
     f.s("dropped_pct=").d(static_cast<int32_t>(s.dropped_pct));
     eol();
+    f.s("received_bytes=");
+    u64(s.received_bytes);
+    eol();
+    f.s("dropped_bytes=");
+    u64(s.dropped_bytes);
+    eol();
+    f.s("dropped_buffers=").d(static_cast<int32_t>(s.dropped_buffers)).s("\r\nwrite_size=").d(static_cast<int32_t>(s.write_size));
+    eol();
+    f.s("wall_ms=");
+    u64(s.wall_ms);
+    eol();
     f.s("state=").s(s.state ? "on" : "off");
     eol();
     f.s("pair=P").d2(s.pair);
