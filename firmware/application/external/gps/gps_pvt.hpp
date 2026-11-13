@@ -76,6 +76,8 @@ struct PvtWork {
     double clk[kMaxPvt]; /* satellite clock, s */
     double resid[kMaxPvt];
     double el[kMaxPvt];
+    double a[4][8]; /* normal equations / inverse work (kept off the solver thread's stack) */
+    double q[4][4];
     uint8_t use[kMaxPvt];
     volatile uint8_t cancel;
 };
