@@ -13,6 +13,9 @@ the app.
   /GPS/EPHEM.RNX     GPS broadcast ephemeris,     OPTIONAL, not bundled: a
                      RINEX 2 or 3 navigation file  same-day file makes the
                                                   fix PRECISE (~20 m)
+  /GPS/EPH_AIR.TXT   ephemerides decoded off the  WRITTEN BY THE APP
+                     air (Autonomous method)      (Autonomous); read at the
+                                                  next start, valid ~4 h
 
 Press "Load" on the Passes tab after copying new files (they are also read
 when the app opens).
@@ -114,6 +117,22 @@ Passes, the sky plot and the fix need your rough position and UTC:
   The tab shows "Local" (the clock) and "UTC" (what the app computes with);
   with Zone 0 it warns "Zone 0: clock must be UTC!". Check the UTC line
   against a phone. The fix needs UTC within about 30 s.
+
+Autonomous fix (Fix tab, method "Autonomous")
+---------------------------------------------
+No files needed: the receiver tracks the satellites and decodes their orbits
+(ephemerides) from the signal. Get fix: search ("Searching n/m"), a COARSE fix
+from the almanac at once if one is on the card, then "Upgrading: n of 4
+ephemerides" while it tracks (each satellite needs about 30 s of clean signal),
+then "PRECISE" (a few metres; "Err est." is an estimate). Keep it outdoors with
+open sky and the active antenna powered. Stop works at any time.
+While it tracks, the app takes GPS time from the satellites (the clock and Zone
+are not needed). Every decoded ephemeris is appended to /GPS/EPH_AIR.TXT (three
+lines each; the file restarts when it passes 48 KB); within about 4 hours the
+next start is precise at once. The app never writes EPHEM.RNX: a file you copy
+there is read as before, and per satellite the record closest to now is used.
+The Heard tab shows the tracked satellites: C/N0, L (phase lock), B (bits),
+T (time decoded), E (orbit decoded).
 
 Heard tab (what the receiver hears)
 -----------------------------------
