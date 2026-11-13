@@ -28,6 +28,7 @@
 #ifdef PRALINE
 #include "baseband_api.hpp"
 #include "gps_fmt.hpp"
+#include "hal.h"
 
 #include <cmath>
 #include <cstring>
@@ -42,8 +43,6 @@ namespace ui::external_app::gps {
 namespace {
 
 constexpr int kLoadLinesPerFrame = 60; /* a few KB of file per display frame */
-constexpr double kSearchSpan = 86400.0;
-constexpr int kStepsPerFrame = 12; /* pass search coarse steps per frame */
 constexpr double kL1Lambda = kC / 1575.42e6;
 constexpr uint8_t kAssistedHalfBins = 6; /* +-3 kHz around the predicted Doppler: TCXO <= ~1.5 ppm */
 constexpr uint8_t kColdHalfBins = 14;    /* +-7 kHz */
@@ -145,6 +144,7 @@ void SkyPlot::paint(Painter& painter) {
     painter.draw_hline({cx - rad, cy}, 2 * rad + 1, grid);
     painter.draw_vline({cx, cy - rad}, 2 * rad + 1, grid);
     painter.draw_string({cx - 2, r.top()}, ui::font::fixed_5x8, Color::light_grey(), bg, "N");
+    if (title_) painter.draw_string({r.left(), r.top()}, ui::font::fixed_5x8, Color::light_grey(), bg, title_);
     for (size_t i = 0; i < n_; i++) {
         const Dot& d = dots_[i];
         const int el = d.el < 0 ? 0 : d.el;
@@ -295,21 +295,26 @@ bool OrbitLoader::step(GpsView& v) {
 PassesView::PassesView(GpsView& main, Rect r)
     : View{r},
       main_{main},
-      text_head_{{0, 0, UI_POS_WIDTH(24), UI_POS_HEIGHT(3)}, head_, kRows, &ui::font::fixed_8x16},
+      text_head_{{0, 0, UI_POS_WIDTH(24), UI_POS_HEIGHT(kRows)}, head_, kRows, &ui::font::fixed_8x16},
       button_pos_{{UI_POS_X(24), 0, UI_POS_WIDTH(6), UI_POS_HEIGHT(1)}, "Pos"},
-      button_load_{{UI_POS_X(24), UI_POS_Y(2), UI_POS_WIDTH(6), UI_POS_HEIGHT(1)}, "Load"},
-      labels_off_{{{UI_POS_X(19), UI_POS_Y(1)}, "Off", Theme::getInstance()->fg_light->foreground}},
-      field_off_{{UI_POS_X(23), UI_POS_Y(1)}, 4, {-720, 840}, 15, ' '},
-      sky_{{0, UI_POS_Y(3) + 2, 120, 120}},
-      text_side_{{124, UI_POS_Y(3) + 2, 116, 120}, side_, kSideRows, &ui::font::fixed_5x8},
-      text_passes_{{0, UI_POS_Y(3) + 126, UI_POS_MAXWIDTH, UI_POS_HEIGHT(kPassRows)}, pass_lines_, kPassRows, &ui::font::fixed_8x16} {
-    add_children({&text_head_, &button_pos_, &button_load_, &labels_off_, &field_off_, &sky_, &text_side_, &text_passes_});
-    field_off_.set_value(main_.utc_off_min_);
-    field_off_.on_change = [this](int32_t v) {
-        main_.utc_off_min_ = v;
-        refresh();
-        update_sky();
-        restart_passes();
+      button_load_{{UI_POS_X(24), UI_POS_Y(3), UI_POS_WIDTH(6), UI_POS_HEIGHT(1)}, "Load"},
+      labels_zone_{{{UI_POS_X(15), UI_POS_Y(1)}, "Zone", Theme::getInstance()->fg_light->foreground}},
+      field_zone_h_{{UI_POS_X(20), UI_POS_Y(1)}, 3, {-12, 14}, 1, ' '},
+      field_zone_m_{{UI_POS_X(23), UI_POS_Y(1)}, 3, {{":00", 0}, {":30", 30}, {":45", 45}}},
+      sky_{{0, UI_POS_Y(4) + 2, 112, 112}, "GPS now"},
+      text_side_{{116, UI_POS_Y(4) + 2, 124, 112}, side_, kSideRows, &ui::font::fixed_5x8},
+      text_passes_{{0, UI_POS_Y(4) + 116, UI_POS_MAXWIDTH, UI_POS_HEIGHT(kPassRows)}, pass_lines_, kPassRows, &ui::font::fixed_8x16} {
+    add_children({&text_head_, &button_pos_, &button_load_, &labels_zone_, &field_zone_h_, &field_zone_m_, &sky_, &text_side_, &text_passes_});
+    /* zone as hours + minutes (e.g. -5 :00, 5 :30); the setting keeps minutes */
+    const int32_t z = main_.utc_off_min_;
+    const int32_t zh = z / 60, zm = (z < 0 ? -z : z) % 60;
+    field_zone_h_.set_value(zh);
+    field_zone_m_.set_selected_index(zm == 30 ? 1 : (zm == 45 ? 2 : 0), false);
+    field_zone_h_.on_change = [this](int32_t) {
+        zone_changed();
+    };
+    field_zone_m_.on_change = [this](size_t, OptionsField::value_t) {
+        zone_changed();
     };
     button_pos_.on_select = [this](Button&) {
         main_.nav_.push<PositionView>(main_);
@@ -317,6 +322,15 @@ PassesView::PassesView(GpsView& main, Rect r)
     button_load_.on_select = [this](Button&) {
         main_.start_load();
     };
+}
+
+void PassesView::zone_changed() {
+    const int32_t h = field_zone_h_.value();
+    const int32_t m = field_zone_m_.selected_index_value();
+    main_.utc_off_min_ = h * 60 + (h < 0 ? -m : m);
+    refresh();
+    update_sky();
+    restart_passes();
 }
 
 void PassesView::focus() {
@@ -337,34 +351,49 @@ void PassesView::refresh() {
             text_head_.set(0, "No position: Pos", yellow);
         }
     }
+    auto put_hms = [](Fmt& f, double t) {
+        const int32_t days = static_cast<int32_t>(std::floor(t / 86400.0));
+        const uint32_t sod = static_cast<uint32_t>(t - days * 86400.0);
+        f.d2(sod / 3600).c(':').d2((sod / 60) % 60).c(':').d2(sod % 60);
+    };
+    {
+        Fmt f{b, sizeof(b)};
+        f.s("Local ");
+        put_hms(f, main_.local_unix());
+        text_head_.set(1, b, grey);
+    }
     {
         Fmt f{b, sizeof(b)};
         const double t = main_.now_unix();
-        const int32_t days = static_cast<int32_t>(std::floor(t / 86400.0));
         int32_t y, m, d;
-        civil_from_days(days, y, m, d);
-        const uint32_t sod = static_cast<uint32_t>(t - days * 86400.0);
-        f.s("UTC ").d2(static_cast<uint32_t>(m)).c('-').d2(static_cast<uint32_t>(d)).c(' ').d2(sod / 3600).c(':').d2((sod / 60) % 60).c(':').d2(sod % 60);
-        text_head_.set(1, b, grey);
+        civil_from_days(static_cast<int32_t>(std::floor(t / 86400.0)), y, m, d);
+        f.s("UTC   ");
+        put_hms(f, t);
+        f.c(' ').d2(static_cast<uint32_t>(m)).c('-').d2(static_cast<uint32_t>(d));
+        if (main_.utc_off_min_ == 0)
+            text_head_.set(2, "Zone 0: clock must be UTC!", yellow); /* the commonest mistake */
+        else
+            text_head_.set(2, b, white);
     }
     {
         Fmt f{b, sizeof(b)};
         const auto st = main_.loader_.stage();
         if (!main_.mem_) {
-            text_head_.set(2, "Starting...", yellow);
+            text_head_.set(3, "Starting...", yellow);
         } else if (st != OrbitLoader::DONE && st != OrbitLoader::IDLE) {
             f.s(st == OrbitLoader::ALMANAC ? "Reading ALMANAC" : (st == OrbitLoader::EPHEMERIS ? "Reading EPHEM" : "Reading TLE"));
-            text_head_.set(2, b, yellow);
+            text_head_.set(3, b, yellow);
         } else if (!main_.n_alm_ && !main_.n_eph_ && !main_.n_tle_) {
-            text_head_.set(2, "No /GPS orbit files", yellow);
+            text_head_.set(3, "No /GPS orbit files", yellow);
         } else {
             f.s("Alm ").u(main_.n_alm_).s(" Eph ").u(main_.n_eph_).s(" TLE ").u(main_.n_tle_);
-            text_head_.set(2, b, white);
+            text_head_.set(3, b, white);
         }
     }
 }
 
 void PassesView::update_sky() {
+    if (hidden()) return; /* redrawn when the tab is selected */
     sky_.clear();
     text_side_.clear();
     if (!main_.pos_valid_ || !main_.mem_) {
@@ -381,7 +410,7 @@ void PassesView::update_sky() {
         const Orbit& o = main_.mem_->orbits[i];
         if (!o.valid || o.health) continue;
         double az, el;
-        az_el(main_.rx_, sat_position(o, tg), az, el);
+        az_el(main_.obs_, sat_position(o, tg), az, el);
         if (el < 0) continue;
         char lbl[4];
         Fmt{lbl, sizeof(lbl)}.u(o.prn);
@@ -395,7 +424,7 @@ void PassesView::update_sky() {
     }
     {
         Fmt f{b, sizeof(b)};
-        f.s("GPS up ").u(static_cast<uint32_t>(nv));
+        f.s("GPS up now: ").u(static_cast<uint32_t>(nv));
         text_side_.set(0, b, Color::light_grey());
     }
     /* TLE satellites (orange) if up */
@@ -405,7 +434,7 @@ void PassesView::update_sky() {
         src.kind = SatSource::SGP4;
         src.sgp4 = &main_.mem_->sky;
         double az = 0;
-        const double el = elevation(src, main_.rx_, t, &az);
+        const double el = elevation(src, main_.obs_, t, &az);
         if (el < 0) continue;
         char nm[9];
         tle_short(main_.mem_->tles[i], nm, 4);
@@ -415,51 +444,20 @@ void PassesView::update_sky() {
 }
 
 void PassesView::restart_passes() {
-    for (auto& ok : result_ok_) ok = false;
-    search_idx_ = 0;
-    searching_ = false;
-    if (!main_.pos_valid_ || !main_.n_tle_ || !main_.mem_) {
-        show_passes();
-        return;
-    }
-    search_idx_ = 0;
-    while (search_idx_ < main_.n_tle_ && search_idx_ < kPassRows) {
-        if (sgp4_init(main_.mem_->tles[search_idx_], main_.mem_->search)) {
-            SatSource src;
-            src.kind = SatSource::SGP4;
-            src.sgp4 = &main_.mem_->search;
-            finder_.start(src, main_.rx_, main_.now_unix(), kSearchSpan, 30.0);
-            searching_ = true;
-            break;
-        }
-        search_idx_++;
-    }
+    passes_.stop();
+    if (main_.pos_valid_ && main_.n_tle_ && main_.mem_)
+        passes_.start(main_.mem_->tles, main_.n_tle_, &main_.mem_->search, main_.rx_, main_.now_unix());
     show_passes();
 }
 
+/* A slice of the pass search per display frame, by time (~8 ms), so the UI
+ * stays responsive however fast the M0 runs it. */
 void PassesView::frame() {
-    if (!searching_ || !main_.mem_) return;
-    if (!finder_.done()) {
-        finder_.step(kStepsPerFrame);
-        if (!finder_.done()) return;
-    }
-    if (search_idx_ < kPassRows) {
-        result_ok_[search_idx_] = finder_.found();
-        results_[search_idx_] = finder_.pass();
-    }
-    search_idx_++;
-    while (search_idx_ < main_.n_tle_ && search_idx_ < kPassRows) {
-        if (sgp4_init(main_.mem_->tles[search_idx_], main_.mem_->search)) {
-            SatSource src;
-            src.kind = SatSource::SGP4;
-            src.sgp4 = &main_.mem_->search;
-            finder_.start(src, main_.rx_, main_.now_unix(), kSearchSpan, 30.0);
-            show_passes();
-            return;
-        }
-        search_idx_++;
-    }
-    searching_ = false;
+    if (!passes_.busy() || !main_.mem_) return;
+    const systime_t t0 = chTimeNow();
+    do {
+        if (!passes_.step(2)) break;
+    } while (chTimeNow() - t0 < MS2ST(8));
     show_passes();
 }
 
@@ -467,32 +465,20 @@ void PassesView::show_passes() {
     char b[TextLines::kCols + 1];
     const double now = main_.now_unix();
     for (size_t i = 0; i < kPassRows; i++) {
-        if (i >= main_.n_tle_) {
-            text_passes_.set(i, i == 0 && !main_.n_tle_ ? "No TLE (GPS/TLE.TXT)" : "", Color::light_grey());
+        if (!main_.n_tle_ || !main_.mem_) {
+            text_passes_.set(i, i == 0 ? "No TLE (GPS/TLE.TXT)" : "", Color::light_grey());
             continue;
         }
-        Fmt f{b, sizeof(b)};
-        char nm[9];
-        f.s(tle_short(main_.mem_->tles[i], nm, sizeof(nm))).pad(9);
         if (!main_.pos_valid_) {
-            f.s("no position");
-        } else if (searching_ && i >= search_idx_) {
-            f.s("...");
-        } else if (!result_ok_[i]) {
-            f.s("no pass 24h");
-        } else {
-            const Pass& p = results_[i];
-            if (p.up_at_start)
-                f.s("UP ");
-            else {
-                f.s("in ");
-                put_span(f, p.rise - now);
-                f.c(' ');
-            }
-            f.u(static_cast<uint32_t>(p.max_el < 0 ? 0 : p.max_el)).c('d').c(' ');
-            if (p.set > 0) put_span(f, p.set - (p.up_at_start ? now : p.rise));
+            text_passes_.set(i, i == 0 ? "Passes need a position" : "", Color::yellow());
+            continue;
         }
-        text_passes_.set(i, b, Color::white());
+        if (i >= passes_.count()) {
+            text_passes_.set(i, "", Color::white());
+            continue;
+        }
+        passes_.line(i, now, b, sizeof(b));
+        text_passes_.set(i, b, passes_.found(i) ? Color::white() : Color::light_grey());
     }
 }
 
@@ -506,7 +492,7 @@ HeardView::HeardView(GpsView& main, Rect r)
       button_stop_{{UI_POS_X(24), 0, UI_POS_WIDTH(6), UI_POS_HEIGHT(1)}, "Stop"},
       text_status_{{0, UI_POS_Y(1), UI_POS_MAXWIDTH, UI_POS_HEIGHT(kStatusRows)}, status_, kStatusRows, &ui::font::fixed_8x16},
       text_list_{{0, UI_POS_Y(3) + 2, 118, 8 * kListRows}, list_, kListRows, &ui::font::fixed_5x8},
-      sky_{{120, UI_POS_Y(3) + 2, 120, 120}} {
+      sky_{{120, UI_POS_Y(3) + 2, 120, 120}, "Heard"} {
     add_children({&field_depth_, &button_search_, &button_stop_, &text_status_, &text_list_, &sky_});
     button_stop_.on_select = [this](Button&) {
         main_.stop_search();
@@ -528,6 +514,7 @@ void HeardView::focus() {
 }
 
 void HeardView::show() {
+    if (hidden()) return; /* redrawn when the tab is selected (GpsView::on_frame) */
     char b[TextLines::kCols + 1];
     const auto& st = main_.status_;
     const bool mine = main_.job_ == GpsView::JOB_HEARD || main_.job_ == GpsView::JOB_FIX;
@@ -591,8 +578,8 @@ void HeardView::show() {
         }
     if (!n) {
         text_list_.set(0, "No satellites heard.", Color::yellow());
-        text_list_.set(2, "- Ant ticked? (active", Color::white());
-        text_list_.set(3, "  antenna, 3.3 V)", Color::white());
+        text_list_.set(2, "- active antenna? turn", Color::white());
+        text_list_.set(3, "  Ant power on (status bar)", Color::white());
         text_list_.set(4, "- open sky, outdoors", Color::white());
         text_list_.set(5, "- noise 6-30 LSB:", Color::white());
         text_list_.set(6, "  adjust LNA / VGA", Color::white());
@@ -619,7 +606,7 @@ void HeardView::show() {
             const Orbit& o = main_.mem_->orbits[p];
             if (!o.valid || o.health) continue;
             double az, el;
-            az_el(main_.rx_, sat_position(o, tg), az, el);
+            az_el(main_.obs_, sat_position(o, tg), az, el);
             if (el < 0) continue;
             char lbl[4];
             Fmt{lbl, sizeof(lbl)}.u(o.prn);
@@ -686,6 +673,7 @@ void FixView::focus() {
 }
 
 void FixView::show() {
+    if (hidden()) return; /* redrawn when the tab is selected (GpsView::on_frame) */
     char b[TextLines::kCols + 1];
     if (main_.searching() != fix_running_shown_) {
         fix_running_shown_ = main_.searching();
@@ -710,7 +698,7 @@ void FixView::show() {
             const Orbit& o = main_.mem_->orbits[p];
             if (!o.valid || !o.ephemeris || o.health) continue;
             double az, el;
-            az_el(main_.rx_, sat_position(o, tg), az, el);
+            az_el(main_.obs_, sat_position(o, tg), az, el);
             vis += el > kMinFixEl;
         }
     }
@@ -837,7 +825,7 @@ GpsView::GpsView(NavigationView& nav)
           {"Passes", Theme::getInstance()->fg_yellow->foreground, &view_passes_}} {
     baseband::run_image(portapack::spi_flash::image_tag_gps_rx);
 
-    add_children({&labels_, &field_lna_, &field_vga_, &field_amp_, &check_bias_, &text_warn_,
+    add_children({&labels_, &field_lna_, &field_vga_, &field_amp_, &text_ant_, &text_warn_,
                   &tab_view_, &view_fix_, &view_heard_, &view_passes_});
     tab_view_.set_parent_rect({0, UI_POS_Y(2), screen_width, 24});
 
@@ -850,20 +838,17 @@ GpsView::GpsView(NavigationView& nav)
     field_vga_.set_value(receiver_model.vga());
     field_amp_.set_value(receiver_model.rf_amp());
 
-    bias_was_ = portapack::get_antenna_bias();
-    check_bias_.set_value(bias_was_);
-    check_bias_.on_select = [this](Checkbox&, bool v) {
-        portapack::set_antenna_bias(v);
-        receiver_model.set_antenna_bias();
-        text_warn_.set(v ? "ANT POWER 3.3V: active antenna only!" : "");
-    };
-    if (bias_was_) text_warn_.set("ANT POWER 3.3V: active antenna only!");
+    show_antenna();
 
     load_position();
     view_passes_.refresh();
     tick_token_ = rtc_time::signal_tick_second += [this]() {
         on_tick_second();
     };
+    /* TabView hides only the previous view: hide all three, then show one */
+    view_fix_.hidden(true);
+    view_heard_.hidden(true);
+    view_passes_.hidden(true);
     tab_view_.set_selected(tab_ < 3 ? tab_ : 2);
 }
 
@@ -873,21 +858,32 @@ GpsView::~GpsView() {
     mem_ = nullptr; /* the lent RAM goes with the baseband */
     if (rx_on_) receiver_model.disable();
     baseband::shutdown();
-    /* Antenna power back as it was before the app (the port may get another antenna). */
-    if (portapack::get_antenna_bias() != bias_was_) portapack::set_antenna_bias(bias_was_);
 }
 
 void GpsView::focus() {
     tab_view_.focus();
 }
 
+/* The RTC hardware keeps standard local time when Mayhem's DST setting is on
+ * (rtc_time adds the hour only when read), or whatever the clock was set to
+ * when it is off: UTC = that - the zone, so the zone is the standard offset
+ * with DST on and the offset in force with DST off. */
 double GpsView::now_unix() const {
-    return static_cast<double>(rtc_time::rtcToUnixUTC(rtc_time::now())) - utc_off_min_ * 60.0;
+    rtc::RTC raw;
+    rtcGetTime(&RTCD1, &raw);
+    return static_cast<double>(rtc_time::rtcToUnixUTC(raw)) - utc_off_min_ * 60.0;
+}
+
+double GpsView::local_unix() const {
+    return static_cast<double>(rtc_time::rtcToUnixUTC(rtc_time::now()));
 }
 
 void GpsView::load_position() {
     pos_valid_ = saved_position::load(pos_);
-    if (pos_valid_) rx_ = lla_to_ecef(pos_.lat_e7 / 1e7, pos_.lon_e7 / 1e7, pos_.alt_m);
+    if (pos_valid_) {
+        rx_ = lla_to_ecef(pos_.lat_e7 / 1e7, pos_.lon_e7 / 1e7, pos_.alt_m);
+        obs_ = make_observer(rx_);
+    }
     view_passes_.refresh();
     view_passes_.update_sky();
     view_passes_.restart_passes();
@@ -931,7 +927,7 @@ bool GpsView::start_search(Job job, uint8_t k_ms) {
             if (!o.valid || o.health || (job == JOB_FIX && !o.ephemeris)) continue;
             const Vec3 s = sat_position(o, tg);
             double az, el;
-            az_el(rx_, s, az, el);
+            az_el(obs_, s, az, el);
             if (el <= min_el) continue;
             const Vec3 v = sat_velocity(o, tg);
             const Vec3 d{s.x - rx_.x, s.y - rx_.y, s.z - rx_.z};
@@ -1031,6 +1027,17 @@ void GpsView::solve_fix() {
 }
 
 void GpsView::on_frame() {
+    /* the selected tab's content is refreshed when it becomes visible */
+    const uint32_t sel = tab_view_.selected();
+    if (sel != tab_shown_) {
+        tab_shown_ = sel;
+        if (sel == 0) view_fix_.show();
+        if (sel == 1) view_heard_.show();
+        if (sel == 2) {
+            view_passes_.refresh();
+            view_passes_.update_sky();
+        }
+    }
     if (solve_pending_) {
         solve_fix();
         view_fix_.show();
@@ -1049,7 +1056,19 @@ void GpsView::on_frame() {
     view_passes_.frame();
 }
 
+/* Antenna power, read only (never switched by this app). */
+void GpsView::show_antenna() {
+    const int8_t on = portapack::get_antenna_bias() ? 1 : 0;
+    if (on == bias_shown_) return;
+    bias_shown_ = on;
+    text_ant_.set(on ? "Ant: ON" : "Ant: off");
+    text_warn_.set(on ? "ANT POWER 3.3V ON: active antenna only!" : "");
+    text_warn_.set_style(Theme::getInstance()->fg_red);
+}
+
 void GpsView::on_tick_second() {
+    show_antenna();
+    view_passes_.frame(); /* the pass search also advances here (frames may be busy) */
     view_passes_.refresh();
     if (++sky_tick_ >= 10) {
         sky_tick_ = 0;

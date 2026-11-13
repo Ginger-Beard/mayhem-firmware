@@ -81,6 +81,15 @@ Vec3 lla_to_ecef(double lat_deg, double lon_deg, double h_m);
 void ecef_to_lla(const Vec3& x, double& lat_deg, double& lon_deg, double& h_m);
 /* Azimuth (0 = north, clockwise) and elevation, degrees. */
 void az_el(const Vec3& rx, const Vec3& sat, double& az_deg, double& el_deg);
+/* An observer with its local east/north/up basis precomputed: az/el without
+ * the geodetic iteration per call (the pass search calls it thousands of
+ * times; on the M0 that iteration was most of the cost). */
+struct Observer {
+    Vec3 pos{};
+    double sla{0}, cla{1}, slo{0}, clo{1};
+};
+Observer make_observer(const Vec3& pos);
+void az_el(const Observer& o, const Vec3& sat, double& az_deg, double& el_deg);
 /* Rotate an ECEF position by the earth's rotation during dt seconds (Sagnac). */
 Vec3 earth_rotate(const Vec3& x, double dt);
 /* Light-time solution: range (m), transmit time and the satellite position

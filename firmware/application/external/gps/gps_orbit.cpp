@@ -198,18 +198,31 @@ void ecef_to_lla(const Vec3& x, double& lat_deg, double& lon_deg, double& h) {
     lon_deg = lon / kDeg;
 }
 
-void az_el(const Vec3& rx, const Vec3& sat, double& az_deg, double& el_deg) {
+Observer make_observer(const Vec3& pos) {
     double lat, lon, h;
-    ecef_to_lla(rx, lat, lon, h);
+    ecef_to_lla(pos, lat, lon, h);
     const double la = lat * kDeg, lo = lon * kDeg;
-    const double dx = sat.x - rx.x, dy = sat.y - rx.y, dz = sat.z - rx.z;
-    const double sla = std::sin(la), cla = std::cos(la), slo = std::sin(lo), clo = std::cos(lo);
-    const double e = -slo * dx + clo * dy;
-    const double nn = -sla * clo * dx - sla * slo * dy + cla * dz;
-    const double u = cla * clo * dx + cla * slo * dy + sla * dz;
+    Observer o;
+    o.pos = pos;
+    o.sla = std::sin(la);
+    o.cla = std::cos(la);
+    o.slo = std::sin(lo);
+    o.clo = std::cos(lo);
+    return o;
+}
+
+void az_el(const Observer& o, const Vec3& sat, double& az_deg, double& el_deg) {
+    const double dx = sat.x - o.pos.x, dy = sat.y - o.pos.y, dz = sat.z - o.pos.z;
+    const double e = -o.slo * dx + o.clo * dy;
+    const double nn = -o.sla * o.clo * dx - o.sla * o.slo * dy + o.cla * dz;
+    const double u = o.cla * o.clo * dx + o.cla * o.slo * dy + o.sla * dz;
     az_deg = std::atan2(e, nn) / kDeg;
     if (az_deg < 0) az_deg += 360.0;
     el_deg = std::atan2(u, std::sqrt(e * e + nn * nn)) / kDeg;
+}
+
+void az_el(const Vec3& rx, const Vec3& sat, double& az_deg, double& el_deg) {
+    az_el(make_observer(rx), sat, az_deg, el_deg);
 }
 
 Vec3 earth_rotate(const Vec3& x, double dt) {

@@ -98,8 +98,10 @@ class SkyPlot : public Widget {
         bool filled;
     };
     static constexpr size_t kMax = 32;
-    explicit SkyPlot(Rect r)
-        : Widget{r} {}
+    SkyPlot(Rect r, const char* title)
+        : Widget{r}, title_{title} {}
+    SkyPlot(const SkyPlot&) = delete;
+    SkyPlot& operator=(const SkyPlot&) = delete;
     void clear() { n_ = 0; }
     void add(int16_t az, int16_t el, const char* label, Color color, bool filled);
     void paint(Painter& painter) override;
@@ -107,6 +109,7 @@ class SkyPlot : public Widget {
    private:
     Dot dots_[kMax]{};
     size_t n_{0};
+    const char* title_; /* drawn top left, e.g. "GPS now" */
 };
 
 /* What lives in the M4 RAM PGPR lends (GpsRxStatusMessage::scratch). */
@@ -170,26 +173,24 @@ class PassesView : public View {
 
    private:
     GpsView& main_;
-    static constexpr size_t kRows = 3;
+    static constexpr size_t kRows = 4;
     TextLines::Line head_[kRows]{};
     TextLines text_head_;
     Button button_pos_;
     Button button_load_;
-    Labels labels_off_;
-    NumberField field_off_;
+    Labels labels_zone_;
+    NumberField field_zone_h_;
+    OptionsField field_zone_m_;
     SkyPlot sky_;
-    static constexpr size_t kSideRows = 15;
+    static constexpr size_t kSideRows = 14;
     TextLines::Line side_[kSideRows]{};
     TextLines text_side_;
-    static constexpr size_t kPassRows = 4;
+    static constexpr size_t kPassRows = PassList::kMax;
     TextLines::Line pass_lines_[kPassRows]{};
     TextLines text_passes_;
-    PassFinder finder_{};
-    Pass results_[kPassRows]{};
-    bool result_ok_[kPassRows]{};
-    uint8_t search_idx_{0};
-    bool searching_{false};
+    PassList passes_{};
     void show_passes();
+    void zone_changed();
 };
 
 class HeardView : public View {
@@ -272,11 +273,17 @@ class GpsView : public View {
         1750000 /* baseband filter */,
         2048000 /* 2048 samples = 1 ms = one DMA buffer */,
         ReceiverModel::Mode::WidebandFMAudio};
-    int32_t utc_off_min_{0}; /* RTC minus UTC, minutes (saved) */
-    uint32_t tab_{2};        /* last tab (saved) */
-    uint32_t depth_{1};      /* Heard snapshot: 0 = 10 ms, 1 = 20 ms (saved) */
+    /* Time zone of the PortaPack clock: local standard time minus UTC, in
+     * minutes (saved; e.g. -300 for US Eastern). With Mayhem's DST setting on,
+     * the RTC hardware keeps standard time and this is the standard offset;
+     * with it off, the clock shows whatever it was set to and this must be
+     * the offset in force (e.g. -240 in US summer). */
+    int32_t utc_off_min_{0};
+    uint32_t tab_{2};   /* last tab (saved) */
+    uint32_t depth_{1}; /* Heard snapshot: 0 = 10 ms, 1 = 20 ms (saved) */
     app_settings::SettingsManager settings_;
-    bool bias_was_{false};
+    int8_t bias_shown_{-1};  /* last antenna-power state shown (read only) */
+    uint32_t tab_shown_{99}; /* tab whose content was last refreshed */
     bool rx_on_{false};
 
     /* Lent M4 RAM: orbit tables, TLEs, propagator states, solver work. */
@@ -289,6 +296,7 @@ class GpsView : public View {
     saved_position::Position pos_{};
     bool pos_valid_{false};
     Vec3 rx_{};
+    Observer obs_{};
 
     /* Baseband status (copied from GpsRxStatusMessage) and the current search. */
     struct Status {
@@ -313,7 +321,8 @@ class GpsView : public View {
     uint8_t fix_heard_{0};
     double fix_eph_age_s_{0};
 
-    double now_unix() const; /* UTC from the RTC and the offset */
+    double now_unix() const;   /* UTC from the RTC and the zone */
+    double local_unix() const; /* the clock as shown (incl. Mayhem DST), as if it were UTC */
     double now_gps() const { return unix_to_gps(now_unix()); }
     void load_position();
     void start_load();
@@ -333,9 +342,12 @@ class GpsView : public View {
     LNAGainField field_lna_{{UI_POS_X(4), UI_POS_Y(0)}};
     VGAGainField field_vga_{{UI_POS_X(11), UI_POS_Y(0)}};
     RFAmpField field_amp_{{UI_POS_X(18), UI_POS_Y(0)}};
-    /* Antenna port power (3.3 V, <= 50 mA): for an ACTIVE antenna only. */
-    Checkbox check_bias_{{UI_POS_X(21), UI_POS_Y(0)}, 4, "Ant", true};
+    /* Antenna port power (3.3 V, <= 50 mA, for an ACTIVE antenna only) is
+     * shown here read only: the app never switches it (by design); the
+     * user does, with Mayhem's status-bar control or Settings > Radio. */
+    Text text_ant_{{UI_POS_X(22), UI_POS_Y(0), UI_POS_WIDTH(8), UI_POS_HEIGHT(1)}, ""};
     Text text_warn_{{0, UI_POS_Y(1), UI_POS_MAXWIDTH, UI_POS_HEIGHT(1)}, ""};
+    void show_antenna();
 
     Rect view_rect_{0, UI_POS_Y(2) + 24, screen_width, static_cast<Dim>(screen_height - UI_POS_Y(2) - 24 - UI_POS_Y(1))};
     FixView view_fix_;

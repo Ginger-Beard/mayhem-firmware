@@ -20,6 +20,9 @@
  */
 
 #include "gps_pass.hpp"
+#include "gps_fmt.hpp"
+
+#include <cstring>
 
 namespace ui::external_app::gps {
 
@@ -38,7 +41,7 @@ bool SatSource::position(double unix_s, Vec3& out) const {
     return false;
 }
 
-double elevation(const SatSource& src, const Vec3& rx, double unix_s, double* az) {
+double elevation(const SatSource& src, const Observer& rx, double unix_s, double* az) {
     Vec3 p;
     if (!src.position(unix_s, p)) return -99.0;
     double a, e;
@@ -47,7 +50,7 @@ double elevation(const SatSource& src, const Vec3& rx, double unix_s, double* az
     return e;
 }
 
-void PassFinder::start(const SatSource& src, const Vec3& rx, double t0, double span, double step) {
+void PassFinder::start(const SatSource& src, const Observer& rx, double t0, double span, double step) {
     src_ = src;
     rx_ = rx;
     t0_ = t0;
@@ -158,6 +161,93 @@ bool PassFinder::step(int n) {
         t_ = t;
     }
     return done_;
+}
+
+void PassList::start(const Tle* tles, size_t n, Sgp4* work, const Vec3& rx, double now) {
+    tles_ = tles;
+    n_ = n < kMax ? n : kMax;
+    work_ = work;
+    obs_ = make_observer(rx);
+    t0_ = now;
+    idx_ = 0;
+    for (size_t i = 0; i < kMax; i++) ok_[i] = done_[i] = false;
+    busy_ = n_ > 0 && tles_ && work_;
+    while (busy_ && !start_current()) {
+    }
+}
+
+/* Start the search of satellite idx_ (skipping element sets SGP4 refuses);
+ * false if that one could not start (the next is tried by the caller). */
+bool PassList::start_current() {
+    while (idx_ < n_) {
+        if (sgp4_init(tles_[idx_], *work_)) {
+            SatSource src;
+            src.kind = SatSource::SGP4;
+            src.sgp4 = work_;
+            finder_.start(src, obs_, t0_, kSpan, kStep);
+            return true;
+        }
+        done_[idx_] = true;
+        idx_++;
+    }
+    busy_ = false;
+    return true;
+}
+
+bool PassList::step(int coarse_steps) {
+    if (!busy_) return false;
+    if (!finder_.step(coarse_steps)) return true;
+    ok_[idx_] = finder_.found();
+    res_[idx_] = finder_.pass();
+    done_[idx_] = true;
+    idx_++;
+    start_current();
+    return busy_;
+}
+
+namespace {
+
+/* "1h05" / "45m" / "12s" */
+void put_span(Fmt& f, double s) {
+    if (s < 0) s = 0;
+    const uint32_t v = static_cast<uint32_t>(s);
+    if (v >= 3600)
+        f.u(v / 3600).c('h').d2((v % 3600) / 60);
+    else if (v >= 60)
+        f.u(v / 60).c('m');
+    else
+        f.u(v).c('s');
+}
+
+}  // namespace
+
+void PassList::line(size_t i, double now, char* buf, size_t size) const {
+    Fmt f{buf, size};
+    if (i >= n_) return;
+    const char* name = tles_[i].name;
+    for (size_t k = 0; k < kNameCols && name[k]; k++) f.c(name[k]);
+    f.pad(kNameCols + 1);
+    if (!done_[i]) {
+        if (busy_ && i == idx_)
+            f.s("search ").u(static_cast<uint32_t>(finder_.progress_pct())).c('%');
+        else
+            f.s("waiting");
+        return;
+    }
+    if (!ok_[i]) {
+        f.s("no pass 24h");
+        return;
+    }
+    const Pass& p = res_[i];
+    if (p.up_at_start) {
+        f.s("UP ");
+    } else {
+        f.s("in ");
+        put_span(f, p.rise - now);
+        f.c(' ');
+    }
+    f.u(static_cast<uint32_t>(p.max_el < 0 ? 0 : p.max_el + 0.5f)).s("d ");
+    if (p.set > 0) put_span(f, p.set - (p.up_at_start ? now : p.rise));
 }
 
 }  // namespace ui::external_app::gps

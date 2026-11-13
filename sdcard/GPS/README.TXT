@@ -13,16 +13,33 @@ card. All are plain text; the app keeps only what it needs in memory.
 Press "Load" on the Passes tab after copying new files (they are also read
 when the app opens).
 
+Antenna power
+-------------
+GPS needs an ACTIVE L1 antenna (one with its own amplifier) on the HackRF's
+antenna port, powered by the port (3.3 V, up to 50 mA). The app never
+switches antenna power on or off by itself, not on entry, not on exit: you
+do, with Mayhem's antenna-power icon in the status bar (or Settings > Radio).
+The app shows the state top right ("Ant: ON" / "Ant: off") and a red warning
+line while it is on. Never turn it on with a passive antenna fitted (some
+are a DC short). Use the antenna outdoors with open sky.
+
 Position and time
 -----------------
 Passes and the sky plot need your position and UTC:
 - Position: /SETTINGS/position.ini, shared by all apps. Set it with "Pos" on
   the Passes tab (degrees / minutes / seconds, saved as "Manual"), with
   Signature Detect's Setup "Save", or (later) with the GPS fix itself.
-- Time: the PortaPack clock (Settings > Date/Time). If the clock shows local
-  time, set "Off" on the Passes tab to the clock minus UTC in minutes (for
-  example -300 for US Eastern Standard Time, -240 in summer, 60 for CET).
-  The snapshot fix needs the clock within about 30 s of the real time.
+- Time: the PortaPack clock (Settings > Date/Time) and the "Zone" field on
+  the Passes tab (hours and :00 / :30 / :45, saved). Zone = your local time
+  zone, the offset of the clock from UTC: -5 :00 for US Eastern, 1 :00 for
+  CET, 5 :30 for India. Mayhem has no system time zone, so the app keeps its
+  own. With Mayhem's daylight-saving setting ON (Settings > Date/Time), enter
+  the STANDARD offset (-5 for Eastern all year): the clock hardware keeps
+  standard time and the app uses it. With that setting OFF, the clock shows
+  whatever you set: enter the offset in force (-4 in US summer, -5 in winter).
+  The tab shows "Local" (the clock) and "UTC" (what the app computes with);
+  with Zone 0 it warns "Zone 0: clock must be UTC!". Check the UTC line
+  against a phone. The snapshot fix needs UTC within about 30 s.
 
 ALMANAC.TXT (YUMA)
 ------------------
@@ -83,8 +100,10 @@ yet: selecting it shows "NOT AVAILABLE".
 
 Passes tab
 ----------
-Top: your position, UTC, what was loaded. Sky plot: GPS satellites above the
+Top: your position, the clock (Local), UTC, Zone, what was loaded. Sky plot
+("GPS now"): GPS satellites above the
 horizon from the almanac/ephemeris (green, PRN numbers) and TLE satellites
 (orange). Right: GPS satellites up (PRN, elevation, azimuth). Bottom: the next pass of each
 TLE satellite in the next 24 h: "in 1h05 47d 9m" = rises in 1 h 05 min,
-highest 47 degrees, visible 9 min ("UP" = above the horizon now).
+highest 47 degrees, visible 9 min ("UP" = above the horizon now; "search 35%"
+while it is being computed, a few seconds per satellite).

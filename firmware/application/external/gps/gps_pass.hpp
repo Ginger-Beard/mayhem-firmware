@@ -55,22 +55,24 @@ struct SatSource {
     bool position(double unix_s, Vec3& out) const;
 };
 
-/* Elevation (deg) of a source seen from rx at unix time t; -99 on error. */
-double elevation(const SatSource& src, const Vec3& rx, double unix_s, double* az = nullptr);
+/* Elevation (deg) of a source seen from an observer at unix time t; -99 on error. */
+double elevation(const SatSource& src, const Observer& obs, double unix_s, double* az = nullptr);
 
 class PassFinder {
    public:
     /* Search [t0, t0 + span] with a coarse step (s): 30 for LEO, 120 for GPS. */
-    void start(const SatSource& src, const Vec3& rx, double t0, double span, double step);
+    void start(const SatSource& src, const Observer& obs, double t0, double span, double step);
     /* Advance up to n coarse steps; true when the search is over. */
     bool step(int n);
     bool done() const { return done_; }
     bool found() const { return found_; }
     const Pass& pass() const { return pass_; }
+    /* share of the span searched, 0..100 */
+    int progress_pct() const { return end_ > t0_ ? static_cast<int>(100.0 * (t_ - t0_) / (end_ - t0_)) : 100; }
 
    private:
     SatSource src_{};
-    Vec3 rx_{};
+    Observer rx_{};
     double t0_{0}, end_{0}, dt_{0}, t_{0};
     double el_prev_{0};
     double best_t_{0}, best_el_{-99};
@@ -78,6 +80,42 @@ class PassFinder {
     Pass pass_{};
     double crossing(double a, double b, bool rising);
     void refine_top();
+};
+
+/* The pass list of the Passes tab: the next pass of up to kMax TLE
+ * satellites over the next 24 h, searched one satellite after another in
+ * step()s, and the text of each line (30 columns). Host tested. */
+class PassList {
+   public:
+    static constexpr size_t kMax = 4;
+    static constexpr size_t kNameCols = 10;
+    static constexpr double kSpan = 86400.0;
+    static constexpr double kStep = 30.0;
+    /* work: the propagator state used for the search (kept by the caller) */
+    void start(const Tle* tles, size_t n, Sgp4* work, const Vec3& rx, double now);
+    void stop() { busy_ = false; }
+    /* up to `coarse_steps` steps of the pass search; false when all done */
+    bool step(int coarse_steps);
+    bool busy() const { return busy_; }
+    size_t count() const { return n_; }
+    bool found(size_t i) const { return i < n_ && ok_[i]; }
+    const Pass& pass(size_t i) const { return res_[i]; }
+    /* "ISS (ZARYA in 1h05 47d 9m", "ISS (ZARYA UP 23d 4m", "ISS (ZARYA search 35%" */
+    void line(size_t i, double now, char* buf, size_t size) const;
+
+   private:
+    const Tle* tles_{nullptr};
+    size_t n_{0};
+    Sgp4* work_{nullptr};
+    Observer obs_{};
+    double t0_{0};
+    PassFinder finder_{};
+    Pass res_[kMax]{};
+    bool ok_[kMax]{};
+    bool done_[kMax]{};
+    size_t idx_{0};
+    bool busy_{false};
+    bool start_current();
 };
 
 }  // namespace ui::external_app::gps
