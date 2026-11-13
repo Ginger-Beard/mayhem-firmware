@@ -29,8 +29,8 @@ namespace {
 
 constexpr double kL1Hz = 1575.42e6;
 
-/* 4x4 normal equations (a: 4 x 5 augmented), Gauss with pivoting */
-bool solve4(double a[4][5], double x[4]) {
+/* 4x4 normal equations (a: 4 x 5 augmented in the first 5 columns), Gauss with pivoting */
+bool solve4(double (*a)[8], double x[4]) {
     for (int c = 0; c < 4; c++) {
         int p = c;
         for (int r = c + 1; r < 4; r++)
@@ -55,11 +55,10 @@ bool solve4(double a[4][5], double x[4]) {
     return true;
 }
 
-/* inverse of a symmetric positive 4x4 (Gauss-Jordan), false if singular */
-bool inv4(double m[4][4], double r[4][4]) {
-    double a[4][8];
+/* inverse of a symmetric positive 4x4 held in a[.][0..3] (Gauss-Jordan, a: 4 x 8), into r; false if singular */
+bool inv4(double (*a)[8], double r[4][4]) {
     for (int i = 0; i < 4; i++)
-        for (int j = 0; j < 8; j++) a[i][j] = j < 4 ? m[i][j] : (j - 4 == i ? 1.0 : 0.0);
+        for (int j = 4; j < 8; j++) a[i][j] = (j - 4 == i ? 1.0 : 0.0);
     for (int c = 0; c < 4; c++) {
         int p = c;
         for (int i = c + 1; i < 4; i++)
@@ -86,7 +85,7 @@ bool inv4(double m[4][4], double r[4][4]) {
 
 /* elevations (for the troposphere) once the position is near the earth:
  * one geodetic conversion per call, not per satellite */
-void elevations(PvtWork& w, int n, const Vec3& x, double t_rx, double b) {
+__attribute__((noinline)) void elevations(PvtWork& w, int n, const Vec3& x, double t_rx, double b) {
     const Observer ob = make_observer(x);
     for (int i = 0; i < n; i++) {
         const Vec3 s = earth_rotate(w.sat[i], t_rx - w.in[i].dt_tx - b / kC);
@@ -99,11 +98,13 @@ void elevations(PvtWork& w, int n, const Vec3& x, double t_rx, double b) {
 inline double trop_m(double el) { return 2.4 / std::sin((el < 3 ? 3 : el) * kPi / 180.0); }
 
 /* one least-squares solution with the satellites marked in w.use */
-bool ls(PvtWork& w, int n, Vec3& x, double& b, double t_rx, bool tropo, double* rms, int* used) {
+__attribute__((noinline)) bool ls(PvtWork& w, int n, Vec3& x, double& b, double t_rx, bool tropo, double* rms, int* used) {
     bool have_el = norm(x) > 6.0e6;
     if (have_el && tropo) elevations(w, n, x, t_rx, b);
     for (int it = 0; it < 12; it++) {
-        double a[4][5] = {};
+        double (*a)[8] = w.a;
+        for (int p = 0; p < 4; p++)
+            for (int q = 0; q < 5; q++) a[p][q] = 0;
         int m = 0;
         for (int i = 0; i < n; i++) {
             if (!w.use[i]) continue;
@@ -210,7 +211,10 @@ bool pvt_solve(PvtWork& w, int n, const Vec3& prior, double dt_rx_guess, PvtSolu
     out.checked = used >= 5 ? 1 : 0;
     /* DOP in east / north / up */
     {
-        double hth[4][4] = {}, q[4][4];
+        double (*hth)[8] = w.a;
+        double (*q)[4] = w.q;
+        for (int p = 0; p < 4; p++)
+            for (int k = 0; k < 4; k++) hth[p][k] = 0;
         const Observer ob = make_observer(x);
         for (int i = 0; i < n; i++) {
             if (!w.use[i]) continue;
@@ -236,7 +240,9 @@ bool pvt_solve(PvtWork& w, int n, const Vec3& prior, double dt_rx_guess, PvtSolu
     /* velocity and clock drift from the Dopplers: -lambda f = (vs - v).u + drift - c * clock rate of the satellite */
     {
         const double lambda = kC / kL1Hz;
-        double a[4][5] = {};
+        double (*a)[8] = w.a;
+        for (int p = 0; p < 4; p++)
+            for (int k = 0; k < 5; k++) a[p][k] = 0;
         int m = 0;
         for (int i = 0; i < n; i++) {
             if (!w.use[i]) continue;
