@@ -104,7 +104,7 @@ class PassFinder {
  * step()s, and the text of each line (30 columns). Host tested. */
 class PassList {
    public:
-    static constexpr size_t kMax = 4;
+    static constexpr size_t kMax = 12;
     static constexpr size_t kNameCols = 10;
     static constexpr double kSpan = 86400.0;
     static constexpr double kStep = 30.0;
@@ -120,6 +120,10 @@ class PassList {
     const Pass& pass(size_t i) const { return res_[i]; }
     /* "ISS (ZARYA in 1h05 47d 9m", "ISS (ZARYA UP 23d 4m", "ISS (ZARYA search 35%" */
     void line(size_t i, double now, char* buf, size_t size) const;
+    /* The satellites in display order: up now, then by rise time, then those
+     * still searched, then those without a pass in 24 h (stable: ties keep
+     * file order). out: count() entries. */
+    void order(uint8_t* out) const;
 
    private:
     const Tle* tles_{nullptr};

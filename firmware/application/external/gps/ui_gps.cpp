@@ -32,6 +32,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <new>
 #endif
 
 using namespace portapack;
@@ -246,16 +247,25 @@ bool OrbitLoader::open(Stage s, GpsView& v) {
     close();
     stage_ = s;
     rpos_ = rlen_ = llen_ = 0;
+    line_no_ = 0;
     eof_ = false;
     tle_state_ = 0;
-    const char16_t* name = s == ALMANAC ? u"GPS/ALMANAC.TXT" : (s == EPHEMERIS ? u"GPS/EPHEM.RNX" : u"GPS/TLE.TXT");
+    const char16_t* name = s == ALMANAC ? u"GPS/ALMANAC.TXT"
+                                        : (s == EPHEMERIS ? u"GPS/EPHEM.RNX" : (s == SATFREQ ? u"GPS/SATFREQ.TXT" : u"GPS/TLE.TXT"));
     file_ = new File();
     if (file_->open(name).is_valid()) { /* an error */
         close();
         return false;
     }
-    (s == ALMANAC ? v.alm_file_ : (s == EPHEMERIS ? v.eph_file_ : v.tle_file_)) = true;
+    (s == ALMANAC ? v.alm_file_ : (s == EPHEMERIS ? v.eph_file_ : (s == SATFREQ ? v.freq_file_ : v.tle_file_))) = true;
     return true;
+}
+
+/* The files in order (the downlink table before the TLEs, which it ranks). */
+bool OrbitLoader::open_after(Stage s, GpsView& v) {
+    for (int k = static_cast<int>(s) + 1; k < static_cast<int>(DONE); k++)
+        if (open(static_cast<Stage>(k), v)) return true;
+    return false;
 }
 
 void OrbitLoader::start(double now_gps, GpsView& v) {
@@ -263,7 +273,7 @@ void OrbitLoader::start(double now_gps, GpsView& v) {
     yuma_.reset(static_cast<int32_t>(now_gps / kWeekS));
     rinex_.reset();
     stage_ = IDLE;
-    if (!open(ALMANAC, v) && !open(EPHEMERIS, v) && !open(TLES, v)) stage_ = DONE;
+    if (!open_after(IDLE, v)) stage_ = DONE;
 }
 
 bool OrbitLoader::next_line() {
@@ -283,6 +293,7 @@ bool OrbitLoader::next_line() {
         const char ch = rbuf_[rpos_++];
         if (ch == '\n') {
             line_[llen_] = 0;
+            line_no_++;
             return true;
         }
         if (ch == '\r') continue;
@@ -317,6 +328,14 @@ void OrbitLoader::take(GpsView& v) {
                 if (o.toe > v.eph_toe_newest_) v.eph_toe_newest_ = o.toe;
             }
         }
+    } else if (stage_ == SATFREQ) {
+        if (v.n_freq_ >= GpsScratch::kMaxFreq) return;
+        const auto r = parse_satfreq(line_, v.mem_->freq[v.n_freq_]);
+        if (r == FreqLine::OK) v.n_freq_++;
+        if (r == FreqLine::BAD) {
+            if (!v.freq_bad_) v.freq_bad_line_ = line_no_ ? line_no_ : 1;
+            if (v.freq_bad_ < 255) v.freq_bad_++;
+        }
     } else if (stage_ == TLES) {
         const size_t n = std::strlen(line_);
         if (line_[0] == '1' && line_[1] == ' ' && n >= 69) {
@@ -324,14 +343,7 @@ void OrbitLoader::take(GpsView& v) {
             tle_state_ = 1;
         } else if (line_[0] == '2' && line_[1] == ' ' && n >= 69 && tle_state_ == 1) {
             tle_state_ = 0;
-            if (v.n_tle_ < GpsScratch::kMaxTle) {
-                Tle& t = v.mem_->tles[v.n_tle_];
-                if (parse_tle(tle_l1_, line_, t)) {
-                    std::strncpy(t.name, tle_name_, sizeof(t.name) - 1);
-                    if (!t.name[0]) Fmt{t.name, sizeof(t.name)}.u(t.catnr);
-                    v.n_tle_++;
-                }
-            }
+            take_tle(v);
         } else if (n > 0) { /* a name line ("0 " prefix in some files) */
             const char* s = (line_[0] == '0' && line_[1] == ' ') ? line_ + 2 : line_;
             size_t k = 0;
@@ -346,16 +358,40 @@ void OrbitLoader::take(GpsView& v) {
     }
 }
 
+/* A TLE (lines in tle_l1_ / line_): the first kMaxTle sets in file order,
+ * except that a satellite listed in SATFREQ.TXT replaces one that is not, so
+ * a whole CelesTrak group file can be copied as TLE.TXT. */
+void OrbitLoader::take_tle(GpsView& v) {
+    GpsScratch& m = *v.mem_;
+    Tle& t = m.tle_tmp;
+    if (!parse_tle(tle_l1_, line_, t)) return;
+    std::strncpy(t.name, tle_name_, sizeof(t.name) - 1);
+    if (!t.name[0]) Fmt{t.name, sizeof(t.name)}.u(t.catnr);
+    uint8_t fi = GpsScratch::kNoFreq;
+    for (uint8_t k = 0; k < v.n_freq_ && fi == GpsScratch::kNoFreq; k++)
+        if (satfreq_matches(m.freq[k], t.catnr, t.name)) fi = k;
+    for (uint8_t k = 0; k < v.n_tle_; k++)
+        if (m.tles[k].catnr == t.catnr) return; /* a duplicate */
+    size_t slot = v.n_tle_;
+    if (slot >= GpsScratch::kMaxTle) {
+        if (fi == GpsScratch::kNoFreq) return;
+        for (slot = 0; slot < GpsScratch::kMaxTle && m.tle_freq[slot] != GpsScratch::kNoFreq; slot++) {
+        }
+        if (slot >= GpsScratch::kMaxTle) return; /* all slots hold table satellites */
+    } else {
+        v.n_tle_++;
+    }
+    m.tles[slot] = t;
+    m.tle_freq[slot] = fi;
+}
+
 bool OrbitLoader::step(GpsView& v, systime_t t0) {
     if (stage_ == IDLE || stage_ == DONE || !file_) return false;
     for (size_t i = 0; i < kMaxLinesPerFrame && (i == 0 || chTimeNow() - t0 < kSliceTicks); i++) {
         if (!next_line()) {
             const Stage s = stage_;
             close();
-            bool opened = false;
-            if (s == ALMANAC) opened = open(EPHEMERIS, v) || open(TLES, v);
-            if (s == EPHEMERIS) opened = open(TLES, v);
-            if (!opened) {
+            if (!open_after(s, v)) {
                 stage_ = DONE;
                 return false;
             }
@@ -400,24 +436,41 @@ PassesView::PassesView(GpsView& main, Rect r)
     };
     sky_.set_focusable(true); /* the wheel steps through the satellites listed */
     text_passes_.on_row = [this](size_t r) {
-        if (r < passes_.count()) tap(GpsView::SEL_TLE, static_cast<uint8_t>(r));
+        if (off_ + r < npass()) tap(GpsView::SEL_TLE, order_[off_ + r]);
     };
     text_side_.on_row = [this](size_t r) {
         if (r < kSideRows && side_prn_[r]) tap(GpsView::SEL_GPS, side_prn_[r] - 1);
     };
 }
 
+PassList* PassesView::pl() const {
+    return main_.mem_ ? &main_.mem_->passes : nullptr;
+}
+
+size_t PassesView::npass() const {
+    const PassList* p = pl();
+    return p ? p->count() : 0;
+}
+
+int PassesView::pos_of_tle(uint8_t idx) const {
+    for (size_t i = 0; i < npass(); i++)
+        if (order_[i] == idx) return static_cast<int>(i);
+    return -1;
+}
+
 int PassesView::items() const {
-    int n = static_cast<int>(passes_.count());
+    int n = static_cast<int>(npass());
     for (size_t r = 0; r < kSideRows; r++) n += side_prn_[r] != 0;
     return n;
 }
 
+/* the wheel's items: every TLE satellite in list order (the window scrolls to
+ * the selection), then the GPS side list */
 void PassesView::item(int i, uint8_t& kind, uint8_t& idx) const {
-    const int np = static_cast<int>(passes_.count());
+    const int np = static_cast<int>(npass());
     if (i < np) {
         kind = GpsView::SEL_TLE;
-        idx = static_cast<uint8_t>(i);
+        idx = order_[i];
         return;
     }
     int k = i - np;
@@ -463,7 +516,13 @@ void PassesView::tap(uint8_t kind, uint8_t idx) {
 
 void PassesView::show_selection() {
     const bool tle = main_.sel_kind_ == GpsView::SEL_TLE, gps = main_.sel_kind_ == GpsView::SEL_GPS;
-    text_passes_.set_highlight(tle && main_.sel_idx_ < passes_.count() ? main_.sel_idx_ : -1);
+    const int pos = tle ? pos_of_tle(main_.sel_idx_) : -1;
+    if (pos >= 0 && (pos < off_ || pos >= off_ + static_cast<int>(kPassRows))) {
+        off_ = static_cast<uint8_t>(pos < off_ ? pos : pos - static_cast<int>(kPassRows) + 1);
+        show_passes(); /* calls back here with the window moved */
+        return;
+    }
+    text_passes_.set_highlight(pos >= 0 ? pos - off_ : -1);
     int row = -1;
     for (size_t r = 0; r < kSideRows && gps; r++)
         if (side_prn_[r] == main_.sel_idx_ + 1) row = static_cast<int>(r);
@@ -529,7 +588,7 @@ void PassesView::refresh() {
         if (!main_.mem_) {
             text_head_.set(3, "Starting...", yellow);
         } else if (st != OrbitLoader::DONE && st != OrbitLoader::IDLE) {
-            f.s(st == OrbitLoader::ALMANAC ? "Reading ALMANAC..." : (st == OrbitLoader::EPHEMERIS ? "Reading EPHEM..." : "Reading TLE..."));
+            f.s(st == OrbitLoader::ALMANAC ? "Reading ALMANAC..." : (st == OrbitLoader::EPHEMERIS ? "Reading EPHEM..." : (st == OrbitLoader::SATFREQ ? "Reading SATFREQ..." : "Reading TLE...")));
             text_head_.set(3, b, yellow);
         } else if (!main_.n_alm_ && !main_.n_eph_ && !main_.n_tle_) {
             text_head_.set(3, "No orbit files (below)", yellow);
@@ -604,18 +663,23 @@ void PassesView::update_sky() {
 }
 
 void PassesView::restart_passes() {
-    passes_.stop();
-    if (main_.pos_valid_ && main_.n_tle_ && main_.mem_)
-        passes_.start(main_.mem_->tles, main_.n_tle_, &main_.mem_->search, main_.rx_, main_.now_unix());
+    PassList* p = pl();
+    if (!p) return;
+    p->stop();
+    if (main_.pos_valid_ && main_.n_tle_)
+        p->start(main_.mem_->tles, main_.n_tle_, &main_.mem_->search, main_.rx_, main_.now_unix());
+    else
+        p->start(nullptr, 0, nullptr, main_.rx_, 0); /* empty */
     show_passes();
 }
 
 /* The pass search in whole units (one elevation each) until the frame's time
  * slice is used. */
 void PassesView::frame(systime_t t0) {
-    if (!passes_.busy() || !main_.mem_) return;
+    PassList* p = pl();
+    if (!p || !p->busy()) return;
     do {
-        if (!passes_.step(1)) break;
+        if (!p->step(1)) break;
     } while (chTimeNow() - t0 < kSliceTicks);
     show_passes();
 }
@@ -629,6 +693,9 @@ void PassesView::show_passes() {
     const double now = main_.now_unix();
     const Color white = Color::white(), yellow = Color::yellow();
     text_passes_.begin();
+    const PassList* p = pl();
+    if (p) p->order(order_);
+    if (off_ + kPassRows > npass()) off_ = static_cast<uint8_t>(npass() > kPassRows ? npass() - kPassRows : 0);
     if (!main_.mem_ || main_.loading()) {
     } else if (!main_.tle_file_) {
         text_passes_.set(0, "No TLE file, so no passes:", yellow);
@@ -656,12 +723,20 @@ void PassesView::show_passes() {
             f.s("TLE ").u(static_cast<uint32_t>(oldest_d)).s(" d old: refresh (max 14)");
             text_passes_.set(rows, b, yellow);
         }
-        for (size_t i = 0; i < rows && i < passes_.count(); i++) {
-            passes_.line(i, now, b, sizeof(b));
-            text_passes_.set(i, b, passes_.found(i) ? white : Color::light_grey());
+        for (size_t i = 0; i < rows && off_ + i < npass(); i++) {
+            const uint8_t k = order_[off_ + i];
+            p->line(k, now, b, sizeof(b));
+            if (i == rows - 1 && off_ + rows < npass()) { /* more below: the wheel scrolls */
+                size_t L = std::strlen(b);
+                while (L < TextLines::kCols - 1) b[L++] = ' ';
+                b[TextLines::kCols - 1] = '+';
+                b[TextLines::kCols] = 0;
+            }
+            text_passes_.set(i, b, p->found(k) ? white : Color::light_grey());
         }
     }
     text_passes_.end();
+    show_selection();
 }
 
 /* ---------------------------------------------------------------- heard */
@@ -1227,9 +1302,15 @@ SatView::SatView(NavigationView&, GpsView& main)
       text_now_{{0, UI_POS_Y(2) + 64, UI_POS_MAXWIDTH, UI_POS_HEIGHT(1)}, now_, 1, &ui::font::fixed_8x16},
       sky_{{0, UI_POS_Y(3) + 66, 120, 120}, "pass"},
       text_info_{{122, UI_POS_Y(3) + 66, 118, 8 * kInfoRows}, info_, kInfoRows, &ui::font::fixed_5x8},
-      text_sum_{{0, UI_POS_Y(3) + 188, UI_POS_MAXWIDTH, UI_POS_HEIGHT(kSumRows)}, sum_, kSumRows, &ui::font::fixed_8x16} {
-    add_children({&text_top_, &big_dir_, &big_el_, &text_now_, &sky_, &text_info_, &text_sum_});
+      text_sum_{{0, UI_POS_Y(3) + 188, UI_POS_MAXWIDTH, UI_POS_HEIGHT(kSumRows)}, sum_, kSumRows, &ui::font::fixed_8x16},
+      button_follow_{{122, UI_POS_Y(3) + 66 + 8 * kInfoRows + 2, 118, 28}, "Follow"} {
+    add_children({&text_top_, &big_dir_, &big_el_, &text_now_, &sky_, &text_info_, &text_sum_, &button_follow_});
     sky_.set_focusable(true);
+    button_follow_.hidden(true);
+    /* Follow replaces the GPS app (this view is gone when follow() returns) */
+    button_follow_.on_select = [this](Button& b) {
+        if (!main_.follow()) b.set_text("No memory");
+    };
     tick_ = rtc_time::signal_tick_second += [this]() {
         refresh();
     };
@@ -1333,6 +1414,31 @@ void SatView::refresh() {
         Fmt g{b, sizeof(b)};
         g.s("catalog ").u(tl.catnr);
         text_info_.set(r++, b, grey);
+        /* downlinks from SATFREQ.TXT (Follow tunes the first; it can switch) */
+        const uint8_t nd = main_.sel_downlinks();
+        uint8_t shown = 0;
+        for (uint8_t k = 0; k < main_.n_freq_ && shown < 2; k++) {
+            const SatFreq& fq = m->freq[k];
+            if (!satfreq_matches(fq, tl.catnr, tl.name)) continue;
+            char mhz[16];
+            put_mhz(mhz, sizeof(mhz), fq.hz);
+            Fmt h{b, sizeof(b)};
+            h.s(mhz).c(' ').s(freq_mode_name(fq.mode)).c(' ').s(band_name(fq.hz));
+            text_info_.set(r++, b, Color::cyan());
+            shown++;
+        }
+        if (nd > shown) {
+            Fmt h{b, sizeof(b)};
+            h.s("+").u(nd - shown).s(" more downlink").s(nd - shown > 1 ? "s" : "");
+            text_info_.set(r++, b, Color::cyan());
+        }
+        if (!nd) text_info_.set(r++, main_.freq_file_ ? "no downlink in SATFREQ" : "no /GPS/SATFREQ.TXT", grey);
+        if (main_.freq_bad_) {
+            Fmt h{b, sizeof(b)};
+            h.s("SATFREQ line ").u(main_.freq_bad_line_).s(" bad");
+            if (main_.freq_bad_ > 1) h.s(" +").u(main_.freq_bad_ - 1u);
+            text_info_.set(r++, b, yellow);
+        }
     } else {
         const uint8_t i = main_.sel_idx_;
         const Orbit& o = m->orbits[i];
@@ -1383,10 +1489,17 @@ void SatView::refresh() {
         }
         text_info_.set(r++, b, white);
     }
-    text_info_.set(r++, "", grey);
-    text_info_.set(r++, "Point the antenna to the", grey);
-    text_info_.set(r++, "compass bearing, tilted", grey);
-    text_info_.set(r, "up by the elevation.", grey);
+    const bool can_follow = tle && main_.sel_downlinks() > 0;
+    if (button_follow_.hidden() == can_follow) {
+        button_follow_.hidden(!can_follow);
+        set_dirty();
+    }
+    if (!can_follow && r + 4 <= kInfoRows) {
+        text_info_.set(r++, "", grey);
+        text_info_.set(r++, "Point the antenna to the", grey);
+        text_info_.set(r++, "compass bearing, tilted", grey);
+        text_info_.set(r, "up by the elevation.", grey);
+    }
     text_top_.end();
     text_info_.end();
     text_sum_.end();
@@ -1394,7 +1507,7 @@ void SatView::refresh() {
 
 /* ---------------------------------------------------------------- main */
 
-GpsView::GpsView(NavigationView& nav)
+GpsView::GpsView(NavigationView& nav, uint32_t reselect)
     : nav_{nav},
       settings_{
           "rx_gps",
@@ -1402,6 +1515,7 @@ GpsView::GpsView(NavigationView& nav)
           {{"utc_off_min"sv, &utc_off_min_},
            {"tab"sv, &tab_},
            {"depth"sv, &depth_}}},
+      reselect_{reselect},
       view_fix_{*this, view_rect_},
       view_heard_{*this, view_rect_},
       view_passes_{*this, view_rect_},
@@ -1500,8 +1614,11 @@ void GpsView::start_load() {
     for (auto& o : mem_->orbits) o = Orbit{};
     for (auto& a : mem_->alm) a = AlmRec{};
     n_alm_ = n_eph_ = n_tle_ = 0;
+    n_freq_ = freq_bad_ = 0;
+    freq_bad_line_ = 0;
+    for (auto& f : mem_->tle_freq) f = GpsScratch::kNoFreq;
     eph_toe_newest_ = 0;
-    alm_file_ = eph_file_ = tle_file_ = false;
+    alm_file_ = eph_file_ = tle_file_ = freq_file_ = false;
     alm_toa_ = eph_file_newest_ = 0;
     geo_ready_ = geo_active_ = false;
     sel_kind_ = SEL_NONE; /* the tables are re-read */
@@ -1822,6 +1939,11 @@ void GpsView::on_frame() {
             view_passes_.restart_passes();
             view_fix_.show();
             view_heard_.show();
+            if (reselect_) { /* back from Follow: the satellite followed */
+                for (uint8_t k = 0; k < n_tle_; k++)
+                    if (mem_->tles[k].catnr == reselect_) select(SEL_TLE, k);
+                reselect_ = 0;
+            }
         }
         return;
     }
@@ -1872,6 +1994,41 @@ void GpsView::select(uint8_t kind, uint8_t idx) {
 
 void GpsView::open_selected() {
     if (sel_kind_ != SEL_NONE && mem_ && pos_valid_) nav_.push<SatView>(*this);
+}
+
+uint8_t GpsView::sel_downlinks() const {
+    if (!mem_ || sel_kind_ != SEL_TLE || sel_idx_ >= n_tle_) return 0;
+    const Tle& t = mem_->tles[sel_idx_];
+    uint8_t n = 0;
+    for (uint8_t k = 0; k < n_freq_; k++) n += satfreq_matches(mem_->freq[k], t.catnr, t.name) ? 1 : 0;
+    return n;
+}
+
+/* The orbit tables live in M4 RAM that PGPR lends and are gone once the
+ * stock audio image runs, so Follow gets its own copy of the element set,
+ * the observer and the downlinks, on the heap (not the stack: the M0 stack
+ * has ~1.3 KB to spare and the replace below runs this view's destructor,
+ * which writes the settings file). chHeapAlloc, not operator new: that halts
+ * the firmware when the heap is short. */
+bool GpsView::follow() {
+    if (!mem_ || !pos_valid_ || !sel_downlinks()) return false;
+    void* p = chHeapAlloc(nullptr, sizeof(FollowCtx));
+    if (!p) return false;
+    auto* ctx = new (p) FollowCtx{};
+    const Tle& t = mem_->tles[sel_idx_];
+    ctx->tle = t;
+    ctx->obs = obs_;
+    ctx->utc_off_min = utc_off_min_;
+    for (uint8_t k = 0; k < n_freq_ && ctx->n_dl < FollowCtx::kMaxDl; k++)
+        if (satfreq_matches(mem_->freq[k], t.catnr, t.name)) ctx->dl[ctx->n_dl++] = mem_->freq[k];
+    /* Pop the satellite page, then replace this view: this view's destructor
+     * stops the solver, disables the receiver and shuts PGPR down before
+     * FollowView starts its image. Nothing of this object is used after the
+     * replace. */
+    NavigationView& nav = nav_;
+    nav.pop();
+    nav.replace<FollowView>(ctx);
+    return true;
 }
 
 void GpsView::sel_name(char* buf, size_t size) const {
