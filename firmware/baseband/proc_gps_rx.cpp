@@ -239,7 +239,7 @@ void GpsRxProcessor::execute(const buffer_c8_t& buffer) {
     const uint32_t t0 = DWT->CYCCNT;
     trk_->process(reinterpret_cast<const int8_t*>(buffer.p), samples_ - buffer.count);
     uint32_t dt = DWT->CYCCNT - t0;
-    { /* Galileo: the searcher captures, or works in units of <= ~40k cycles while the
+    { /* Galileo: the searcher captures, or works in units of <= ~17k cycles while the
        * buffer's total stays under the budget; a detection may start a channel */
         const uint32_t g0 = DWT->CYCCNT;
         gal_svc.run(trk_, reinterpret_cast<const int8_t*>(buffer.p), static_cast<int>(buffer.count), samples_ - buffer.count,

@@ -347,8 +347,8 @@ the receiver looks for the Galileo satellites that GNSSALM.TXT puts above
 5 degrees, highest first, one at a time: the code phase and Doppler are
 predicted from the fix, GPS time and the orbit, and only a small window
 around them is searched, in the M4 time the GPS tracking leaves (32 ms of
-signal per satellite; with 8 GPS channels it takes ~10-20 s per
-satellite, a few minutes for all). System wheel on Galileo: "E31 38 dB-Hz
+signal per satellite; with 8 GPS channels it takes ~1-3 s per satellite,
+well under a minute for all). System wheel on Galileo: "E31 38 dB-Hz
 heard", "E23 not found", "searching".
 A satellite heard goes on to a Galileo tracking channel when the M4 has
 time for it: "E31 el62 40 dB trk CS" (E1C C/N0; CS = its pilot's secondary
@@ -356,8 +356,8 @@ code found: a verified Galileo signal), "lost: search" while a lost channel
 is searched again (given up after 60 s). GPS comes first: the channels
 share the M4 time (a Galileo channel costs about 1.6 GPS channels), so with
 8 GPS satellites tracked one Galileo channel fits, with 6 three, at most 4;
-a GPS satellite that needs a channel frees the weakest Galileo one. While a
-Galileo channel runs, the M4 has less time for the next searches (they get
+a GPS satellite that needs a channel frees the weakest Galileo one. While
+Galileo channels run, the M4 has less time for the next searches (they get
 slower). The status row says "Heard 8 of 11 up, 2 trk". Nothing of Galileo
 enters the fix yet. Unticking the box stops the search and frees the
 Galileo channels at once; with the box off GPS is exactly as before. To
