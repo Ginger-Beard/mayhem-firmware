@@ -115,6 +115,7 @@ void GpsView::log_header() {
         "#ERR,what,detail",
         "#LOG,event,errors (the log file reopened after the Log box was ticked again)",
         "#IMG,image,result,bytes,load_ms,loads (a baseband image loaded from /APPS)",
+        "#SYS,event (view / sky),view,file (1 read 2 missing 3 empty),age_dx10,sats,E up/total,C up/total,R up/total,S up/total,bad_lines",
     };
     for (const char* h : kHead) log_push(mem_->log, h, std::strlen(h));
 }
@@ -231,6 +232,20 @@ void GpsView::log_fail(const char* what) {
     log_close();
     log_retry_t_ = chTimeNow();
     view_fix_.show();
+}
+
+/* the System wheel and the other systems' sky: wheel changes and each
+ * GNSSALM.TXT pass (counts up / in the file per system) */
+void GpsView::log_sys(const char* event) {
+    if (!log_active()) return;
+    const SysSky& k = mem_->sys;
+    static const char* const kView[] = {"all_l1", "gps", "galileo", "beidou", "glonass", "sbas"};
+    Fmt f = log_row("SYS");
+    f.c(',').s(event).c(',').s(kView[sys_view_ < VIEW_N ? sys_view_ : 0]).c(',').u(k.file).c(',');
+    f.d(static_cast<int32_t>(std::lround(sys_age_days() * 10))).c(',').u(k.n);
+    for (int s = SYS_GAL; s < SYS_N; s++) f.c(',').u(k.up[s]).c('/').u(k.total[s]);
+    f.c(',').u(k.bad_lines);
+    log_end(f);
 }
 
 /* the last baseband image load (from the card), once logging runs */

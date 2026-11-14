@@ -453,11 +453,16 @@ PassesView::PassesView(GpsView& main, Rect r)
       labels_zone_{{{UI_POS_X(14), UI_POS_Y(1)}, "Zone", Theme::getInstance()->fg_light->foreground}},
       field_zone_h_{{UI_POS_X(18), UI_POS_Y(1)}, 3, {-12, 14}, 1, ' '},
       field_zone_m_{{UI_POS_X(21), UI_POS_Y(1)}, 3, {{":00", 0}, {":30", 30}, {":45", 45}}},
-      sky_{{0, UI_POS_Y(4) + 10, 112, 112}, "GPS now"},
-      text_side_{{116, UI_POS_Y(4) + 10, 124, 112}, side_, kSideRows, &ui::font::fixed_5x8},
+      sky_{{0, UI_POS_Y(4) + 10, 112, 112}, "Sky now"},
+      field_sys_{{120, UI_POS_Y(4) + 10}, 7, {{"All L1", VIEW_ALL_L1}, {"GPS", VIEW_GPS}, {"Galileo", VIEW_GAL}, {"BeiDou", VIEW_BDS}, {"GLONASS", VIEW_GLO}, {"SBAS", VIEW_SBAS}}},
+      text_side_{{116, UI_POS_Y(4) + 10 + 18, 124, 8 * kSideRows}, side_, kSideRows, &ui::font::fixed_5x8},
       text_passes_{{0, UI_POS_Y(4) + 124, UI_POS_MAXWIDTH, UI_POS_HEIGHT(kPassRows)}, pass_lines_, kPassRows, &ui::font::fixed_8x16} {
-    add_children({&text_head_, &button_pos_, &button_load_, &labels_zone_, &field_zone_h_, &field_zone_m_, &sky_, &text_side_, &text_passes_});
-    text_head_.set_short_row(1, 14); /* "Local hh:mm:ss"; the Zone fields own the rest of the row */
+    add_children({&text_head_, &button_pos_, &button_load_, &labels_zone_, &field_zone_h_, &field_zone_m_, &sky_, &field_sys_, &text_side_, &text_passes_});
+    text_head_.set_short_row(1, 13); /* "Loc hh:mm:ss"; the Zone fields own the rest of the row */
+    field_sys_.set_selected_index(main_.sys_view_ < VIEW_N ? main_.sys_view_ : 0, false);
+    field_sys_.on_change = [this](size_t i, OptionsField::value_t) {
+        main_.set_sys_view(static_cast<uint8_t>(i));
+    };
     /* zone as hours + minutes (e.g. -5 :00, 5 :30); the setting keeps minutes */
     const int32_t z = main_.utc_off_min_;
     const int32_t zh = z / 60, zm = (z < 0 ? -z : z) % 60;
@@ -606,7 +611,7 @@ void PassesView::refresh() {
     };
     {
         Fmt f{b, sizeof(b)};
-        f.s("Local ");
+        f.s("Loc ");
         put_hms(f, main_.local_unix());
         text_head_.set(1, b, grey);
     }
@@ -615,7 +620,7 @@ void PassesView::refresh() {
         const double t = main_.now_best();
         int32_t y, m, d;
         civil_from_days(static_cast<int32_t>(std::floor(t / 86400.0)), y, m, d);
-        f.s("UTC   ");
+        f.s("UTC ");
         put_hms(f, t);
         f.c(' ').d2(static_cast<uint32_t>(m)).c('-').d2(static_cast<uint32_t>(d));
         if (main_.utc_off_min_ == 0)
@@ -664,11 +669,14 @@ void PassesView::update_sky() {
         text_side_.set(0, "No almanac on the card:", yellow);
         text_side_.set(1, "copy /GPS/ALMANAC.TXT", white);
         text_side_.set(2, "(see /GPS/README.TXT)", white);
+    } else if (main_.sys_view_ >= VIEW_GAL) { /* another system: predictions from GNSSALM.TXT */
+        side_other(0, view_sys(main_.sys_view_));
     } else if (!main_.geo_ready_) {
         text_side_.set(0, "Computing the sky...", yellow);
     } else {
         char b[TextLines::kCols + 1];
-        size_t nv = 0;
+        const bool all = main_.sys_view_ == VIEW_ALL_L1;
+        size_t nv = 0, row = 1;
         for (size_t i = 0; i < 32; i++) {
             const Orbit& o = main_.mem_->orbits[i];
             const SatGeo& g = main_.mem_->geo[i];
@@ -678,15 +686,40 @@ void PassesView::update_sky() {
             const bool sel = main_.sel_kind_ == GpsView::SEL_GPS && main_.sel_idx_ == i;
             sky_.add(static_cast<int16_t>(g.az), static_cast<int16_t>(g.el), lbl, Color::green(), true, sel);
             nv++;
-            if (nv + 1 < kSideRows) {
-                side_prn_[nv] = static_cast<uint8_t>(i + 1);
+            if (row < kSideRows) {
+                side_prn_[row] = static_cast<uint8_t>(i + 1);
                 Fmt f{b, sizeof(b)};
                 f.c('G').d2(o.prn).s(" el").u(static_cast<uint32_t>(g.el), 2).s(" az").u(static_cast<uint32_t>(g.az), 3);
-                text_side_.set(nv, b, white);
+                text_side_.set(row++, b, white);
             }
         }
         Fmt f{b, sizeof(b)};
-        f.s("GPS up now: ").u(static_cast<uint32_t>(nv));
+        if (all && main_.mem_->sys.file == 1) { /* the other L1 systems: counts on top, dots, rows if room */
+            const SysSky& k = main_.mem_->sys;
+            uint32_t bds_l1 = 0;
+            for (size_t i = 0; i < k.n; i++) bds_l1 += k.sat[i].sys == SYS_BDS && !k.sat[i].health && k.sat[i].el > 0 && sys_on_l1(SYS_BDS, k.sat[i].prn);
+            f.s("L1 up G").u(static_cast<uint32_t>(nv)).s(" E").u(k.up[SYS_GAL]).s(" C").u(bds_l1).s(" S").u(k.up[SYS_SBAS]);
+            uint8_t idx[SkyPlot::kMax];
+            const size_t n = main_.sys_top(SYS_N, idx, SkyPlot::kMax);
+            for (size_t j = 0; j < n; j++) {
+                const SysSat& t = k.sat[idx[j]];
+                char lbl[4];
+                main_.sys_label(t, lbl, sizeof(lbl));
+                sky_.add(static_cast<int16_t>(t.az2 * 2), t.el, lbl, sys_color(t.sys), false);
+                if (row < kSideRows) {
+                    Fmt g{b, sizeof(b)};
+                    char l2[6];
+                    main_.sys_label(t, l2, sizeof(l2));
+                    g.s(l2).s(" el").u(static_cast<uint32_t>(t.el), 2).s(" az").u(static_cast<uint32_t>(t.az2 * 2), 3).s(" pred");
+                    text_side_.set(row++, b, Color::light_grey());
+                }
+            }
+        } else {
+            if (all) /* the other systems' sky not there (yet) */
+                f.s("GPS up ").u(static_cast<uint32_t>(nv)).s(main_.mem_->sys.file == 2 ? " (no GNSSALM)" : " (E C S...)");
+            else
+                f.s("GPS up now: ").u(static_cast<uint32_t>(nv));
+        }
         text_side_.set(0, b, Color::light_grey());
         for (size_t i = 0; i < main_.n_tle_; i++) { /* TLE satellites (orange) if up */
             const SatGeo& g = main_.mem_->tle_geo[i];
@@ -701,6 +734,61 @@ void PassesView::update_sky() {
     text_side_.end();
     show_selection();
     sky_.commit();
+}
+
+void PassesView::sync_sys() {
+    field_sys_.set_selected_index(main_.sys_view_ < VIEW_N ? main_.sys_view_ : 0, false);
+}
+
+/* Another system's page: predicted satellites (GNSSALM.TXT) and what this
+ * receiver does with them so far. Returns the next free row. */
+size_t PassesView::side_other(size_t row, uint8_t sys) {
+    char b[TextLines::kCols + 1];
+    const Color yellow = Color::yellow(), white = Color::white(), grey = Color::light_grey();
+    const SysSky& k = main_.mem_->sys;
+    if (k.file == 2) {
+        text_side_.set(row++, "No /GPS/GNSSALM.TXT:", yellow);
+        text_side_.set(row++, "copy the SD files again", white);
+        text_side_.set(row++, "(see /GPS/README.TXT)", white);
+        return row;
+    }
+    if (k.file == 0 || (main_.sys_active_ && !k.at)) {
+        text_side_.set(row++, "Computing the sky...", yellow);
+        return row;
+    }
+    if (k.file == 3) {
+        text_side_.set(row++, "GNSSALM.TXT: no usable line", yellow);
+        return row;
+    }
+    {
+        Fmt f{b, sizeof(b)};
+        f.s(sys_name(sys)).s(" up ").u(k.up[sys]).s(" of ").u(k.total[sys]);
+        text_side_.set(row++, b, grey);
+    }
+    {
+        Fmt f{b, sizeof(b)};
+        const double age = main_.sys_age_days();
+        f.s("predicted, ");
+        if (age >= 0) f.u(static_cast<uint32_t>(age + 0.5)).s(" d old");
+        text_side_.set(row++, b, age > 31 ? yellow : grey);
+    }
+    text_side_.set(row++, sys == SYS_GLO ? "not on L1: own tuning" : "not decoded yet", yellow);
+    if (sys == SYS_BDS && row < kSideRows) text_side_.set(row++, "B1C: C19-C58 only", grey);
+    uint8_t idx[SkyPlot::kMax];
+    const size_t n = main_.sys_top(sys, idx, SkyPlot::kMax);
+    for (size_t j = 0; j < n; j++) {
+        const SysSat& t = k.sat[idx[j]];
+        char lbl[4], full[6];
+        main_.sys_label(t, lbl, sizeof(lbl));
+        main_.sys_label(t, full, sizeof(full));
+        sky_.add(static_cast<int16_t>(t.az2 * 2), t.el, lbl, sys_color(t.sys), false);
+        if (row < kSideRows) {
+            Fmt f{b, sizeof(b)};
+            f.s(full).s(" el").u(static_cast<uint32_t>(t.el), 2).s(" az").u(static_cast<uint32_t>(t.az2 * 2), 3);
+            text_side_.set(row++, b, white);
+        }
+    }
+    return row;
 }
 
 void PassesView::restart_passes() {
@@ -785,13 +873,18 @@ void PassesView::show_passes() {
 HeardView::HeardView(GpsView& main, Rect r)
     : View{r},
       main_{main},
-      field_depth_{{UI_POS_X(0), 0}, 10, {{"Quick 10ms", 0}, {"Deep 20ms", 1}}},
+      field_depth_{{UI_POS_X(0), 0}, 4, {{"10ms", 0}, {"20ms", 1}}},
+      field_sys_{{UI_POS_X(5), 0}, 7, {{"All L1", VIEW_ALL_L1}, {"GPS", VIEW_GPS}, {"Galileo", VIEW_GAL}, {"BeiDou", VIEW_BDS}, {"GLONASS", VIEW_GLO}, {"SBAS", VIEW_SBAS}}},
       button_search_{{UI_POS_X(16), 0, UI_POS_WIDTH(7), 24}, "Search"}, /* one column apart from Stop */
       button_stop_{{UI_POS_X(24), 0, UI_POS_WIDTH(6), 24}, "Stop"},
       text_status_{{0, 26, UI_POS_MAXWIDTH, UI_POS_HEIGHT(kStatusRows)}, status_, kStatusRows, &ui::font::fixed_8x16},
       text_list_{{0, UI_POS_Y(3) + 12, 118, 8 * kListRows}, list_, kListRows, &ui::font::fixed_5x8},
       sky_{{120, UI_POS_Y(3) + 12, 120, 120}, "Heard"} {
-    add_children({&field_depth_, &button_search_, &button_stop_, &text_status_, &text_list_, &sky_});
+    add_children({&field_depth_, &field_sys_, &button_search_, &button_stop_, &text_status_, &text_list_, &sky_});
+    field_sys_.set_selected_index(main_.sys_view_ < VIEW_N ? main_.sys_view_ : 0, false);
+    field_sys_.on_change = [this](size_t i, OptionsField::value_t) {
+        main_.set_sys_view(static_cast<uint8_t>(i));
+    };
     button_stop_.on_select = [this](Button&) {
         if (main_.job_ != GpsView::JOB_AUTO) main_.stop_search(); /* Autonomous: stopped on the Fix tab */
         show();
@@ -914,8 +1007,74 @@ void HeardView::show_tracking() {
     sky_.commit();
 }
 
+void HeardView::sync_sys() {
+    field_sys_.set_selected_index(main_.sys_view_ < VIEW_N ? main_.sys_view_ : 0, false);
+}
+
+/* The wheel shows Galileo, BeiDou, GLONASS or SBAS: nothing of these is
+ * received yet, so the page says so and lists the satellites predicted up
+ * (GNSSALM.TXT). */
+void HeardView::show_other() {
+    char b[TextLines::kCols + 1];
+    const Color white = Color::white(), yellow = Color::yellow(), grey = Color::light_grey();
+    const uint8_t sys = view_sys(main_.sys_view_);
+    text_status_.begin();
+    text_list_.begin();
+    sky_.clear();
+    for (auto& r : list_prn_) r = 0;
+    {
+        Fmt f{b, sizeof(b)};
+        f.s(sys_name(sys)).s(sys == SYS_GLO ? ": own tuning, not yet" : ": not decoded yet");
+        text_status_.set(0, b, yellow);
+    }
+    const SysSky* k = main_.mem_ ? &main_.mem_->sys : nullptr;
+    if (!k || !main_.pos_valid_) {
+        text_status_.set(1, "needs Pos (Passes tab)", white);
+    } else if (k->file == 2) {
+        text_status_.set(1, "No /GPS/GNSSALM.TXT", yellow);
+    } else if (k->file != 1) {
+        text_status_.set(1, "Computing the sky...", white);
+    } else {
+        Fmt f{b, sizeof(b)};
+        const double age = main_.sys_age_days();
+        f.s("Predicted up ").u(k->up[sys]);
+        if (age >= 0) f.s(" (alm. ").u(static_cast<uint32_t>(age + 0.5)).s(" d)");
+        text_status_.set(1, b, grey);
+        uint8_t idx[SkyPlot::kMax];
+        const size_t n = main_.sys_top(sys, idx, SkyPlot::kMax);
+        for (size_t j = 0; j < n; j++) {
+            const SysSat& t = k->sat[idx[j]];
+            char lbl[4], full[6];
+            main_.sys_label(t, lbl, sizeof(lbl));
+            main_.sys_label(t, full, sizeof(full));
+            sky_.add(static_cast<int16_t>(t.az2 * 2), t.el, lbl, sys_color(t.sys), false);
+            if (j < kListRows - 3) {
+                Fmt g{b, sizeof(b)};
+                g.s(full).s(" el").u(static_cast<uint32_t>(t.el), 2).s(" az").u(static_cast<uint32_t>(t.az2 * 2), 3).s(" pred");
+                text_list_.set(j, b, white);
+            }
+        }
+        if (sys == SYS_GAL) text_list_.set(kListRows - 2, "Galileo E1: next step", grey);
+        if (sys == SYS_BDS) text_list_.set(kListRows - 2, "B1C: C19-C58 only", grey);
+        if (sys == SYS_GLO) text_list_.set(kListRows - 2, "1602 MHz: not with GPS", grey);
+        if (sys == SYS_SBAS) text_list_.set(kListRows - 2, "SBAS: after Galileo", grey);
+    }
+    text_status_.end();
+    text_list_.end();
+    sky_.commit();
+}
+
+/* (a dispatcher with no locals: the page's own frame is the only one on the
+ * stack) */
 void HeardView::show() {
     if (hidden()) return; /* redrawn when the tab is selected (GpsView::on_frame) */
+    if (main_.sys_view_ >= VIEW_GAL)
+        show_other();
+    else
+        show_gps();
+}
+
+void HeardView::show_gps() {
     if (main_.job_ == GpsView::JOB_AUTO && main_.tracking_ && main_.mem_) {
         show_tracking();
         return;
@@ -1097,6 +1256,27 @@ void HeardView::show() {
             sky_.add(static_cast<int16_t>(g.az), static_cast<int16_t>(g.el), lbl, h ? Color::green() : Color::grey(), h, sel);
         }
         sky_.set_track(main_.sel_kind_ == GpsView::SEL_GPS ? &main_.mem_->track : nullptr);
+    }
+    /* All L1: the other L1 systems predicted up (not received yet) */
+    if (main_.sys_view_ == VIEW_ALL_L1 && main_.mem_ && main_.pos_valid_ && main_.mem_->sys.file == 1) {
+        const SysSky& k = main_.mem_->sys;
+        uint8_t idx[SkyPlot::kMax];
+        const size_t n = main_.sys_top(SYS_N, idx, SkyPlot::kMax);
+        uint32_t e = 0, c = 0, sb = 0;
+        for (size_t j = 0; j < n; j++) {
+            const SysSat& t = k.sat[idx[j]];
+            e += t.sys == SYS_GAL;
+            c += t.sys == SYS_BDS;
+            sb += t.sys == SYS_SBAS;
+            char lbl[4];
+            main_.sys_label(t, lbl, sizeof(lbl));
+            sky_.add(static_cast<int16_t>(t.az2 * 2), t.el, lbl, sys_color(t.sys), false);
+        }
+        if (row < last) {
+            Fmt f{b, sizeof(b)};
+            f.s("Up: E").u(e).s(" C").u(c).s(" S").u(sb).s(" not decoded");
+            text_list_.set(row, b, Color::light_grey());
+        }
     }
     text_list_.end();
     sky_.commit();
@@ -1814,7 +1994,8 @@ GpsView::GpsView(NavigationView& nav, uint32_t reselect)
           {{"utc_off_min"sv, &utc_off_min_},
            {"tab"sv, &tab_},
            {"depth"sv, &depth_},
-           {"log"sv, &log_on_}}},
+           {"log"sv, &log_on_},
+           {"sys"sv, &sys_view_}}},
       reselect_{reselect},
       view_fix_{*this, view_rect_},
       view_heard_{*this, view_rect_},
@@ -1882,6 +2063,7 @@ GpsView::~GpsView() {
         }
     }
     log_close();
+    sys_close();
     tab_ = tab_view_.selected();
     if (solver_) { /* it works in the lent RAM: stop it first (one satellite row at most) */
         if (mem_) mem_->solve.cancel = mem_->autos.pvt.cancel = 1;
@@ -2734,6 +2916,7 @@ void GpsView::on_frame() {
     const uint32_t sel = tab_view_.selected();
     if (sel != tab_shown_) {
         tab_shown_ = sel;
+        sys_maybe_start(); /* Heard / Passes may show another system */
         if (sel == 0) view_fix_.show();
         if (sel == 1) view_heard_.show();
         if (sel == 2) {
@@ -2786,6 +2969,10 @@ void GpsView::on_frame() {
             view_passes_.update_sky();
             view_heard_.show();
         }
+        return;
+    }
+    if (sys_active_) { /* the other systems' sky (GNSSALM.TXT), a few lines */
+        sys_step(t0);
         return;
     }
     view_passes_.frame(t0);
@@ -2889,6 +3076,7 @@ void GpsView::on_tick_second() {
         select(sel_kind_, sel_idx_); /* that pass is over: the next one */
     refresh_orbits();
     view_passes_.refresh();
+    sys_maybe_start(); /* the other systems' sky every 30 s while shown */
     if (!geo_active_ && !loading() && static_cast<uint32_t>(now_best()) - geo_started_ >= kGeoPeriodS) geo_restart();
     if (++sky_tick_ % 10 == 0) view_passes_.tick(); /* the "in 1h05" countdowns */
     if (sky_tick_ >= 600) {                         /* passes that ended: search again */

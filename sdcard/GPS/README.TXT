@@ -13,6 +13,8 @@ the app.
   /GPS/EPHEM.RNX     GPS broadcast ephemeris,     OPTIONAL, not bundled: a
                      RINEX 2 or 3 navigation file  same-day file makes the
                                                   fix PRECISE (~20 m)
+  /GPS/GNSSALM.TXT   Galileo, BeiDou, GLONASS,    bundled. System wheel: where
+                     SBAS orbits (predictions)    the other systems are
   /GPS/EPH_AIR.TXT   ephemerides decoded off the  WRITTEN BY THE APP
                      air (Autonomous method)      (Autonomous); read at the
                                                   next start, valid ~4 h
@@ -265,15 +267,49 @@ file starts with a header line and one "#TYPE,..." line per row type. Types:
   ERR     card, ring or solver problems (what, detail)
   LOG     the log file reopened because the Log box was ticked again (event,
           errors so far); after a card error the reopen is an ERR row
+  SYS     the System wheel and the other systems' sky: event (view: wheel
+          moved; sky: GNSSALM.TXT read again), view, file (1 read, 2
+          missing, 3 no usable line), its age in days x10, satellites in the
+          file, then for E, C, R, S "up/total", lines that did not parse
   IMG     a baseband image loaded from /APPS: image (GPS_L1A / GPS_L1T),
           result (ok / missing / read error / not an image / wrong image /
           other firmware version / too large / damaged), bytes, load time ms
           (card read and start), loads so far
 The log holds your position: keep it to yourself.
 
+System wheel (Heard and Passes)
+-------------------------------
+The "System" field (top of Heard, above the list on Passes; turn the wheel
+on it) chooses what the two tabs show: All L1 (default), GPS, Galileo,
+BeiDou, GLONASS, SBAS. Rows carry the system's letter: G GPS, E Galileo,
+C BeiDou, R GLONASS, S SBAS (S131 = PRN 131). What each system is today:
+  GPS      received and decoded (search, tracking, fix).
+  Galileo  predictions only, "not decoded yet" (Galileo E1 is next).
+  BeiDou   predictions only. Its L1 signal B1C comes only from the BDS-3
+           satellites C19-C58; B1I (1561 MHz) needs its own tuning.
+  GLONASS  predictions only: its signals are at 1598-1606 MHz, a tuning of
+           their own, not received together with GPS.
+  SBAS     predictions only (geostationary; messages after Galileo).
+  All L1   GPS plus the systems on the same frequency (Galileo, BeiDou B1C,
+           SBAS) in one sky plot, one colour per system; the others are
+           marked as predicted / not decoded.
+The predictions come from /GPS/GNSSALM.TXT: one line per satellite in the
+GPS almanac model, made from the BKG daily broadcast navigation file of
+2026-11-13 (day 317, BRDC00WRD mixed RINEX 3, public, no login:
+https://igs.bkg.bund.de/root_ftp/IGS/BRDC/2026/317/) by fitting each
+satellite's first and last record of the day. Tested against the next
+days' broadcast orbits: a few km after a day, 5-20 km after two days, so a
+month later still well under a degree in the sky plot. Satellites whose
+records disagree (manoeuvres) are marked unusable and not shown. Refresh it
+about monthly (the side list shows its age): download a day's file from
+that folder, unzip it, and on a computer run, from the Mayhem source tree:
+  python3 firmware/tools/gnss_alm.py BRDC00WRD_S_YYYYDDD0000_01D_MN.rnx > GNSSALM.TXT
+(YYYY year, DDD day of the year), then copy GNSSALM.TXT to /GPS/. The app
+reads it again every 30 s while another system is shown.
+
 Heard tab (what the receiver hears)
 -----------------------------------
-"Search" records a snapshot (Quick 10 ms or Deep 20 ms) and searches it for
+"Search" records a snapshot (10 ms or 20 ms) and searches it for
 GPS satellites. With the almanac, a position and the time it searches only
 the satellites that should be up, around their expected Doppler (faster);
 without them all 32 (slow; the list says why). A satellite is reported as
