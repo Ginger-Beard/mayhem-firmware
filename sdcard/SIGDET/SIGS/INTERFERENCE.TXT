@@ -1,15 +1,10 @@
-# Signature Detect signature class: interference signatures (energy rules only).
-# Two custom sweep bands over teeth of a pulsed comb.
-#
-# Pulsed comb: lines every 2.334 MHz from ~110 to 470 MHz, on for ~2 ms every
-# 102.4 ms (a Wi-Fi beacon interval), traced to the ESP32-MDK add-on (gone when
-# it was unplugged). The sweep revisits a point every few ms, so a 2 ms pulse
-# shows in some looks only: duty low, period ~102 ms when two pulses fall in
-# one dwell.
-BAND,name=UHF,lo=455,hi=470,points=320,dwell=300
-BAND,name=VHF,lo=134,hi=149,points=320,dwell=300
-NB,label=Comb 462.16,kind=noise,f=462.160,bw=200,db=12,duty=1-40,period=80-125,valid=real
-NB,label=Comb 147.05,kind=noise,f=147.050,bw=200,db=12,duty=1-40,period=80-125,valid=real
-NB,label=Comb 135.38,kind=noise,f=135.380,bw=200,db=12,duty=1-40,period=80-125,valid=real
-# Not expressible here: the HF switching-supply comb (67.85 kHz spacing, 2-15
-# MHz) and the 120 Hz mains buzz need HF reception and envelope analysis.
+# Signature Detect signature class: general interference scan (SCAN lines).
+# Sweeps 30-6000 MHz in 26 MHz windows (320 points 81.5 kHz apart) and HF,
+# 1.5-30 MHz, at 5 kHz points: about 6 s a pass. Reports combs (regular
+# lines), always-on emissions whose centre moves (drift) and broadband rises
+# of the noise floor. Steady carriers, digital blocks (TV, LTE, Wi-Fi),
+# intermittent traffic and combs on a round spacing reach the survey log
+# only (tick Survey): by energy alone a steady interferer and a licensed
+# transmitter look the same. What it cannot see: /SIGDET/README.TXT, SCAN.
+SCAN,lo=30,hi=6000,res=81.5,looks=4
+SCAN,lo=1.5,hi=30,res=5,looks=4,fft=2048

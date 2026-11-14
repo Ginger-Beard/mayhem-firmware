@@ -82,6 +82,11 @@
  *     kSigMaxFsk FSK + ZW rules a class; rules with the same f, bw and chip
  *     rate share a dwell (up to sigdet::kFskRulesPerDwell).
  *
+ *   SCAN,lo=1,hi=6000,res=81.5,looks=4,fft=0
+ *     an interference scan range (sigdet_scan.hpp; up to kSigMaxScan): MHz,
+ *     point spacing kHz (320 points a window), looks per window 1..8, FFT
+ *     size 0 (auto) / 256..2048. A class with SCAN lines sweeps its scan
+ *     ranges instead of bands (its BAND and NB lines are not swept).
  *   RX,ble,wifi,droneid,rid,dji,rfcls   receivers and built-in drone
  *     detectors a class asks for: ble (BLE dwells without BLE rules), wifi
  *     (Wi-Fi Remote ID dwells), droneid (DJI DroneID dwells), rid (Remote ID,
@@ -101,6 +106,7 @@
 #include "sigdet_fsk.hpp"
 #include "sigdet_pattern.hpp"
 #include "sigdet_rf.hpp"
+#include "sigdet_scan.hpp"
 
 namespace ui::external_app::signature_detect {
 
@@ -113,6 +119,7 @@ constexpr size_t kSigLineMax = 200;
 constexpr size_t kSigMaxLines = 300;
 constexpr size_t kSigNameLen = 16; /* class name (file stem) incl. the terminator */
 constexpr size_t kSigMaxFsk = 4;   /* FSK + ZW rules, and so dwells, a class */
+constexpr size_t kSigMaxScan = 2;  /* SCAN ranges (interference scan) */
 
 enum SigKind : uint8_t {
     SK_OTHER,
@@ -244,9 +251,9 @@ struct FskGroup {
 
 struct SigReport {
     uint16_t lines;
-    uint8_t ble, nb, bands, pat, zw, fsk; /* rules loaded */
-    uint8_t bad;                          /* lines rejected */
-    uint16_t bad_line;                    /* first rejected line (1 based), 0 if none */
+    uint8_t ble, nb, bands, pat, zw, fsk, scan; /* rules loaded */
+    uint8_t bad;                                /* lines rejected */
+    uint16_t bad_line;                          /* first rejected line (1 based), 0 if none */
     bool truncated;
     char why[20];
 };
@@ -265,6 +272,8 @@ struct SigClass {
     int8_t zw_rule; /* the ZW rule's index in fsk[], -1 none */
     FskRuleDef fsk[kSigMaxFsk];
     FskGroup fskg[kSigMaxFsk];
+    uint8_t nscan;
+    ScanRange scan[kSigMaxScan]; /* a class with SCAN lines sweeps these ranges, not its bands */
     SigReport report;
 };
 
