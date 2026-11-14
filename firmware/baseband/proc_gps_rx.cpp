@@ -87,12 +87,14 @@ GPS_RX_COLD void GpsRxProcessor::start_tracking(uint32_t prn_mask, uint32_t age_
     trk_->params().verify_timeout_ms = req_.confirm ? 0 : kVerifyTimeoutMs;
     /* code phases refer to the first sample of the result snapshot, taken by
      * the acquisition image age_ms ago; samples_ is the index of the next
-     * buffer's first sample */
+     * buffer's first sample. That age is good to ~1 ms only (the app's clock,
+     * the samples lost in the switch), a random code offset (the code repeats
+     * every 1 ms) common to all channels: the channels search for it. */
     const uint64_t now = samples_;
     const uint64_t age = static_cast<uint64_t>(age_ms) * (gps_acq::kFs / 1000u);
     const uint64_t at = age < now ? now - age : 0;
     results_sample_ = at;
-    trk_->handover(res, prn_mask, at, now);
+    trk_->handover(res, prn_mask, at, now, true);
     keep.shared.handover_age_ms = static_cast<uint32_t>((now - at) * 1000u / gps_acq::kFs);
     keep.shared.handovers++;
     trk_->publish();

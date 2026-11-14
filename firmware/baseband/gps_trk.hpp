@@ -468,6 +468,7 @@ class Channel {
         prn_ = static_cast<uint8_t>(prn);
         lp_ = lp;
         reacq_ = 0;
+        xs_ = 0;
         ever_ok_ = released_ = rel_reported_ = false;
         aided_ = false;
         double h = code_phase_chips * 2.0;
@@ -512,7 +513,7 @@ class Channel {
         o.subframes = framer_.subframes();
         o.parity_errs = framer_.parity_errs();
         o.tow_s = last_tow_s_;
-        o.mode = state_ == TRK_SEARCH ? 3 : (state_ == TRK_PULLIN ? 0 : (narrow_ ? 2 : 1));
+        o.mode = state_ == TRK_SEARCH ? (xs_ ? 4 : 3) : (state_ == TRK_PULLIN ? 0 : (narrow_ ? 2 : 1));
         const float pl = pld_s_ * 100.0f;
         o.pld_x100 = static_cast<int8_t>(pl > 100.0f ? 100 : (pl < -100.0f ? -100 : pl));
         o.bits = bits_out_;
@@ -560,6 +561,59 @@ class Channel {
         reacq_ = 0;
         s_wmax_ = static_cast<uint8_t>(wmax < 0 ? 0 : (wmax > 40 ? 40 : wmax));
     }
+    /* A hand-over across an image switch: the result snapshot's time is known
+     * to ~1 ms only, so the code phase is off by an unknown offset that is the
+     * SAME for every channel (the C/A code repeats every 1 ms; the Doppler part
+     * of the error is < 0.01 chip). Search the whole code period (137 windows
+     * of 15 half chips) at the hand-over Doppler, windows k, k + n, k + 2n ...
+     * of the sequence 0, +1, -1 ...: n channels share the offsets. A hit is
+     * reported to the tracker once its PLL locks (xs_locked()); the others
+     * then jump there (xs_jump()). */
+    static constexpr int kXsWmax = 68;
+    __attribute__((noinline)) void start_xsearch(int k, int n) {
+        good_freq_ = freq_;
+        lost();
+        reacq_ = 0;
+        xs_ = 1;
+        s_ndop_ = 1;
+        s_wmax_ = kXsWmax;
+        s_wstep_ = static_cast<uint8_t>(n < 1 ? 1 : n);
+        s_win_ = static_cast<uint8_t>(k % (2 * kXsWmax + 1));
+        const int w = (s_win_ + 1) / 2;
+        s_base_ = (s_win_ & 1u) ? w * kSearchCode * 3 : -w * kSearchCode * 3;
+        const int off = s_base_ - (kSearchCode / 2) * 3;
+        shift_code(off - s_off_);
+        s_off_ = off;
+        freq_ = s_f0_;
+        set_nco();
+    }
+    bool xs_searching() const { return (xs_ == 1 || xs_ == 3) && state_ == TRK_SEARCH; }
+    /* the offset (half chips from the hand-over prediction) once a hit has
+     * locked; true once */
+    __attribute__((noinline)) bool xs_locked(int* off) {
+        if (xs_ != 2 || !pll_lock_) return false;
+        xs_ = 0;
+        *off = xs_off_ + xs_acc_half();
+        epochs_ = 0; /* the verification timeout counts from here */
+        return true;
+    }
+    /* another channel found the common offset: pull-in there (not locked within
+     * kPullinMaxMs: the local search around it, as after a loss); after a long
+     * search (wmax > 0: this channel's Doppler error has moved its code since
+     * the hand-over) a search of +-wmax windows around it */
+    __attribute__((noinline)) void xs_jump(int off, int wmax) {
+        shift_code((xs_ == 3 ? off - xs_off_ : off) - s_off_);
+        xs_ = 0;
+        if (wmax > 0) {
+            lost();
+            s_wmax_ = static_cast<uint8_t>(wmax > 40 ? 40 : wmax);
+        } else {
+            restart(s_f0_);
+        }
+        reacq_ = 0;
+        epochs_ = 0;
+    }
+    uint8_t xs() const { return xs_; }
     /* true once per release (the tracker reports it, then may reuse the slot) */
     bool take_release() {
         if (!released_ || rel_reported_) return false;
@@ -645,11 +699,16 @@ class Channel {
     /* search */
     float cell_[kSearchCode * kSearchDop * 3]{};
     int s_cell_{0}, s_k_{0};
-    int s_off_{0};      /* half chips currently applied */
-    int s_base_{0};     /* centre of the current window, half chips from the start position */
-    uint8_t s_win_{0};  /* aided search: window index (0, +1, -1, +2, -2 ...) */
-    uint8_t s_wmax_{0}; /* aided search: windows either side (0: the local search of a lost channel) */
-    bool aided_{false}; /* started by start_aided(): a newly risen satellite, searched around a prediction */
+    int s_off_{0};       /* half chips currently applied */
+    int s_base_{0};      /* centre of the current window, half chips from the start position */
+    uint8_t s_win_{0};   /* aided search: window index (0, +1, -1, +2, -2 ...) */
+    uint8_t s_wmax_{0};  /* aided search: windows either side (0: the local search of a lost channel) */
+    uint8_t s_wstep_{0}; /* window index step (lost() sets 1; the hand-over offset search: its channel count) */
+    uint8_t s_ndop_{0};  /* Doppler bins per window (lost() sets kSearchDop; the offset search: 1) */
+    uint8_t xs_{0};      /* hand-over offset search: 1 searching, 2 hit (waiting for lock) */
+    int16_t xs_off_{0};  /* the hit, half chips from the start position */
+    float xs_acc_{0};    /* + the code the loops moved since the hit (DLL, carrier aiding off the start Doppler), half chips */
+    bool aided_{false};  /* started by start_aided(): a newly risen satellite, searched around a prediction */
     float s_f0_{0};
     uint32_t s_ms_{0};
     uint16_t sweeps_{0}; /* diagnostics */
@@ -671,7 +730,7 @@ class Channel {
     uint8_t hf_hits_{0};
     uint16_t half_fixes_{0};
 
-    void restart(float doppler_hz) {
+    __attribute__((noinline)) void restart(float doppler_hz) {
         freq_ = freq_int_ = good_freq_ = doppler_hz;
         p2_avg_ = 0;
         dop_sum_ = 0;
@@ -744,6 +803,10 @@ class Channel {
     void bit_epoch(float ip, bool valid, Shared* sh, int ch);
     void got_bit(int b, Shared* sh, int ch);
     void lost();
+    __attribute__((noinline)) void xs_track() { /* the code the loops moved since an offset-search hit */
+        xs_acc_ += 2e-3f * (code_corr_ + static_cast<float>(kChip / kL1) * (freq_ - s_f0_));
+    }
+    int xs_acc_half() const { return static_cast<int>(xs_acc_ + (xs_acc_ < 0 ? -0.5f : 0.5f)); }
 };
 
 /* 60 of the 64 blocks of a buffer: no half-chip repeat and no epoch end in
@@ -940,12 +1003,13 @@ inline void Channel::epoch_end(Shared* sh, int ch) {
     } else {
         for (auto& a : acc_) a = 0;
         track_epoch(ip, qp, id, qd, valid, sh, ch);
+        if (xs_ == 2) xs_track();
     }
     epochs_++;
     if (lp_.verify_timeout_ms && !ever_ok_) {
         if (verified_ || bit_edge_ >= 0)
             ever_ok_ = true;
-        else if (epochs_ > lp_.verify_timeout_ms && state_ != TRK_IDLE && state_ != TRK_FAILED) {
+        else if (!xs_ && epochs_ > lp_.verify_timeout_ms && state_ != TRK_IDLE && state_ != TRK_FAILED) {
             state_ = TRK_FAILED; /* a false detection must not hold a channel */
             released_ = true;
         }
@@ -960,7 +1024,7 @@ inline void Channel::epoch_skipped(Shared* sh, int ch) {
     if (state_ == TRK_TRACK) track_ms_++;
 }
 
-inline void Channel::lost() {
+__attribute__((noinline)) inline void Channel::lost() {
     if (++reacq_ == 0) reacq_ = 255;
     state_ = TRK_SEARCH;
     el_all_ = true;
@@ -974,6 +1038,10 @@ inline void Channel::lost() {
     s_off_ = 0;
     s_base_ = 0;
     s_win_ = s_wmax_ = 0;
+    s_wstep_ = 1;
+    s_ndop_ = kSearchDop;
+    if (xs_ == 2) xs_off_ = static_cast<int16_t>(xs_off_ + xs_acc_half()); /* the local search's reference */
+    xs_ = xs_ >= 2 ? 3 : 0;                                                /* an offset-search hit that did not lock: searched locally, still unreported */
     s_ms_ = 0;
     for (auto& c : cell_) c = 0;
     /* first cell: code offset -6 half chips, Doppler f0 - 500 */
@@ -994,13 +1062,13 @@ inline void Channel::search_epoch(float ie, float qe, float ip, float qp, float 
     }
     if (++s_k_ <= kSearchK) return;
     s_k_ = 0;
-    const int ncell = kSearchCode * kSearchDop;
+    const int ncell = kSearchCode * s_ndop_;
     if (++s_cell_ < ncell) {
         const int ci = s_cell_ % kSearchCode, di = s_cell_ / kSearchCode;
         const int off = s_base_ + (ci - kSearchCode / 2) * 3;
         shift_code(off - s_off_);
         s_off_ = off;
-        freq_ = s_f0_ + (di - kSearchDop / 2) * 250.0f;
+        freq_ = s_f0_ + (di - s_ndop_ / 2) * 250.0f;
         set_nco();
         return;
     }
@@ -1018,10 +1086,15 @@ inline void Channel::search_epoch(float ie, float qe, float ip, float qp, float 
         const int off = s_base_ + (ci - kSearchCode / 2) * 3 + (tap == 0 ? 1 : tap == 2 ? -1
                                                                                         : 0); /* early tap = replica + 1 half chip */
         shift_code(off - s_off_);
-        restart(s_f0_ + (di - kSearchDop / 2) * 250.0f);
+        if (xs_) { /* the offset from the start position (a local search after a hit adds to it) */
+            xs_off_ = static_cast<int16_t>(xs_ == 3 ? xs_off_ + off : off);
+            xs_acc_ = 0;
+            xs_ = 2;
+        }
+        restart(s_f0_ + (di - s_ndop_ / 2) * 250.0f);
         return;
     }
-    if (s_ms_ > kSearchGiveUpMs) {
+    if (s_ms_ > kSearchGiveUpMs && xs_ != 1) { /* the offset search goes on: weak signals need several passes */
         state_ = TRK_FAILED;
         return;
     }
@@ -1031,14 +1104,21 @@ inline void Channel::search_epoch(float ie, float qe, float ip, float qp, float 
     for (auto& c : cell_) c = 0;
     s_cell_ = 0;
     if (s_wmax_) {
-        if (++s_win_ > 2 * s_wmax_) s_win_ = 0;
+        const int nwin = 2 * s_wmax_ + 1;
+        /* the offset search: its share of the windows done at the hand-over Doppler
+         * (strong signals: ~4 s with 3 channels), then +-250 Hz as well (weak ones,
+         * whose search Doppler is less exact) */
+        if (xs_ && s_ndop_ == 1 && static_cast<int>(sweeps_) * s_wstep_ >= nwin) s_ndop_ = 3;
+        int w = s_win_ + s_wstep_;
+        if (w >= nwin) w -= nwin;
+        s_win_ = static_cast<uint8_t>(w);
         const int k = (s_win_ + 1) / 2;
         s_base_ = (s_win_ & 1u) ? k * kSearchCode * 3 : -k * kSearchCode * 3;
     }
     const int off = s_base_ + (0 - kSearchCode / 2) * 3;
     shift_code(off - s_off_);
     s_off_ = off;
-    freq_ = s_f0_ - 500.0f;
+    freq_ = s_f0_ - (s_ndop_ / 2) * 250.0f;
     set_nco();
 }
 
@@ -1446,8 +1526,11 @@ class Tracker {
      * into the channels; the rest wait as spares and take channels that fail
      * later (released unverified detections, or satellites given up). Code
      * phases refer to sample `at`; `now` is the next buffer's first sample.
-     * Returns the number of detections. */
-    int handover(const gps_acq::Result* res, uint32_t prn_mask, uint64_t at, uint64_t now) {
+     * Returns the number of detections. `xs`: `at` is known to ~1 ms only (the
+     * result came from the acquisition image across an image switch): the
+     * started channels search the whole code period for the offset they all
+     * share (Channel::start_xsearch). */
+    int handover(const gps_acq::Result* res, uint32_t prn_mask, uint64_t at, uint64_t now, bool xs = false) {
         int order[32];
         int n = 0;
         for (int i = 0; i < 32; i++)
@@ -1461,11 +1544,17 @@ class Tracker {
         reset(now);
         n_spare_ = next_spare_ = 0;
         spare_at_ = at;
+        xs_on_ = xs && n > 0;
+        xs_known_ = false;
+        xs_off_ = 0;
+        xs_t0_ = now;
+        const int n_on = n < max_active_ ? n : max_active_;
         for (int k = 0; k < n; k++) {
             const gps_acq::Result& r = res[order[k]];
-            if (k < max_active_)
-                start(order[k] + 1, r.code_phase, r.doppler, at, now);
-            else {
+            if (k < max_active_) {
+                const int slot = start(order[k] + 1, r.code_phase, r.doppler, at, now);
+                if (xs_on_ && slot >= 0) ch_[slot].start_xsearch(k, n_on);
+            } else {
                 Spare& s = spare_[n_spare_++];
                 s.prn = static_cast<uint8_t>(order[k] + 1);
                 s.code_phase = r.code_phase;
@@ -1514,6 +1603,7 @@ class Tracker {
             sh_->missed++;
         }
         next_ = at;
+        if (xs_on_ && !xs_known_) xs_step(at);
         /* measurements once per second, at the first buffer of each second */
         if (at / kFs != last_meas_s_) {
             last_meas_s_ = at / kFs;
@@ -1631,6 +1721,29 @@ class Tracker {
     Spare spare_[32]{};
     uint8_t n_spare_{0}, next_spare_{0};
     uint64_t spare_at_{0};
+    /* hand-over across an image switch: the code offset common to all channels */
+    bool xs_on_{false}, xs_known_{false};
+    int xs_off_{0}; /* half chips, added to the spares' code phases once known */
+    uint64_t xs_t0_{0};
+    /* a channel locked on its offset-search hit: the others searching jump there */
+    __attribute__((noinline)) void xs_step(uint64_t at) {
+        for (int i = 0; i < kMaxCh; i++) {
+            int off;
+            if (!ch_[i].xs_locked(&off)) continue;
+            xs_known_ = true;
+            xs_off_ = off;
+            /* each channel's code also drifts by its own Doppler error (up to ~300 Hz:
+             * 0.39 half chips per s): beyond ~4 s, search that far around the offset */
+            const uint32_t ms = static_cast<uint32_t>((at - xs_t0_) >> 11); /* 2048 samples per ms */
+            const int wmax = ms < 4000u ? 0 : static_cast<int>((ms * 39u / 100000u) / (Channel::kSearchCode * 3)) + 1;
+            for (int j = 0; j < kMaxCh; j++)
+                if (j != i && ch_[j].xs_searching()) ch_[j].xs_jump(off, wmax);
+            sh_->xs_off = static_cast<int16_t>(off);
+            sh_->xs_found = 1;
+            sh_->xs_ms = ms;
+            return;
+        }
+    }
 
     /* once a second: report released channels, then give failed channels to
      * the spare detections (their code phase propagated from the search) */
@@ -1657,7 +1770,10 @@ class Tracker {
             for (int i = 0; i < max_active_ && free < 0; i++)
                 if (ch_[i].state() == TRK_IDLE || ch_[i].state() == TRK_FAILED) free = i;
             if (free < 0) break;
-            start(s.prn, s.code_phase, s.doppler, spare_at_, now); /* frees Galileo channels if the pool is full */
+            /* frees Galileo channels if the pool is full; after an image switch the
+             * common code offset once known, else the spare joins the offset search */
+            const int slot = start(s.prn, s.code_phase + 0.5 * xs_off_, s.doppler, spare_at_, now);
+            if (slot >= 0 && xs_on_ && !xs_known_) ch_[slot].start_xsearch(0, 1);
             next_spare_++;
             sh_->refills = static_cast<uint16_t>(sh_->refills + 1);
         }

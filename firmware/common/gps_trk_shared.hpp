@@ -48,14 +48,14 @@ enum ChState : uint8_t {
 };
 
 enum ChFlags : uint8_t {
-    F_PLL = 1,        /* phase lock indicator good */
-    F_BIT = 2,        /* bit sync found */
-    F_FRAME = 4,      /* subframe sync confirmed: transmit time (TOW) known */
-    F_VERIFIED = 8,   /* PLL lock and C/N0 >= 28 dB-Hz for a second: a real signal */
-    F_MEAS_GAP = 16,  /* (measurement) a missed DMA buffer in the last second */
-    F_EVER = 32,      /* verified (or bit-synced) at least once since the hand-over: a real satellite */
-    F_RELEASED = 64,  /* never verified within the verification timeout: channel given up (detection only) */
-    F_AIDED = 128,    /* started by the aided search for a newly risen satellite */
+    F_PLL = 1,       /* phase lock indicator good */
+    F_BIT = 2,       /* bit sync found */
+    F_FRAME = 4,     /* subframe sync confirmed: transmit time (TOW) known */
+    F_VERIFIED = 8,  /* PLL lock and C/N0 >= 28 dB-Hz for a second: a real signal */
+    F_MEAS_GAP = 16, /* (measurement) a missed DMA buffer in the last second */
+    F_EVER = 32,     /* verified (or bit-synced) at least once since the hand-over: a real satellite */
+    F_RELEASED = 64, /* never verified within the verification timeout: channel given up (detection only) */
+    F_AIDED = 128,   /* started by the aided search for a newly risen satellite */
 };
 
 struct ChInfo {
@@ -64,19 +64,19 @@ struct ChInfo {
     uint8_t flags; /* ChFlags */
     uint8_t reacq; /* re-acquisitions so far */
     uint16_t cn0_x10;
-    uint8_t mode;  /* loop mode: 0 FLL pull-in, 1 PLL wide + FLL assist, 2 PLL narrow, 3 search */
+    uint8_t mode;    /* loop mode: 0 FLL pull-in, 1 PLL wide + FLL assist, 2 PLL narrow, 3 search, 4 hand-over offset search */
     int8_t pld_x100; /* PLL lock indicator cos(2 phi), x100 (smoothed) */
     float doppler_hz;
-    uint32_t lock_ms;      /* time in TRK_TRACK since the last (re)start */
-    uint32_t subframes;    /* parity-good subframes */
-    uint32_t parity_errs;  /* words that failed parity while in a frame */
-    uint32_t tow_s;        /* last decoded TOW (start of a subframe), s of week; valid with F_FRAME */
-    uint32_t bits;         /* data bits decided since bit sync */
-    uint32_t words_ok;     /* words that passed parity */
-    uint16_t code_x64;     /* prompt code phase, chips x 64 (0..65471) */
-    uint16_t sweeps;       /* search sweeps since the last loss of lock */
-    float code_err;        /* last DLL discriminator, chips (code lock: near 0) */
-    uint16_t half_fixes;   /* +-500 Hz false locks corrected (the carrier turning half a cycle per ms) */
+    uint32_t lock_ms;     /* time in TRK_TRACK since the last (re)start */
+    uint32_t subframes;   /* parity-good subframes */
+    uint32_t parity_errs; /* words that failed parity while in a frame */
+    uint32_t tow_s;       /* last decoded TOW (start of a subframe), s of week; valid with F_FRAME */
+    uint32_t bits;        /* data bits decided since bit sync */
+    uint32_t words_ok;    /* words that passed parity */
+    uint16_t code_x64;    /* prompt code phase, chips x 64 (0..65471) */
+    uint16_t sweeps;      /* search sweeps since the last loss of lock */
+    float code_err;       /* last DLL discriminator, chips (code lock: near 0) */
+    uint16_t half_fixes;  /* +-500 Hz false locks corrected (the carrier turning half a cycle per ms) */
     uint16_t pad2;
 };
 
@@ -139,6 +139,13 @@ struct Shared {
     uint16_t rel_ms[8]; /* time from the start of that channel to the release, ms */
     /* searches for newly risen satellites (app predictions while tracking) */
     uint16_t aided_starts;
+    /* hand-over across an image switch: the code offset common to all channels
+     * (half chips from the predicted code phase; valid when xs_found) and the
+     * ms from the hand-over until a channel locked on it */
+    int16_t xs_off;
+    uint8_t xs_found;
+    uint8_t xs_pad;
+    uint32_t xs_ms;
 };
 
 }  // namespace gps_trk
