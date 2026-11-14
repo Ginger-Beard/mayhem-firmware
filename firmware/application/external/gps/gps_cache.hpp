@@ -80,7 +80,7 @@ inline bool eph_air_parse(const char* s, uint8_t* prn, int32_t* week, uint8_t* s
         if (nd != 6) return false;
         w[k] = x;
     }
-    if (v[0] < 1 || v[0] > 32 || v[2] < 1 || v[2] > 3) return false;
+    if (v[0] < 1 || v[0] > 32 || v[2] < 1 || v[2] > 4) return false; /* 4: SF4 page 18 (ionosphere) */
     *prn = static_cast<uint8_t>(v[0]);
     *week = static_cast<int32_t>(v[1]);
     *sfid = static_cast<uint8_t>(v[2]);

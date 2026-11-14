@@ -31,6 +31,8 @@ void auto_reset(AutoState& a) {
     /* everything, the ring counters too: each Get fix starts new tracking loops,
      * whose shared block starts counting from 0 again */
     std::memset(static_cast<void*>(&a), 0, sizeof(a));
+    a.pvt.tropo = 2;
+    a.pvt.mask_deg = 5.0f;
 }
 
 namespace {
@@ -110,6 +112,18 @@ int auto_take_subframe(AutoState& a, const gps_trk::SubframeSlot& s, int32_t wee
             a.alm.have |= 1u << (sv - 1);
         }
         return 0;
+    }
+    if (id == 4) { /* page 18: the ionosphere coefficients (checked by its SV ID) */
+        nav::Iono io;
+        if (nav::decode_iono_page18(w, io)) {
+            const bool changed = !a.ion_have || std::memcmp(&io, &a.ion, sizeof(io)) != 0;
+            a.ion = io;
+            a.ion_have = 1;
+            a.ion_prn = s.prn;
+            a.ion_tow = nav::sf_tow_start(w);
+            std::memcpy(a.ion_sf, w, sizeof(a.ion_sf));
+            if (changed) a.ion_fresh = 1;
+        }
     }
     if (id == 5 && page == 25) {
         uint32_t toa, wna;

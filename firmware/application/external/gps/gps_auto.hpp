@@ -38,6 +38,7 @@
 
 #include "gps_orbit.hpp"
 #include "gps_pvt.hpp"
+#include "gps_nav.hpp"
 #include "gps_trk_shared.hpp"
 
 namespace ui::external_app::gps {
@@ -78,10 +79,18 @@ struct AutoState {
     int32_t week;       /* full GPS week from subframe 1, 0 unknown */
     uint32_t tow_s;     /* latest subframe start TOW */
     uint64_t tow_at_sample; /* not used by the solver: display only */
+    /* broadcast ionosphere (SF4 page 18) decoded off the air */
+    nav::Iono ion;
+    uint8_t ion_have;  /* decoded this run */
+    uint8_t ion_fresh; /* not yet written to EPH_AIR.TXT */
+    uint8_t ion_prn;
+    uint8_t pad2;
+    uint32_t ion_tow;  /* start of the subframe that carried it */
+    uint32_t ion_sf[10];
     PvtWork pvt;
 };
 
-void auto_reset(AutoState& a);
+void auto_reset(AutoState& a); /* also the PVT's correction defaults (troposphere model, 5 deg mask) */
 
 /* One parity-checked subframe. Updates week / TOW / almanac pages; when it
  * completes a satellite's subframes 1-3 the ephemeris replaces table[prn-1]

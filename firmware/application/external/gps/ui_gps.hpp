@@ -212,6 +212,8 @@ struct GpsScratch {
     PvtSolution pvt;     /* the solver thread's output */
     PvtSolution pvt_fix; /* the last accepted one (shown, saved) */
     uint32_t cache_sf[3][10]; /* the loader assembles an EPH_AIR.TXT record here */
+    nav::Iono iono_cache;     /* ionosphere from EPH_AIR.TXT (an "S prn week 4 ..." line) */
+    double iono_cache_t{0};   /* GPS s of the subframe that carried it, 0 none */
     uint8_t cache_have;
     LogRing log; /* diagnostics log rows waiting for the card (ui_gps_log.cpp) */
 };
@@ -764,6 +766,12 @@ class GpsView : public View {
     uint8_t aided_tick_{0};
     uint8_t aided_wait_[32]{};
     void auto_aided_step();
+    /* the ionosphere for the next PVT: decoded this run, else cached within
+     * kIonoMaxAgeS, else none (never stale or zero-filled values) */
+    static constexpr double kIonoMaxAgeS = 7.0 * 86400.0;
+    uint8_t iono_src_{0}; /* 0 none, 1 off the air, 2 cached */
+    uint8_t iono_logged_{0xFF};
+    void apply_iono();
     void log_aided(int prn, float el, double code, double dop, double clk, int windows, uint32_t age_ms, bool eph);
     uint16_t log_rel_seen_{0}; /* tracker releases already logged */
     int32_t status_dt_ms_{0}; /* the last search's snapshot A -> B interval */
@@ -793,6 +801,7 @@ class GpsView : public View {
     void log_screen();
     void log_results(const gps_rx::Result* r, uint8_t k_ms);
     void log_handover();
+    void log_iono(); /* the ionosphere source in use changed (IONO row) */
     void log_clock(const char* src);                  /* GPS time known / its offset to the RTC moved */
     void log_clock_set(double rtc_before, int64_t t); /* "Set clock" wrote the RTC */
     void log_subframes();

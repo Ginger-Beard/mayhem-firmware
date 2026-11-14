@@ -140,7 +140,12 @@ Autonomous skips the second confirmation snapshot: each detection goes
 straight to a tracking channel (Heard shows it yellow with "?" until then),
 and the loops verify it: a channel that is not phase locked at 28 dB-Hz for a
 second (or bit-synced) within 10 s is freed ("not verified: freed") and
-given to the next detection. Once there is a fix, satellites rising above
+given to the next detection. Corrections: every fix uses a troposphere model
+(standard atmosphere at the fix's height, "T" after HDOP on the Fix tab) and,
+once known, the broadcast ionosphere model ("T+I"): its coefficients come
+from the satellites (subframe 4 page 18, every 12.5 minutes) and are kept in
+EPH_AIR.TXT for 7 days; until then no ionosphere correction is applied.
+Satellites below 5 degrees are left out while 5 or more stay above. Once there is a fix, satellites rising above
 10 degrees get an aided search (code phase and Doppler predicted from the fix
 and the orbits) in a free channel or one extra search slot ("rising:
 searching" on Heard). The Heard tab shows the tracked satellites:
@@ -231,7 +236,11 @@ file starts with a header line and one "#TYPE,..." line per row type. Types:
   FIX     its result: kind, ok, why (ok / not tried: ... / rejected: ...),
           satellites used, dropped by RAIM, residual m x10, HDOP x10, VDOP x10,
           clock m, time correction ms (snapshot) or TCXO ppb (PVT), lat / lon
-          1e-7 deg, alt m, speed cm/s
+          1e-7 deg, alt m, speed cm/s; PVT also: satellites below the 5 deg
+          mask left out, mean troposphere and ionosphere corrections m x10,
+          ionosphere source (0 none, 1 decoded off the air, 2 cached)
+  IONO    the ionosphere source in use changed: none / air / cache, age of
+          the cached set h, alpha0-3 x1e9, beta0-3
   SCREEN  the Fix tab's rows (joined by |) whenever they change, with the
           tab shown; HEARD the Heard tab's rows likewise
   ERR     card, ring or solver problems (what, detail)

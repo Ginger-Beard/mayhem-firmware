@@ -211,6 +211,25 @@ inline bool decode_almanac_page(const uint32_t w[10], AlmRec& a, int* svid_out) 
     a.valid = 1;
     return true;
 }
+/* SF4 page 18 (SV ID 56): the broadcast ionosphere coefficients (Klobuchar),
+ * IS-GPS-200 table 20-X: alpha s, s/sc, s/sc^2, s/sc^3; beta s, s/sc ... */
+struct Iono {
+    float a[4];
+    float b[4];
+};
+inline bool decode_iono_page18(const uint32_t w[10], Iono& o) {
+    if (sf_id(w) != 4 || field(w, 63, 6) != 56) return false;
+    o.a[0] = static_cast<float>(sfield(w, 69, 8) * std::ldexp(1.0, -30));
+    o.a[1] = static_cast<float>(sfield(w, 77, 8) * std::ldexp(1.0, -27));
+    o.a[2] = static_cast<float>(sfield(w, 91, 8) * std::ldexp(1.0, -24));
+    o.a[3] = static_cast<float>(sfield(w, 99, 8) * std::ldexp(1.0, -24));
+    o.b[0] = static_cast<float>(sfield(w, 107, 8) * std::ldexp(1.0, 11));
+    o.b[1] = static_cast<float>(sfield(w, 121, 8) * std::ldexp(1.0, 14));
+    o.b[2] = static_cast<float>(sfield(w, 129, 8) * std::ldexp(1.0, 16));
+    o.b[3] = static_cast<float>(sfield(w, 137, 8) * std::ldexp(1.0, 16));
+    return true;
+}
+
 /* SF5 page 25 (SV ID 51): toa (s of week) and the 8-bit almanac week. */
 inline bool decode_page25_sf5(const uint32_t w[10], uint32_t* toa, uint32_t* wna8) {
     if (field(w, 63, 6) != 51) return false;
