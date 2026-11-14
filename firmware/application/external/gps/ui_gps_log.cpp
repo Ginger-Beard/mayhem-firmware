@@ -107,6 +107,7 @@ void GpsView::log_header() {
         "#FIX,kind,ok,why,used,dropped,rms_m_x10,hdop_x10,vdop_x10,clock_m,time_corr_ms_or_drift_ppb,lat_e7,lon_e7,alt_m,speed_cm_s",
         "#SCREEN,tab,fix rows 0-10 joined by |",
         "#HEARD,heard rows (status | list)",
+        "#CLK,event (tow / pvt: GPS time in use; set: RTC written by Set clock),gps_minus_rtc_ms,rtc_utc,gps_utc,zone_min",
         "#ERR,what,detail",
     };
     for (const char* h : kHead) log_push(mem_->log, h, std::strlen(h));
@@ -340,6 +341,26 @@ void GpsView::log_results(const gps_rx::Result* r, uint8_t k_ms) {
         if (x.once) f.c(',').u(static_cast<uint32_t>(x.b_metric * 100.0f + 0.5f)).c(',').d(static_cast<int32_t>(std::lround(x.b_doppler))).c(',').u(static_cast<uint32_t>(x.b_code * 1000.0f));
         log_end(f);
     }
+}
+
+void GpsView::log_clock(const char* src) {
+    if (clock_logged_ && std::fabs(gps_off_s_ - clock_logged_off_) < 0.5) return; /* once, then on changes */
+    clock_logged_ = true;
+    clock_logged_off_ = gps_off_s_;
+    if (!log_active()) return;
+    Fmt f = log_row("CLK");
+    f.c(',').s(src).c(',').d(static_cast<int32_t>(std::lround(gps_off_s_ * 1000.0)));
+    f.c(',').u(static_cast<uint32_t>(now_unix())).c(',').u(static_cast<uint32_t>(now_best())).c(',').d(utc_off_min_);
+    log_end(f);
+}
+
+void GpsView::log_clock_set(double rtc_before, int64_t t) {
+    clock_logged_off_ = gps_off_s_;
+    if (!log_active()) return;
+    Fmt f = log_row("CLK");
+    f.s(",set,").d(static_cast<int32_t>(std::lround((static_cast<double>(t) - rtc_before) * 1000.0)));
+    f.c(',').u(static_cast<uint32_t>(rtc_before)).c(',').u(static_cast<uint32_t>(t)).c(',').d(utc_off_min_);
+    log_end(f);
 }
 
 void GpsView::log_handover() {

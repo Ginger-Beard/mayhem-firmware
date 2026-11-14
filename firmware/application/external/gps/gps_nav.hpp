@@ -118,6 +118,12 @@ inline uint32_t sf_tow_start(const uint32_t w[10]) {
     return (t == 0 ? 100799u : t - 1u) * 6u;
 }
 /* full GPS week from the 10-bit week of subframe 1 and a hint (+-512 weeks) */
+/* The week hint from the RTC, never before this firmware's era: an RTC reset to
+ * 2000 (or 1980) would otherwise resolve the 10-bit week 1024 weeks too early.
+ * Right while the RTC is within ~9.8 years after kMinWeek. */
+constexpr int32_t kMinWeek = 2440; /* 2026-10 */
+inline int32_t week_floor(int32_t w) { return w < kMinWeek ? kMinWeek : w; }
+
 inline int32_t full_week(uint32_t wn10, int32_t week_hint) {
     int32_t wn = static_cast<int32_t>(wn10 & 0x3FFu);
     if (week_hint > 0) {

@@ -346,6 +346,7 @@ class FixView : public View {
     Checkbox check_log_{{UI_POS_X(12), 0}, 3, "Log", true};
     Button button_fix_;
     Button button_save_;
+    Button button_clock_; /* "Set clock": the PortaPack RTC from GPS time, only when pressed */
     bool fix_running_shown_{false}; /* button_fix_ shows "Stop" */
     const char* save_msg_{nullptr}; /* bottom row after "Save pos" */
     Color save_color_{Color::white()};
@@ -413,6 +414,7 @@ struct FollowCtx {
     PassTrack track{};
     Observer obs{};
     int32_t utc_off_min{0};
+    double clock_corr_s{0}; /* GPS time - RTC when the GPS app knew it (0 otherwise) */
     uint8_t n_dl{0};
     SatFreq dl[kMaxDl]{}; /* this satellite's downlinks from SATFREQ.TXT */
 };
@@ -713,6 +715,16 @@ class GpsView : public View {
     /* GPS time: from the satellites once the tracking loops decoded a TOW
      * (the clock and Zone are then not needed), else the RTC and Zone */
     double now_gps() const { return unix_to_gps(now_unix()) + (gps_time_ok_ ? gps_off_s_ : 0.0); }
+    /* UTC for everything the app computes (passes, sky, search, Follow): the RTC
+     * corrected by GPS time once the satellites gave it, so a wrong clock cannot
+     * block a fix or the predictions. The RTC itself is written only by "Set clock". */
+    double now_best() const { return now_unix() + (gps_time_ok_ ? gps_off_s_ : 0.0); }
+    void set_clock_from_gps();  /* "Set clock" (Fix tab): the RTC from GPS time, Zone applied */
+    void clock_step();          /* frame handler: writes the RTC at the next second boundary */
+    bool clock_set_pending_{false};
+    int8_t clock_msg_{0};       /* Fix tab: 1 clock set, -1 no GPS time yet */
+    bool clock_logged_{false};  /* the GPS - RTC offset logged once (then on changes > 1 s) */
+    double clock_logged_off_{0};
     double gps_off_s_{0};   /* GPS time from the satellites - RTC-based GPS time */
     bool gps_time_ok_{false};
 
@@ -762,6 +774,8 @@ class GpsView : public View {
     void log_screen();
     void log_results(const gps_rx::Result* r, uint8_t k_ms);
     void log_handover();
+    void log_clock(const char* src);                  /* GPS time known / its offset to the RTC moved */
+    void log_clock_set(double rtc_before, int64_t t); /* "Set clock" wrote the RTC */
     void log_subframes();
     void log_meas();
     void log_eph_event(const char* what, int prn);

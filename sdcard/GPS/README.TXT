@@ -127,7 +127,12 @@ ephemerides" while it tracks (each satellite needs about 30 s of clean signal),
 then "PRECISE" (a few metres; "Err est." is an estimate). Keep it outdoors with
 open sky and the active antenna powered. Stop works at any time.
 While it tracks, the app takes GPS time from the satellites (the clock and Zone
-are not needed). Every decoded ephemeris is appended to /GPS/EPH_AIR.TXT (three
+are not needed): from then on passes, the sky and the search use GPS time, so a
+wrong clock cannot block a fix or the predictions. The Fix tab shows it with
+the clock's error ("clock +0.4s" = the PortaPack clock is 0.4 s ahead).
+"Set clock" (Fix tab, top right) writes the PortaPack clock from GPS time with
+your Zone applied, only when you press it (the app never changes the clock by
+itself); without GPS time yet it says so and changes nothing. Every decoded ephemeris is appended to /GPS/EPH_AIR.TXT (three
 lines each; the file restarts when it passes 48 KB); within about 4 hours the
 next start is precise at once. The app never writes EPHEM.RNX: a file you copy
 there is read as before, and per satellite the record closest to now is used.
@@ -194,6 +199,10 @@ file starts with a header line and one "#TYPE,..." line per row type. Types:
           off the prediction) and, when rejected that way, what the 2nd
           snapshot found (peak/mean x100, Doppler Hz, code phase x1000)
   HO      hand-over to tracking: count, age of the search result ms, PRNs
+  CLK     GPS time: event (tow: from the first decoded time, pvt: from a fix,
+          logged once and again when the offset moves by 0.5 s or more; set:
+          the RTC written by "Set clock"), GPS - RTC ms (set: the step written),
+          RTC UTC s, GPS UTC s (set: the value written), Zone minutes
   REL     a channel freed because its detection never verified (Autonomous):
           PRN, ms from its start, releases so far, spare detections started
           in freed channels so far

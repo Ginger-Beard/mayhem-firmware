@@ -230,7 +230,7 @@ void FollowView::setup() {
     tick_ = rtc_time::signal_tick_second += [this]() {
         rtc::RTC raw;
         rtcGetTime(&RTCD1, &raw);
-        base_unix_ = static_cast<double>(rtc_time::rtcToUnixUTC(raw)) - ctx_->utc_off_min * 60.0;
+        base_unix_ = static_cast<double>(rtc_time::rtcToUnixUTC(raw)) - ctx_->utc_off_min * 60.0 + ctx_->clock_corr_s;
         base_tick_ = chTimeNow();
         show_antenna();
     };
@@ -270,7 +270,7 @@ double FollowView::now_unix() const {
     if (base_tick_ == 0) {
         rtc::RTC raw;
         rtcGetTime(&RTCD1, &raw);
-        return static_cast<double>(rtc_time::rtcToUnixUTC(raw)) - ctx_->utc_off_min * 60.0;
+        return static_cast<double>(rtc_time::rtcToUnixUTC(raw)) - ctx_->utc_off_min * 60.0 + ctx_->clock_corr_s;
     }
     double frac = static_cast<double>(chTimeNow() - base_tick_) / CH_FREQUENCY;
     if (frac > 1.5) frac = 1.5; /* a missed tick: do not run away */
