@@ -94,9 +94,25 @@ constexpr uint8_t kDriftMin = 6;            /* drift: seen in 6 passes at least,
 constexpr uint8_t kDriftPts = 2;            /* centre range >= 2 points and >= the emission's width, */
 constexpr uint8_t kDriftNetPts16 = 24;      /* first to last >= 1.5 points and >= 3/4 of the range, */
 constexpr uint8_t kDriftStepPts16 = 24;     /* no step between sightings over 1.5 points */
-constexpr uint8_t kEmitDropMiss = 6;        /* an emitter goes after 6 passes unseen */
+constexpr uint8_t kEmitDropMiss = 6;        /* an emitter goes after 6 passes unseen (~75 s at the measured 12.5 s a pass) */
 constexpr int16_t kHumMinCdb = 10 * 100;    /* hum check candidates: steady, >= 10 dB over the floor */
-constexpr uint16_t kHumRecheckPasses = 100; /* a checked emitter again after 100 passes (~10 min) */
+constexpr uint16_t kHumRecheckPasses = 48;  /* a checked emitter again after 48 passes (~10 min at 12.5 s a pass; was 100 for ~6 s) */
+/* Emitter table: per frequency group (HF, 30-300 MHz, 300-1000 MHz, above
+ * 1 GHz; only the groups the ranges reach count) a reserve of
+ * kMaxEmitters / (2 x groups) slots that the other groups cannot take; the
+ * rest is shared. A newcomer in a group at or over its reserve may take the
+ * place of the weakest unreported emitter of its group when it is
+ * kEmitReplaceCdb stronger. (Before: the windows run upwards and entries seen
+ * in this pass could not be evicted, so nothing above ~185 MHz or in HF got
+ * a slot in a busy place.) */
+constexpr int16_t kEmitReplaceCdb = 300;
+constexpr uint32_t kFmLoKhz = 87500;       /* FM broadcast: never an emitter (licensed carriers on a 100 / 200 kHz raster; */
+constexpr uint32_t kFmHiKhz = 108000;      /* they starved the table and every hum check) */
+constexpr uint32_t kOwnClockHz = 10000000; /* the receiver's own clock lines: lines on multiples of 10 MHz (30 / 40 / 80 / 120 MHz seen) */
+constexpr uint8_t kOwnClockMaxW = 5;       /* ... a line: a run at most 5 points wide (a strong CW's skirt), centre within one point of the multiple */
+constexpr uint8_t kCombContPct = 50;       /* a comb is continuous (Comb) only when seen in >= 50 % of its passes when listed */
+constexpr uint16_t kRasterTolMinHz = 1000; /* teeth on a 100 kHz grid: within max(0.3 point, 1 kHz), at most 25 kHz, */
+constexpr uint16_t kRasterTolMaxHz = 25000; /* 5 of 6 of them (and 5 at least) */
 constexpr uint8_t kRiseCdbX2 = 8;           /* floor rise: >= 4 dB (0.5 dB units) ... */
 constexpr uint8_t kRisePasses = 2;          /* ... in 2 passes running (adjacent windows) */
 constexpr uint8_t kRisePassesOne = 3;       /* ... in 3 passes running (one window alone) */
@@ -170,9 +186,10 @@ struct ScanEvent {
     uint16_t count;    /* comb: teeth; floor: windows; hum: harmonics over the bar; drift/steady/burst: passes seen */
     uint16_t passes;   /* passes since first seen */
     int16_t level_cdb; /* over the floor (comb: mean tooth; floor: rise) */
-    uint8_t duty;      /* % of looks (comb pulsed: of passes) */
-    uint8_t width_pts; /* emitters: widest run, points */
-    uint32_t res_hz;   /* the range's point spacing */
+    uint8_t duty;      /* emitters: % of looks in the last window; combs: % of passes seen since first seen (presence) */
+    uint8_t width_pts;   /* emitters: widest run, points */
+    uint32_t res_hz;     /* the range's point spacing */
+    uint32_t anchor_khz; /* comb: a tooth (lo..hi is the extent; Track tunes to the tooth nearest the centre) */
 };
 
 class ScanEngine {
@@ -181,7 +198,7 @@ class ScanEngine {
     static constexpr size_t kMaxPoints = 320;
     static constexpr size_t kMaxLooks = 8;
     static constexpr size_t kMaxWindows = 256;
-    static constexpr size_t kMaxEmitters = 32;
+    static constexpr size_t kMaxEmitters = 48; /* 32 until 2026-11-14 (M4 lent RAM: the map's part, see scan_memory) */
     static constexpr size_t kMaxCombs = 8;
     static constexpr size_t kMaxFloors = 4;
     static constexpr size_t kMaxLines = 40;
@@ -230,8 +247,18 @@ class ScanEngine {
      * or false. Results by the same uid. */
     bool hum_candidate(uint8_t& uid, uint32_t& f_khz, uint32_t& width_hz) const;
     void hum_result(uint8_t uid, const sigdet::HumVerdict& v);
+    /* A listed finding as it stands now, as an SE_DROP event (rows written
+     * without an event in hand: class change, log stop). False if the uid is
+     * not listed. */
+    bool describe(uint8_t uid, ScanEvent& out) const;
 
     uint32_t pass() const { return pass_; }
+    /* Floor rises not followed for want of a slot (kMaxFloors), and new
+     * emitters not taken (table full, no slot they may take). */
+    uint32_t floor_full() const { return floor_full_; }
+    uint32_t emit_full() const { return emit_full_; }
+    /* FM broadcast or the receiver's own clock line: never an emitter. */
+    bool known_carrier(uint32_t f10, uint32_t width_pts, uint32_t res_hz) const;
     uint16_t floor_u8(size_t w) const { return w < nwin_ ? floor_[w] : 0; }
     uint16_t base_u8(size_t w) const { return w < nwin_ ? base_[w] : 0; }
 
@@ -308,7 +335,9 @@ class ScanEngine {
         uint8_t level;
         uint8_t uid; /* 0 = free */
         uint8_t range;
+        uint8_t places;  /* grid places of the widest one-window fit (spacing precision) */
         bool pulsed, reported, clock, upd;
+        bool grid100;    /* a window's teeth sat on a 100 kHz grid (a raster's channels, or round clock lines) */
     };
     struct Floor {
         uint16_t w_lo, w_hi;
@@ -346,6 +375,8 @@ class ScanEngine {
     Emitter em_[kMaxEmitters]{};
     Comb comb_[kMaxCombs]{};
     Floor fl_[kMaxFloors]{};
+    uint8_t groups_{0}; /* bit g: a range reaches frequency group g (emitter reserve) */
+    uint32_t floor_full_{0}, emit_full_{0};
 
     /* Last window */
     uint8_t piece_[kPieces]{};
@@ -365,6 +396,8 @@ class ScanEngine {
     size_t find_lines(Line* out, bool pulsed) const;
     void window_comb();
     void emitters_from_runs();
+    Emitter* emitter_slot(uint32_t f10, int16_t level);
+    uint16_t comb_on_grid() const;
     bool comb_clock(const Comb& c) const;
     bool on_comb(uint32_t f10, uint8_t range) const;
     void close_pass();
@@ -373,6 +406,9 @@ class ScanEngine {
     uint32_t f10_of(uint32_t p16) const;
     uint32_t khz_of(uint32_t p16) const { return (f10_of(p16) + 50) / 100; }
     void emit_emitter(uint8_t ev, uint8_t type, uint8_t conf, const Emitter& e);
+    void fill_emitter(uint8_t type, uint8_t conf, const Emitter& e, ScanEvent& s) const;
+    void comb_event(const Comb& c, ScanEvent& s) const;
+    void floor_event(const Floor& f, ScanEvent& s) const;
     void emit(const ScanEvent& e) {
         if (notify_) notify_(ctx_, e);
     }
