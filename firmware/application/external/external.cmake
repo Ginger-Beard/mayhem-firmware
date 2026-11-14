@@ -450,6 +450,7 @@ set(EXTCPPSRC
 	external/signature_detect/sigdet_demo.cpp
 	external/signature_detect/sigdet_esp.cpp
 	external/signature_detect/sigdet_rf.cpp
+	external/signature_detect/sigdet_scan.cpp
 	external/signature_detect/sigdet_pattern.cpp
 	external/signature_detect/sigdet_sig.cpp
 	external/signature_detect/sigdet_survey.cpp

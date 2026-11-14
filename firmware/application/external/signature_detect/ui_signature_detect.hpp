@@ -188,6 +188,7 @@ class SignatureDetectView : public View {
     static constexpr uint8_t kDid = 0xFB;     /* phase_band_ of a DJI DroneID dwell */
     static constexpr uint8_t kTrack = 0xFA;   /* phase_band_ while the track view is open: the cycle is paused */
     static constexpr uint8_t kZw = 0xF9;      /* phase_band_ of an FSK dwell (PSDT MODE_FSK; Z-Wave and the class's FSK rules) */
+    static constexpr uint8_t kScan = 0xF8;    /* phase_band_ of an interference scan window (a class with SCAN lines) */
     static constexpr uint8_t kSetupBands = 6;
 
     struct BandStat {
@@ -318,6 +319,17 @@ class SignatureDetectView : public View {
      * (rf_memory): no M0 heap. Sweeps pause while a map is open (pause_rf). */
     spec_an::Sweep* sweep_{nullptr};
     RfEngine::Work* work_{nullptr};
+    /* Interference scan (a class with SCAN lines, sigdet_scan.hpp): the
+     * engine lives in the map's part of PSDT's lent RAM (a map or the track
+     * view takes it back: the scan starts again afterwards), its per-window
+     * work in the RF engine's arrays, which a scan class does not use. */
+    ScanEngine* scan_{nullptr};
+    uint16_t scan_w_{0};                        /* window being swept / next */
+    uint8_t scan_range_{0xFF};                  /* range of the window before (a range change switches the sample rate) */
+    uint32_t scan_t0_{0};                       /* uptime s when the engine started */
+    uint8_t scan_gain_[3]{};                    /* lna, vga, amp the floor baseline belongs to */
+    const ScanEvent* scan_ev_{nullptr};         /* the event being turned into an entity (its NEW row) */
+    uint32_t scan_windows_{0}, scan_passes_{0}; /* this session, for the heartbeat */
     bool rf_paused_{false};
     RfEngine rf_{};
 
@@ -414,6 +426,7 @@ class SignatureDetectView : public View {
     void apply_options();
     void configure(uint8_t extra_flags = 0);
     bool sweeps_on() const;
+    bool scan_on() const;
     bool patterns_on() const;
     bool wifi_on() const;
     bool wifi_due() const;
@@ -424,7 +437,7 @@ class SignatureDetectView : public View {
     void start_droneid();
     void on_droneid(const SignatureDetectDroneIdMessage& message);
     void wifi_raw_line(const SignatureDetectWifiMessage& message, bool odid);
-    bool sweeping() const { return phase_band_ < BAND_COUNT; }
+    bool sweeping() const { return phase_band_ < BAND_COUNT || phase_band_ == kScan; }
     void start_ble(bool from_sweep);
     void start_pattern(bool from_sweep);
     void end_pattern(uint16_t ms);
@@ -438,6 +451,13 @@ class SignatureDetectView : public View {
     void next_phase();
     void start_sweep(uint8_t band);
     void end_sweep();
+    bool scan_memory(bool on);
+    void start_scan();
+    void end_scan();
+    static void on_scan_event(void* ctx, const ScanEvent& e);
+    void scan_event(const ScanEvent& e);
+    void report_scan(Tracker::Event ev, const Entity& e);
+    void scan_row(const char* event, const ScanEvent& e);
     void on_slice(const SpecAnSliceMessage& message);
     void on_rf(RfEngine::Event ev, const RfTrack& t);
     static void on_rf_event(void* ctx, RfEngine::Event ev, const RfTrack& t);

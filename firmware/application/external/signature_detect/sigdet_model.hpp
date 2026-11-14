@@ -76,6 +76,7 @@ enum class Kind : uint8_t {
     Zwave,      // Z-Wave network (sigdet_zwnet.hpp, PSDT MODE_ZWAVE), key mac = 'Z' 'W' home ID; label "ZW <home ID>"
     Sig,        // signature class rule (sigdet_sig.hpp): BLE advert (key: its address) or NB energy (key 00 00 'N' 'B' rule 0); presence only
     Fsk,        // FSK rule (sigdet_sig.hpp, PSDT MODE_FSK): one entity per rule, key mac = 00 00 'F' 'S' rule 0; label = the rule's
+    Scan,       // interference scan finding (sigdet_scan.hpp): key mac = 00 00 'S' 'C' uid 0; rf_cls = ScanType, rf_conf = ScanConf, freq_khz / bw_khz
 };
 
 constexpr uint32_t kStaleSeconds = 10;

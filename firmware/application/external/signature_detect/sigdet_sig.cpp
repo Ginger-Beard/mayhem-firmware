@@ -741,6 +741,48 @@ const char* SigParser::parse_line(const char* line, size_t len) {
         return nullptr;
     }
 
+    if (equals(tb, te, "SCAN")) {
+        /* SCAN,lo=1,hi=6000,res=81.5,looks=4,fft=256: an interference scan
+         * range (sigdet_scan.hpp), MHz / kHz with up to 3 decimals. */
+        if (c.nscan >= kSigMaxScan) return "over 2 SCAN lines";
+        ScanRange r{0, 0, 81500, ScanEngine::kMaxPoints, 4, 0};
+        uint32_t v = 0;
+        while (f.next()) {
+            if (!f.has_eq) return "no '=' in a field";
+            if (f.key("lo") || f.key("hi")) {
+                if (!parse_mhz(f.vb, f.ve, v)) return "lo/hi: MHz 1..7250";
+                (f.key("lo") ? r.lo_khz : r.hi_khz) = v;
+            } else if (f.key("res")) {
+                /* kHz, read as "MHz" gives Hz */
+                if (!parse_mhz(f.vb, f.ve, v) || v > 1000000) return "res: kHz 1..1000";
+                r.res_hz = v;
+            } else if (f.key("looks")) {
+                if (!parse_uint(f.vb, f.ve, ScanEngine::kMaxLooks, v) || v < 1) return "looks not 1..8";
+                r.looks = static_cast<uint8_t>(v);
+            } else if (f.key("fft")) {
+                if (!parse_uint(f.vb, f.ve, 2048, v)) return "fft: 0 256 512 1024 2048";
+                uint8_t idx = 0;
+                if (v == 256)
+                    idx = 1;
+                else if (v == 512)
+                    idx = 2;
+                else if (v == 1024)
+                    idx = 3;
+                else if (v == 2048)
+                    idx = 4;
+                else if (v != 0)
+                    return "fft: 0 256 512 1024 2048";
+                r.rbw_idx = idx;
+            } else {
+                return "unknown key";
+            }
+        }
+        if (!r.lo_khz || r.hi_khz <= r.lo_khz) return "needs lo < hi";
+        c.scan[c.nscan++] = r;
+        c.report.scan++;
+        return nullptr;
+    }
+
     if (equals(tb, te, "PAT")) {
         if (!pat_) return "no pattern table";
         /* The PATTERNS.TXT line without the valid= field. */

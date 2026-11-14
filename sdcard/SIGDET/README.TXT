@@ -82,6 +82,16 @@ BAND sweep band. Built-in: BAND,name=915 (2.4 5.8 5.3 1.2 915 868 5.1).
      sweep at 20 Msps like the built-in bands (narrower spans use lower rates,
      untested on the device). No drone classifiers run in custom bands.
 
+SCAN general interference scan range (up to 2 per class); see INTERFERENCE
+     SCAN below. A class with SCAN lines sweeps its scan ranges instead of
+     bands (its BAND and NB lines are not swept).
+     lo=, hi=  MHz, up to 3 decimals. The first window must be tunable: at
+               20 Msps (res 50 kHz or more) lo >= 8; at 5 kHz points lo >= 1.5
+     res=      point spacing, kHz (default 81.5); a window is 320 points
+     looks=    looks per window, 1..8 (default 4)
+     fft=      0 (auto) or 256 / 512 / 1024 / 2048 (finer bins than points)
+     Example: SCAN,lo=30,hi=6000,res=81.5,looks=4
+
 PAT  pattern scan entry, the PATTERNS.TXT format after "PAT," (up to 16).
 
 ZW   Z-Wave frame receiver (one per class): ZW,label=Z-Wave,kind=home,rate=9k6,f=908.42,valid=real
@@ -218,8 +228,47 @@ WHAT EACH SHIPPED CLASS RUNS
                      entry for the rule), R2 40 kb/s and R3 100 kb/s rules
                      (documents only): two dwells, 908.42 and 916.00 MHz
   LAND_MOBILE        two custom sweep bands, NB rules
-  INTERFERENCE       two custom sweep bands, NB rules
+  INTERFERENCE       interference scan: 30-6000 MHz at 81.5 kHz, HF 1.5-30 MHz
+                     at 5 kHz (SCAN lines)
   None of the file classes has rid, dji or rfcls: no drone detections there.
+
+INTERFERENCE SCAN (SCAN lines)
+  A sweep that knows no frequencies: window after window over the ranges,
+  4 looks each, then feature tests. About 6 s a pass for the shipped
+  INTERFERENCE class (230 windows of 26 MHz plus 18 of 1.6 MHz; the window
+  switch time is not measured yet). Listed (kind NOIS, src R):
+    Comb <spacing>   6 or more narrow lines on one exact grid in a window
+                     (spacing 3 points to 1/5 window: 245 kHz-5.2 MHz wide,
+                     15-320 kHz HF), seen in 2 passes. PComb: teeth on in
+                     fewer than 3 of 4 looks (gated by a duty cycle).
+    Floor+<dB> <MHz> the noise floor of the quietest look 4 dB or more over
+                     the session's baseline (the second lowest floor seen
+                     since the start or a gain change), 2 passes in a row
+                     for 2+ adjacent windows (conf M), 3 for one (conf L).
+    Drift <MHz>      an always-on emission up to 1 MHz wide whose centre
+                     moved at least 2 points and its own width, mostly one
+                     way, in 6+ passes (81.5 kHz points: 163 kHz or more).
+    Hum<50|60> <MHz> modulated at mains harmonics (needs the hum check,
+                     not in this build).
+  Survey rows only (SCN_SRV, Survey ticked): steady emissions (why=steady;
+  a licensed carrier and a stable interferer look the same by energy),
+  intermittent ones (burst), flat-topped blocks with steep edges (block:
+  TV, LTE, Wi-Fi), other wide emissions (wide), combs on a round spacing,
+  a multiple of 100 kHz (round_spacing: the receiver's own clock lines or
+  the occupied channels of a raster such as FM broadcast).
+  It cannot: see anything under the noise; see emissions shorter than a
+  pass reliably (an emission is looked at ~16 ms every ~6 s); find combs
+  closer than 3 points or with fewer than 6 teeth a window, or a comb whose
+  spacing is a multiple of 100 kHz; tell a steady interferer from a
+  transmitter; follow a drift faster than about one width a pass; notice a
+  noise source that was on from the start (it is the baseline) or noise
+  gated by the mains that leaves one look clean; tell intermodulation in the
+  receiver from real signals; give dBm, distance or the device. Opening a
+  map or the track view restarts the scan (its tables live in the map's
+  RAM). Log rows: SCN_NEW / SCN_DROP / SCN_SRV (detail: type, conf, why,
+  lo_khz, hi_khz and what was measured: spacing_hz + teeth, rise_cdb +
+  windows, range_hz + rate_hz_min, ripple_cdb + fill_pct, passes, duty,
+  width_pts, pt_hz).
 
 LIST COLUMNS
   ID (name), Src (receiver letters; signature rows: the label continues here),

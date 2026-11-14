@@ -848,6 +848,11 @@ void ScanEngine::close_pass() {
                 emit(s);
             }
             c = Comb{};
+        } else if (c.reported && !c.clock && c.pulsed) {
+            /* A gated comb shows in some passes only: kept listed until it
+             * has been missing for kPulsedDropMiss passes. */
+            s.ev = SE_UPD;
+            emit(s);
         }
     }
 

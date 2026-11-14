@@ -106,7 +106,7 @@ void RecentEntriesTable<external_app::signature_detect::Tracker>::draw(
 
     /* A signature hit has no source letters or distance to show: its label
      * takes the Src column too, its kind tag (TRKR ...) the Dist column. */
-    const bool sig = entry.kind == Kind::Sig || entry.kind == Kind::Zwave || entry.kind == Kind::Fsk;
+    const bool sig = entry.kind == Kind::Sig || entry.kind == Kind::Zwave || entry.kind == Kind::Fsk || entry.kind == Kind::Scan;
     char name[24];
     entity_name(entry, name, sizeof(name));
     size_t col = columns.at(0).second;
@@ -782,6 +782,7 @@ void SignatureDetectView::pause_rf(bool on) {
     rf_paused_ = on;
     if (on) {
         if (sweeping() || phase_band_ == kDid) next_phase();
+        scan_memory(false); /* a map takes its RAM back */
         rf_memory(false);
     }
     refresh_status();
@@ -810,7 +811,7 @@ uint8_t SignatureDetectView::mode() const {
     const SigClass* c = sig_ready() ? &sig_mem_->cls : nullptr;
     const uint8_t rx = c ? c->rx : 0;
     uint8_t m = opt_.mode & 4;
-    if (!c || !c->band_bits) m |= 1;
+    if (!c || (!c->band_bits && !c->nscan)) m |= 1;
     if (!(rx & RX_BLE)) m |= 2;
     if (!(rx & RX_PAT)) m |= 8;
     if (!(rx & RX_WIFI)) m |= 16;
@@ -829,7 +830,7 @@ uint16_t SignatureDetectView::band_mask() const {
 }
 
 bool SignatureDetectView::sweeps_on() const {
-    return !rf_paused_ && !(mode() & 1) && band_mask();
+    return !rf_paused_ && !(mode() & 1) && (band_mask() || scan_on());
 }
 
 /* Pattern dwells: on unless unticked (they also run while a map is open:
@@ -960,7 +961,10 @@ void SignatureDetectView::next_phase() {
          * sample rate (20 Msps buffers take the 4 Msps demodulator longer
          * than they last, each one a lost buffer, until the SpecAnConfig). */
         if (!from_sweep && prev != kDid) baseband::set_signature_detect(spec_an_sweep_fs, SignatureDetectConfigMessage::MODE_IDLE, channel_, 0);
-        start_sweep(next_band(true));
+        if (scan_on())
+            start_scan();
+        else
+            start_sweep(next_band(true));
     } else if (next == PAT) {
         start_pattern(rate_switch);
     } else if (next == WIFI) {
@@ -980,7 +984,9 @@ void SignatureDetectView::end_phase() {
     const uint8_t prev = phase_band_;
     const systime_t now = chTimeNow();
     const uint16_t dt = now - phase_t0_;
-    if (sweeping()) {
+    if (prev == kScan) {
+        end_scan();
+    } else if (sweeping()) {
         end_sweep();
     } else if (prev == kBle) {
         ble_ms_ += dt;
@@ -1270,6 +1276,261 @@ void SignatureDetectView::end_sweep() {
     rf_.dump(dump_line, this, dwell_seq_, now, ms, slices_);
 }
 
+/* ---------------------------------------------------------------- interference scan */
+
+/* A class with SCAN lines sweeps its scan ranges, window by window, instead
+ * of bands (sigdet_scan.hpp). */
+bool SignatureDetectView::scan_on() const {
+    return !rf_paused_ && sig_ready() && sig_mem_->cls.nscan;
+}
+
+/* The engine goes into the map's part of PSDT's lent RAM (free while no map
+ * is open; a map or the track view pauses the RF and takes it back), its
+ * per-window work into the RF engine's arrays (rf_memory first). */
+bool SignatureDetectView::scan_memory(bool on) {
+    constexpr size_t kScanAt = SignatureDetectStatsMessage::kScratchRf;
+    static_assert(sizeof(ScanEngine) <= SignatureDetectStatsMessage::kScratchMap, "ScanEngine grew past the map's part of PSDT's lent RAM");
+    static_assert(sizeof(ScanEngine::Work) <= sizeof(RfEngine::Work), "ScanEngine::Work must fit in the RF engine's arrays");
+    if (!on) {
+        if (scan_) {
+            scan_->~ScanEngine();
+            scan_ = nullptr;
+            tracker_.drop_kind(Kind::Scan); /* SCN_DROP rows: the tables are gone */
+            list_.set_dirty();
+        }
+        return false;
+    }
+    if (scan_) return true;
+    if (SigdetMapView::alive() || !work_ || !sig_ready() || !sig_mem_->cls.nscan) return false;
+    if (!stats_.scratch || stats_.scratch_size < kScanAt + SignatureDetectStatsMessage::kScratchMap) return false;
+    scan_ = new (stats_.scratch + kScanAt) ScanEngine{};
+    scan_->set_work(reinterpret_cast<ScanEngine::Work*>(work_));
+    scan_->set_notify(on_scan_event, this);
+    if (!scan_->configure(sig_mem_->cls.scan, sig_mem_->cls.nscan)) {
+        scan_->~ScanEngine();
+        scan_ = nullptr;
+        return false;
+    }
+    scan_w_ = 0;
+    scan_t0_ = now_s();
+    scan_gain_[0] = static_cast<uint8_t>(receiver_model.lna());
+    scan_gain_[1] = static_cast<uint8_t>(receiver_model.vga());
+    scan_gain_[2] = receiver_model.rf_amp() ? 1 : 0;
+    return true;
+}
+
+/* One window of the scan: a sweep of `points` points over its span, `looks`
+ * complete looks, then the engine's analysis (end_scan). The window after a
+ * window keeps the sample rate: no look is thrown away for settling. */
+void SignatureDetectView::start_scan() {
+    const bool from_scan = phase_band_ == kScan;
+    phase_band_ = kScan;
+    phase_dwell_ms_ = 60;
+    slices_ = 0;
+    dwell_sweeps_ = 0;
+    dwell_seq_++;
+    if (!scan_memory(true) || !sweep_) return; /* the dwell times out: next phase */
+    if (scan_w_ >= scan_->windows()) scan_w_ = 0;
+    ScanWindowPlan w;
+    scan_->plan(scan_w_, w);
+    scan_->begin(scan_w_);
+    /* Same range as the window before: same sample rate, nothing to settle. */
+    if (from_scan && w.range == scan_range_) dwell_sweeps_ = tune::kDiscardLooks;
+    scan_range_ = w.range;
+    /* Timeout only (the looks end it): 4 looks at one a frame for a window
+     * within one tune, ~4 ms a look otherwise. */
+    phase_dwell_ms_ = static_cast<uint16_t>(80 + w.looks * 40);
+    if (stall_run_ >= tune::kStallReset) {
+        stall_run_ = 0;
+        sweep_->invalidate_rates();
+    }
+    spec_an::Sweep::Params p{};
+    p.start = w.start_hz;
+    p.span = w.span_hz;
+    p.points = w.points;
+    p.avg = avg_ ? avg_ : tune::kSweepAvgPeak;
+    p.settle_us = settle_us_;
+    p.detector = spec_an::Detector::Peak;
+    p.rbw_idx = w.rbw_idx;
+    p.frame_paced = pace_ || w.span_hz < kOneTuneMhz * 1000000ULL;
+    /* The engine maps points to frequencies as planned: never move the start
+     * (a range must begin high enough for its first tune, README SCAN). */
+    p.raise_start = false;
+    if (!portapack::clock_manager.sampling_frequency_ok()) sweep_->invalidate_rates();
+    sweep_->start(p);
+}
+
+void SignatureDetectView::end_scan() {
+    if (sweep_) sweep_->stop();
+    const uint16_t ms = chTimeNow() - phase_t0_;
+    sweep_ms_ += ms;
+    if (slices_) {
+        stall_run_ = 0;
+    } else {
+        stalls_++;
+        stall_run_++;
+    }
+    if (!scan_) return;
+    /* The floor baseline belongs to the gains it was learnt with. */
+    const uint8_t g[3] = {static_cast<uint8_t>(receiver_model.lna()), static_cast<uint8_t>(receiver_model.vga()), static_cast<uint8_t>(receiver_model.rf_amp() ? 1 : 0)};
+    if (memcmp(g, scan_gain_, sizeof(g))) {
+        memcpy(scan_gain_, g, sizeof(g));
+        scan_->reset_baseline();
+    }
+    scan_->finish(now_s() - scan_t0_);
+    scan_windows_++;
+    if (scan_w_ + 1u >= scan_->windows()) scan_passes_++;
+    if (dump_band_ == kDumpAll) scan_->dump(dump_line, this);
+    scan_w_ = static_cast<uint16_t>(scan_w_ + 1u >= scan_->windows() ? 0 : scan_w_ + 1u);
+}
+
+void SignatureDetectView::on_scan_event(void* ctx, const ScanEvent& e) {
+    static_cast<SignatureDetectView*>(ctx)->scan_event(e);
+}
+
+namespace {
+
+/* List label of a scan finding (up to 19 characters). */
+void scan_label(const ScanEvent& e, char* out, size_t cap) {
+    Fmt f{out, cap};
+    const auto mhz3 = [&f](uint32_t khz) { f.d(static_cast<int32_t>(khz / 1000)).c('.').d(static_cast<int32_t>(khz % 1000 / 100)).d(static_cast<int32_t>(khz % 100 / 10)).d(static_cast<int32_t>(khz % 10)); };
+    switch (e.type) {
+        case ST_COMB:
+        case ST_PCOMB:
+            f.s(e.type == ST_COMB ? "Comb " : "PComb ");
+            if (e.param >= 1000000)
+                f.d(static_cast<int32_t>(e.param / 1000000)).c('.').d(static_cast<int32_t>(e.param % 1000000 / 100000)).d(static_cast<int32_t>(e.param % 100000 / 10000)).d(static_cast<int32_t>(e.param % 10000 / 1000)).c('M');
+            else
+                f.d(static_cast<int32_t>(e.param / 1000)).c('.').d(static_cast<int32_t>(e.param % 1000 / 100)).c('k');
+            break;
+        case ST_FLOOR:
+            f.s("Floor+").d(e.level_cdb / 100).c(' ').d(static_cast<int32_t>(e.lo_khz / 1000)).c('M');
+            break;
+        case ST_DRIFT:
+            f.s("Drift ");
+            mhz3(e.f_khz);
+            break;
+        case ST_HUM:
+            f.s("Hum").d(static_cast<int32_t>(e.param)).c(' ');
+            mhz3(e.f_khz);
+            break;
+        default:
+            f.s(scan_type_tag(e.type));
+            break;
+    }
+}
+
+const char* scan_why(uint8_t type) {
+    switch (type) {
+        case ST_COMB:
+        case ST_PCOMB:
+            return "regular_lines";
+        case ST_FLOOR:
+            return "floor_rise";
+        case ST_DRIFT:
+            return "drift";
+        case ST_HUM:
+            return "mains_modulation";
+        case ST_STEADY:
+            return "steady";
+        case ST_BURST:
+            return "burst";
+        case ST_BLOCK:
+            return "block";
+        case ST_WIDE:
+            return "wide";
+        case ST_CLOCK:
+            return "round_spacing";
+        default:
+            return "";
+    }
+}
+
+}  // namespace
+
+/* A scan finding: reported types become list entries (Kind::Scan, kept
+ * alive by the engine's per-pass updates, gone with its DROP), survey types
+ * a SCN_SRV row when the survey log is on. */
+void SignatureDetectView::scan_event(const ScanEvent& e) {
+    if (e.ev == SE_SURVEY) {
+        if (survey_on() && log_ && sig_mem_ && sig_mem_->budget.take(uptime_ms())) scan_row("SCN_SRV", e);
+        return;
+    }
+    const uint8_t mac[6] = {0, 0, 'S', 'C', e.uid, 0};
+    if (e.ev == SE_DROP) {
+        tracker_.drop_pattern(mac); /* by address: EV_DROPPED, the SCN_DROP row */
+        list_.set_dirty();
+        return;
+    }
+    char label[kSigLabelLen];
+    scan_label(e, label, sizeof(label));
+    const int32_t db = e.level_cdb / 100;
+    scan_ev_ = &e;
+    Entity* x = tracker_.ingest_sig(mac, SRC_RF, static_cast<int8_t>(db > 127 ? 127 : (db < -127 ? -127 : db)), e.uid, SK_NOISE, sig_kind_tag(SK_NOISE), label, now_s(), Kind::Scan);
+    scan_ev_ = nullptr;
+    if (!x) return;
+    x->freq_khz = e.f_khz;
+    x->bw_khz = e.hi_khz > e.lo_khz ? e.hi_khz - e.lo_khz : e.res_hz / 1000;
+    x->rf_cls = e.type;
+    x->rf_conf = e.conf;
+    list_.set_dirty();
+}
+
+/* SCN_NEW / SCN_DROP / SCN_SRV: id SC<uid>, label, kind noise, centre and
+ * width, level dB over the floor; detail: class, type, conf, why, the range
+ * and what was measured. */
+void SignatureDetectView::scan_row(const char* event, const ScanEvent& e) {
+    char label[kSigLabelLen];
+    scan_label(e, label, sizeof(label));
+    char row[300];
+    Fmt f{row, sizeof(row)};
+    row_begin(f, event, "R");
+    f.s(",SC").d(e.uid).c(',').s(label, Fmt::Esc::Csv).s(",noise,").d(static_cast<int32_t>(e.f_khz)).c(',').d(static_cast<int32_t>(e.hi_khz - e.lo_khz));
+    f.c(',').d(e.level_cdb / 100).s(",dB>floor,");
+    int32_t lat, lon;
+    if (own_position(lat, lon))
+        f.e7(lat).c(',').e7(lon);
+    else
+        f.c(',');
+    f.s(",class=").s(sig_name_.c_str(), Fmt::Esc::Kv).s(";type=").s(scan_type_tag(e.type)).s(";conf=").c("-LMH"[e.conf & 3]).s(";why=").s(scan_why(e.type));
+    f.s(";lo_khz=").d(static_cast<int32_t>(e.lo_khz)).s(";hi_khz=").d(static_cast<int32_t>(e.hi_khz));
+    if (e.type == ST_COMB || e.type == ST_PCOMB || e.type == ST_CLOCK) f.s(";spacing_hz=").d(static_cast<int32_t>(e.param)).s(";teeth=").d(e.count);
+    if (e.type == ST_FLOOR) f.s(";rise_cdb=").d(static_cast<int32_t>(e.param)).s(";windows=").d(e.count);
+    if (e.type == ST_DRIFT || e.type == ST_STEADY || e.type == ST_BURST) f.s(";range_hz=").d(static_cast<int32_t>(e.param)).s(";rate_hz_min=").d(e.rate).s(";seen=").d(e.count);
+    if (e.type == ST_HUM) f.s(";mains_hz=").d(static_cast<int32_t>(e.param)).s(";harmonics=").d(e.count);
+    if (e.type == ST_BLOCK || e.type == ST_WIDE) f.s(";ripple_cdb=").d(static_cast<int32_t>(e.param)).s(";fill_pct=").d(e.count);
+    f.s(";passes=").d(e.passes).s(";duty=").d(e.duty).s(";width_pts=").d(e.width_pts).s(";pt_hz=").d(static_cast<int32_t>(e.res_hz));
+    log_line(row);
+}
+
+/* A scan finding listed (EV_CONFIRMED: the event in hand) or gone. */
+void SignatureDetectView::report_scan(Tracker::Event ev, const Entity& e) {
+    if (ev != Tracker::EV_CONFIRMED && ev != Tracker::EV_DROPPED) return;
+    const bool drop = ev == Tracker::EV_DROPPED;
+    ScanEvent s{};
+    if (!drop && scan_ev_) {
+        s = *scan_ev_;
+    } else {
+        s.uid = e.mac[4];
+        s.type = e.rf_cls;
+        s.conf = e.rf_conf;
+        s.f_khz = e.freq_khz;
+        s.lo_khz = e.freq_khz - e.bw_khz / 2;
+        s.hi_khz = s.lo_khz + e.bw_khz;
+        s.level_cdb = static_cast<int16_t>((e.rssi_max != kNoRssi ? e.rssi_max : 0) * 100);
+    }
+    if (log_on()) scan_row(drop ? "SCN_DROP" : "SCN_NEW", s);
+    if (opt_.json) {
+        char label[kSigLabelLen];
+        scan_label(s, label, sizeof(label));
+        char row[200];
+        Fmt f{row, sizeof(row)};
+        f.s("{\"event\":\"scan_").s(drop ? "drop" : "new").s("\",\"class\":\"").s(sig_name_.c_str(), Fmt::Esc::Json).s("\",\"type\":\"").s(scan_type_tag(s.type));
+        f.s("\",\"label\":\"").s(label, Fmt::Esc::Json).s("\",\"freq_khz\":").d(static_cast<int32_t>(s.f_khz)).s(",\"conf\":").d(s.conf).c('}');
+        usb_line(row);
+    }
+}
+
 void SignatureDetectView::dump_line(void* ctx, const char* line) {
     auto* self = static_cast<SignatureDetectView*>(ctx);
     self->usb_line(line);
@@ -1316,6 +1577,10 @@ void SignatureDetectView::on_slice(const SpecAnSliceMessage& message) {
     }
     if (dwell_sweeps_ < tune::kDiscardLooks) {
         dwell_sweeps_++; /* still settling from the rate switch */
+        return;
+    }
+    if (phase_band_ == kScan) {
+        if (!scan_ || !scan_->add_look(src)) rf_full_ = true;
         return;
     }
     if (dump_raw_ && (dump_band_ == kDumpAll || dump_band_ == phase_band_)) {
@@ -1729,6 +1994,10 @@ void SignatureDetectView::report(Tracker::Event ev, const Entity& e) {
         report_sig(ev, e);
         return;
     }
+    if (e.kind == Kind::Scan) {
+        report_scan(ev, e);
+        return;
+    }
     if (e.kind == Kind::Fsk) {
         /* The rule's frames stopped (kExpireSeconds): a summary row. */
         if (ev == Tracker::EV_DROPPED) fsk_row("FSK_SUM", e.mac[4], nullptr);
@@ -1939,6 +2208,7 @@ void SignatureDetectView::select_class(size_t index) {
     tracker_.drop_kind(Kind::Sig);
     tracker_.drop_kind(Kind::Zwave);
     tracker_.drop_kind(Kind::Fsk);
+    scan_memory(false); /* SCN_DROP rows (Kind::Scan), the scan's tables go */
     /* ... and every built-in detector's (RID_DROP / DJI_DROP / PAT_DROP /
      * DID_DROP rows): the new class lists only what it asks for. */
     tracker_.drop_kind(Kind::RemoteId);
@@ -2335,6 +2605,8 @@ void SignatureDetectView::refresh_status() {
         f.s("TRACK");
     else if (phase_band_ == kZw)
         f.s("ZW").d(sig_ready() ? sig_mem_->cls.zw.f_khz / 1000 : 908);
+    else if (phase_band_ == kScan)
+        f.s("SCN").d(scan_w_).c('p').d(scan_ ? static_cast<int32_t>(scan_->pass()) : 0); /* window, pass */
     else
         f.s(kBands[phase_band_].name);
     f.s(" RID ").d(tracker_.active_rid()).c(' ');
@@ -2715,6 +2987,20 @@ void DetailView::refresh() {
             line(6).s("rate ").d(static_cast<int32_t>(x.rate_bps)).s(" valid: ").s(sig_valid_name(d.valid));
         }
         line(7).s("first ").d(main_.now_s() - e->first_s).s("s ago");
+    } else if (e->kind == Kind::Scan) {
+        /* What the scan found and why it counts as interference. */
+        line(1).s("Scan ").s(main_.sig_name_.c_str()).c(' ').s(scan_type_tag(e->rf_cls)).s(" conf ").c("-LMH"[e->rf_conf & 3]);
+        static constexpr const char* kWhy[] = {"", "Regular lines (comb)", "Comb, not always on", "Noise floor up", "Always on, centre moves",
+                                               "Modulated by mains"};
+        line(2).s(e->rf_cls < sizeof(kWhy) / sizeof(kWhy[0]) ? kWhy[e->rf_cls] : "");
+        lines_[2].color = Color::yellow();
+        const uint32_t lo = e->freq_khz - e->bw_khz / 2;
+        line(3).d(static_cast<int32_t>(lo / 1000)).c('.').d2(static_cast<int32_t>(lo % 1000 / 10)).s(" - ").d(static_cast<int32_t>((lo + e->bw_khz) / 1000)).c('.').d2(static_cast<int32_t>((lo + e->bw_khz) % 1000 / 10)).s(" MHz");
+        line(4).s(e->label);
+        line(5).s("Energy sweep: type of signal,");
+        line(6).s("not what device sends it");
+        for (size_t i = 5; i < 7; i++) lines_[i].color = Theme::getInstance()->fg_medium->foreground;
+        line(8).s("first ").d(main_.now_s() - e->first_s).s("s ago");
     } else if (e->kind == Kind::Sig) {
         /* Class, kind, source, the rule and how it was validated. */
         const bool nb = (e->sources & SRC_RF) != 0;
@@ -2995,6 +3281,11 @@ bool SignatureDetectView::target_of(const Entity& e, TrackTarget& t) const {
         case Kind::DroneId:
             t.f_khz = e.freq_khz;
             t.bw = 0;
+            return e.freq_khz != 0;
+        case Kind::Scan:
+            /* Walk to it with the meter: its centre, about its width. */
+            t.f_khz = e.freq_khz;
+            t.bw = static_cast<uint8_t>(track_bw_for(e.bw_khz));
             return e.freq_khz != 0;
         case Kind::Sig:
             if (e.sources & SRC_RF) {
@@ -3536,7 +3827,7 @@ void SignatureDetectView::capture_of_target(const TrackTarget& t, CaptureContext
 bool SignatureDetectView::capture_of(const Entity& e, CaptureContext& c) const {
     TrackTarget t;
     if (!target_of(e, t)) return false;
-    static constexpr const char* kKinds[] = {"remote_id", "wifi_oui", "rf", "pattern", "dji_ble", "droneid", "zwave", "sig", "fsk"};
+    static constexpr const char* kKinds[] = {"remote_id", "wifi_oui", "rf", "pattern", "dji_ble", "droneid", "zwave", "sig", "fsk", "scan"};
     const size_t k = static_cast<size_t>(e.kind);
     const char* kind = k < sizeof(kKinds) / sizeof(kKinds[0]) ? kKinds[k] : "?";
     if (e.kind == Kind::Sig) kind = (e.sources & SRC_RF) ? "nb" : "ble";
