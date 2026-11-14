@@ -271,6 +271,13 @@ file starts with a header line and one "#TYPE,..." line per row type. Types:
           moved; sky: GNSSALM.TXT read again), view, file (1 read, 2
           missing, 3 no usable line), its age in days x10, satellites in the
           file, then for E, C, R, S "up/total", lines that did not parse
+  GAL     one aided Galileo E1 search: PRN, elevation deg, predicted code
+          phase (chips x100 of 4092) and Doppler Hz, the receiver clock term
+          Hz, age of the GPS fix ms, result (heard / not found), peak / mean
+          x100 (threshold 300), C/N0 x10 (E1, reads ~3 dB low), offset from
+          the prediction in half samples, main peak over its side peaks dB
+          x10 (small = ambiguous), Doppler found, 4 ms blocks, M4 time kcycles,
+          time taken s
   IMG     a baseband image loaded from /APPS: image (GPS_L1A / GPS_L1T),
           result (ok / missing / read error / not an image / wrong image /
           other firmware version / too large / damaged), bytes, load time ms
@@ -284,7 +291,9 @@ on it) chooses what the two tabs show: All L1 (default), GPS, Galileo,
 BeiDou, GLONASS, SBAS. Rows carry the system's letter: G GPS, E Galileo,
 C BeiDou, R GLONASS, S SBAS (S131 = PRN 131). What each system is today:
   GPS      received and decoded (search, tracking, fix).
-  Galileo  predictions only, "not decoded yet" (Galileo E1 is next).
+  Galileo  predictions, and with the "E1" box (Heard, top row) an aided
+           search: heard / not found with C/N0 (see "Galileo E1 search"
+           below); not decoded yet, not in the fix.
   BeiDou   predictions only. Its L1 signal B1C comes only from the BDS-3
            satellites C19-C58; B1I (1561 MHz) needs its own tuning.
   GLONASS  predictions only: its signals are at 1598-1606 MHz, a tuning of
@@ -306,6 +315,27 @@ that folder, unzip it, and on a computer run, from the Mayhem source tree:
   python3 firmware/tools/gnss_alm.py BRDC00WRD_S_YYYYDDD0000_01D_MN.rnx > GNSSALM.TXT
 (YYYY year, DDD day of the year), then copy GNSSALM.TXT to /GPS/. The app
 reads it again every 30 s while another system is shown.
+
+Galileo E1 search (Heard "E1" box, off by default)
+--------------------------------------------------
+With the box ticked, Autonomous tracking running and a PRECISE GPS fix,
+the receiver looks for the Galileo satellites that GNSSALM.TXT puts above
+5 degrees, highest first, one at a time: the code phase and Doppler are
+predicted from the fix, GPS time and the orbit, and only a small window
+around them is searched, in the M4 time the GPS tracking leaves (32 ms of
+signal per satellite; with 8 GPS channels it takes ~10-20 s per
+satellite, a few minutes for all). System wheel on Galileo: "E31 38 dB-Hz
+heard", "E23 not found", "searching". Heard only for now: nothing of
+Galileo enters the fix, and with the box off GPS is exactly as before.
+Needs /GPS/GALE1.BIN, the Galileo E1 codes, which you make yourself (the
+Galileo ICD's terms do not allow us to ship them in another form):
+download the OS SIS ICD's E1 code attachments (files for annexes C.7 E1-B
+and C.8 E1-C, from the European GNSS Service Centre, gsc-europa.eu,
+Galileo OS SIS ICD page) and convert them on a computer, from the Mayhem
+source tree, with
+  python3 firmware/tools/gal_e1_codes.py C7_E1B.txt C8_E1C.txt GALE1.BIN
+(51,216 bytes), then copy GALE1.BIN to /GPS/. GNSSALM.TXT must be fresh
+(a few days) for the search window: refresh it first.
 
 Heard tab (what the receiver hears)
 -----------------------------------

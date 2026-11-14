@@ -27,7 +27,7 @@
  * /GPS/GNSSALM.TXT for Galileo, BeiDou, GLONASS and SBAS. That file holds one
  * satellite per line in the GPS almanac model (made on a PC from a public
  * broadcast navigation file, mayhem-build tools/gnss_alm.py):
- *   sys prn health sqrtA e i0 Omega0 OmegaDot omega M0 week toa [k]
+ *   sys prn health sqrtA e i0 Omega0 OmegaDot omega M0 week toa af0 af1 [k]
  * It gives positions for the sky plot and the satellites up, not for a fix.
  * The file is not kept in RAM: the app reads it again every 30 s and keeps
  * only each satellite's elevation and azimuth (SysSky, ~5 bytes each). */
@@ -104,8 +104,24 @@ struct SysSky {
     double toa_newest;  /* GPS s: the file's newest record (its age) */
     uint16_t bad_lines; /* lines that did not parse */
     uint16_t line_len;
-    char line[132]; /* the line being read */
+    char line[168]; /* the line being read (a satellite line is ~140 characters) */
 };
+
+/* A Galileo satellite's orbit and clock, compact (the aided E1 search needs
+ * them; the file is not kept): float elements are within metres. */
+struct GalAlm {
+    float sqrt_a, e, i0, omega0, omega, m0, omega_dot, af0, af1;
+    uint32_t toa; /* continuous GPS s */
+    uint8_t prn;
+    uint8_t pad[3];
+};
+GalAlm gal_alm(const Orbit& o);
+Orbit gal_orbit(const GalAlm& g);
+
+/* The aided Galileo E1 search's prediction for a satellite: the code phase
+ * (chips of the 4 ms code) of the signal arriving at true GPS time t_rx at
+ * the receiver, and the geometric Doppler (Hz, without the receiver clock). */
+void gal_predict(const Orbit& o, const Vec3& rx, double t_rx, double* code_chips, double* doppler_geo_hz);
 
 }  // namespace ui::external_app::gps
 

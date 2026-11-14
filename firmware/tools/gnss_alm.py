@@ -34,11 +34,12 @@ and the node rate from the two (which removes most of the short-period J2 error 
 set). The elements at the latest record are written in the app's almanac model (the GPS almanac
 equations of IS-GPS-200 with the GPS constants), one line per satellite:
 
-  sys prn health sqrtA e i0 Omega0 OmegaDot omega M0 week toa [k]
+  sys prn health sqrtA e i0 Omega0 OmegaDot omega M0 week toa af0 af1 [k]
 
 sys E/C/R/S; health 0 = usable (else the system's flag); sqrtA m^0.5; angles rad (Omega0: longitude of
-the node at the start of GPS week `week`), OmegaDot rad/s; toa seconds of that GPS week; k: GLONASS
-frequency channel. Accuracy: --check (prediction error against later broadcast records), and the GPS
+the node at the start of GPS week `week`), OmegaDot rad/s; toa seconds of that GPS week; af0 (s) and af1
+(s/s): the satellite clock at toa in the system's own time (Galileo GST and BeiDou BDT polynomials,
+GLONASS -TauN + GammaN, SBAS aGf0 / aGf1); k: GLONASS frequency channel. Accuracy: --check (prediction error against later broadcast records), and the GPS
 app's README (sdcard/GPS/README.TXT). Predictions only: positions for the sky plot and the satellites up, not for a fix.
 """
 
@@ -209,6 +210,19 @@ def state(sysc, prn, ep, v):
     return t, pos, vel, int(v[6]), None
 
 
+def clock(sysc, ep, v, t_gps):
+    """satellite clock offset (s) at continuous GPS time t_gps and its rate (s/s), from a record"""
+    toc = gps_seconds(*ep)
+    if sysc == 'C':
+        toc += BDT_GPS  # BeiDou epochs are BDT
+    elif sysc == 'R':
+        toc += LEAP     # GLONASS epochs are UTC
+    dt = t_gps - toc
+    if sysc in 'EC':
+        return v[0] + v[1] * dt + v[2] * dt * dt, v[1] + 2 * v[2] * dt
+    return v[0] + v[1] * dt, v[1]  # GLONASS -TauN + GammaN dt, SBAS aGf0 + aGf1 dt
+
+
 def to_inertial(pos, vel, theta):
     """ECEF -> an inertial frame that coincides with ECEF when theta = 0 (rotated by -theta)"""
     w = OMEGA_E_GPS
@@ -341,12 +355,13 @@ def main():
         r = math.sqrt(sum(x * x for x in st[1]))
         if r < 2.0e7:  # not a GNSS orbit (bad record)
             continue
-        by_sat.setdefault((sysc, prn), []).append((st, v))
+        by_sat.setdefault((sysc, prn), []).append((st, v, ep))
     out = []
     for (sysc, prn), lst in sorted(by_sat.items(), key=lambda kv: ('ECRS'.index(kv[0][0]), kv[0][1])):
         lst.sort(key=lambda x: x[0][0])
         healthy = [x for x in lst if x[0][3] == 0] or lst
         s1, s2 = healthy[0][0], healthy[-1][0]
+        af0, af1 = clock(sysc, healthy[-1][2], healthy[-1][1], s2[0])
         t1, t2 = s1[0], s2[0]
         if sysc == 'R':  # move the earlier state to its own epoch's exact position (records are exact there)
             pass
@@ -380,14 +395,14 @@ def main():
         q = alm_position([math.sqrt(a), e2, i2, Om0, omd, w2, wrap(M2), week, toa], t1)
         if math.sqrt(sum((x - y) ** 2 for x, y in zip(q, s1[1]))) > 200e3:
             health = health or 1
-        line = '%s %d %d %.6f %.9f %.9f %.9f %.6e %.9f %.9f %d %.3f' % (sysc, prn, health, math.sqrt(a), e2, i2, Om0, omd,
-                                                                     w2, wrap(M2), week, toa)
+        line = '%s %d %d %.6f %.9f %.9f %.9f %.6e %.9f %.9f %d %.3f %.6e %.6e' % (sysc, prn, health, math.sqrt(a), e2, i2,
+                                                                             Om0, omd, w2, wrap(M2), week, toa, af0, af1)
         if sysc == 'R' and s2[4] is not None:
             line += ' %d' % s2[4]
         out.append(line)
     print('# GNSSALM.TXT: Galileo (E), BeiDou (C), GLONASS (R), SBAS (S) prediction almanac for the GPS app')
     print('# from %s (public broadcast navigation, RINEX 3 mixed) by gnss_alm.py' % ' '.join(p.split('/')[-1] for p in paths))
-    print('# sys prn health sqrtA e i0 Omega0 OmegaDot omega M0 week toa [k]   (GPS almanac model and constants)')
+    print('# sys prn health sqrtA e i0 Omega0 OmegaDot omega M0 week toa af0 af1 [k]   (GPS almanac model and constants)')
     for line in out:
         print(line)
 

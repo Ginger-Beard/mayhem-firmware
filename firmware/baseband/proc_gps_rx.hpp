@@ -46,6 +46,7 @@
 #include "gps_image.hpp"
 #if defined(BASEBAND_gps_l1t)
 #include "gps_trk.hpp"
+#include "gal_acq.hpp"
 #endif
 
 #include <cstdint>
@@ -104,6 +105,13 @@ class GpsRxProcessor : public BasebandProcessor {
     uint32_t trk_cycles_sum_{0}, trk_cycles_max_{0}, trk_buffers_{0};
     void start_tracking(uint32_t prn_mask, uint32_t age_ms);
     void stop_tracking();
+    /* the aided Galileo E1 search: one unit per buffer when the loops leave room */
+    /* a unit only while the buffer's tracking + Galileo cycles stay under the
+     * budget (of 204k per 1 ms buffer): the loops come first */
+    static constexpr uint32_t kGalBudget = 180000;
+    static constexpr uint32_t kGalUnit = 45000; /* the largest unit, with margin */
+    uint16_t gal_seq_{0};
+    uint32_t gal_cycles_{0}; /* this search's M4 cycles (diagnostics) */
 #else
     static constexpr uint8_t kSettleBuffers = 20; /* 20 ms skipped before a capture: LO / gain settling after enable */
     uint8_t settle_{0};

@@ -21,14 +21,16 @@
 
 #include "gps_sys.hpp"
 
+#include <cmath>
+
 namespace ui::external_app::gps {
 
 bool gnssalm_line(const char* s, size_t n, Orbit& o, uint8_t& sys) {
-    /* fields: sys prn health sqrtA e i0 Omega0 OmegaDot omega M0 week toa [k] */
-    const char* tok[13];
-    size_t len[13];
+    /* fields: sys prn health sqrtA e i0 Omega0 OmegaDot omega M0 week toa af0 af1 [k] */
+    const char* tok[15];
+    size_t len[15];
     size_t nt = 0;
-    for (size_t i = 0; i < n && nt < 13;) {
+    for (size_t i = 0; i < n && nt < 15;) {
         while (i < n && (s[i] == ' ' || s[i] == '\t' || s[i] == '\r' || s[i] == '\n')) i++;
         if (i >= n) break;
         tok[nt] = s + i;
@@ -71,9 +73,58 @@ bool gnssalm_line(const char* s, size_t n, Orbit& o, uint8_t& sys) {
     o.m0 = v[8];
     o.toe = static_cast<double>(static_cast<int32_t>(v[9])) * kWeekS + v[10];
     o.toc = o.toe;
+    if (nt >= 14) { /* the satellite clock at toa (the system's own time) */
+        o.af0 = static_cast<float>(parse_double(tok[12], len[12]));
+        o.af1 = static_cast<float>(parse_double(tok[13], len[13]));
+    }
     o.ephemeris = 0;
     o.valid = 1;
     return true;
+}
+
+GalAlm gal_alm(const Orbit& o) {
+    GalAlm g{};
+    g.sqrt_a = static_cast<float>(o.sqrt_a);
+    g.e = static_cast<float>(o.e);
+    g.i0 = static_cast<float>(o.i0);
+    g.omega0 = static_cast<float>(o.omega0);
+    g.omega = static_cast<float>(o.omega);
+    g.m0 = static_cast<float>(o.m0);
+    g.omega_dot = o.omega_dot;
+    g.af0 = o.af0;
+    g.af1 = o.af1;
+    g.toa = static_cast<uint32_t>(o.toe);
+    g.prn = o.prn;
+    return g;
+}
+
+Orbit gal_orbit(const GalAlm& g) {
+    Orbit o{};
+    o.sqrt_a = g.sqrt_a;
+    o.e = g.e;
+    o.i0 = g.i0;
+    o.omega0 = g.omega0;
+    o.omega = g.omega;
+    o.m0 = g.m0;
+    o.omega_dot = g.omega_dot;
+    o.af0 = g.af0;
+    o.af1 = g.af1;
+    o.toe = o.toc = static_cast<double>(g.toa);
+    o.prn = g.prn;
+    o.valid = 1;
+    return o;
+}
+
+void gal_predict(const Orbit& o, const Vec3& rx, double t_rx, double* code_chips, double* doppler_geo_hz) {
+    double t_tx = 0, clk = 0;
+    geometric_range(o, rx, t_rx, &t_tx);
+    sat_position(o, t_tx, &clk);
+    /* a code period starts at each 4 ms of the satellite's clock (GST: the GPS
+     * seconds to a few ns) */
+    const double sv = (t_tx + clk) / 0.004;
+    *code_chips = (sv - std::floor(sv)) * 4092.0;
+    const double r1 = geometric_range(o, rx, t_rx + 0.5), r0 = geometric_range(o, rx, t_rx - 0.5);
+    *doppler_geo_hz = -(r1 - r0) * (1575.42e6 / kC);
 }
 
 }  // namespace ui::external_app::gps

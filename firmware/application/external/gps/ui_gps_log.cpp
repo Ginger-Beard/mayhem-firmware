@@ -116,6 +116,7 @@ void GpsView::log_header() {
         "#LOG,event,errors (the log file reopened after the Log box was ticked again)",
         "#IMG,image,result,bytes,load_ms,loads (a baseband image loaded from /APPS)",
         "#SYS,event (view / sky),view,file (1 read 2 missing 3 empty),age_dx10,sats,E up/total,C up/total,R up/total,S up/total,bad_lines",
+        "#GAL,prn,el_deg,pred_code_chips_x100,pred_doppler_hz,clock_term_hz,fix_age_ms,result,metric_x100,cn0_x10,offset_half_samples,side_db_x10,found_doppler,blocks,m4_kcycles,search_s",
     };
     for (const char* h : kHead) log_push(mem_->log, h, std::strlen(h));
 }
@@ -245,6 +246,18 @@ void GpsView::log_sys(const char* event) {
     f.d(static_cast<int32_t>(std::lround(sys_age_days() * 10))).c(',').u(k.n);
     for (int s = SYS_GAL; s < SYS_N; s++) f.c(',').u(k.up[s]).c('/').u(k.total[s]);
     f.c(',').u(k.bad_lines);
+    log_end(f);
+}
+
+/* one aided Galileo E1 search: the prediction and what the tracking image found */
+void GpsView::log_gal(const gal_acq::Result& r) {
+    if (!log_active()) return;
+    Fmt f = log_row("GAL");
+    f.c(',').c('E').d2(r.prn).c(',').d(static_cast<int32_t>(std::lround(gal_pred_el_))).c(',').u(static_cast<uint32_t>(gal_pred_cp_ * 100.0));
+    f.c(',').d(static_cast<int32_t>(std::lround(gal_pred_dop_))).c(',').d(static_cast<int32_t>(std::lround(gal_pred_clk_))).c(',').u(gal_pred_age_ms_);
+    f.c(',').s(r.detected ? "heard" : "not found").c(',').u(static_cast<uint32_t>(r.metric * 100.0f)).c(',').u(static_cast<uint32_t>(r.cn0 * 10.0f));
+    f.c(',').d(r.offset).c(',').d(static_cast<int32_t>(std::lround(r.side_db * 10.0f))).c(',').d(static_cast<int32_t>(std::lround(r.doppler)));
+    f.c(',').u(r.blocks).c(',').u(gal_status_cycles_ / 1000u).c(',').u(static_cast<uint32_t>((chTimeNow() - gal_sent_t_) / CH_FREQUENCY));
     log_end(f);
 }
 

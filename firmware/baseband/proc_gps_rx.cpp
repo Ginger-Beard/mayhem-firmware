@@ -36,6 +36,10 @@ static gps_keep::Block& keep = *gps_keep::block();
 static const gps_trk::CarrierTable carrier_table;
 /* a fresh Tracker for each hand-over (it clears the shared block's counters) */
 alignas(8) static uint8_t tracker_mem[sizeof(gps_trk::Tracker)];
+/* the aided Galileo E1 search: ~42 KB (a raw and a wiped 4 ms block) and the
+ * codes the app puts here */
+static gal_acq::Searcher gal_search;
+static gal_acq::Codes gal_codes;
 #else
 /* Big working memory, outside the processor object (bss). */
 alignas(8) static gps_acq::Snapshot snapshot;
@@ -46,7 +50,9 @@ static gps_acq::Session session{snapshot, acquirer};
 GpsRxProcessor::GpsRxProcessor() {
     CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
     DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
-    last_status_ = DWT->CYCCNT;
+    /* the first status goes out with the first buffer: the app waits for it
+     * after an image switch (Autonomous: the tracking image's CMD_TRACK) */
+    last_status_ = DWT->CYCCNT - 6 * kStatusCycles;
     missed_seen_ = shared_memory.m4_buffer_missed;
     /* the tracking output starts empty with each image, as it did when it was
      * part of the image's own RAM */
@@ -104,12 +110,19 @@ void GpsRxProcessor::apply() {
                 trk_->publish();
             }
             return;
+        case GpsRxConfigMessage::CMD_GAL: /* the loops keep running; one satellite at a time */
+            if (trk_ && req_.add_prn >= 1 && req_.add_prn <= 50) {
+                gal_search.start(req_.add_prn, &gal_codes, req_.add_code, req_.add_at, req_.add_doppler, req_.add_windows, 1, 100.0f, 8);
+                gal_cycles_ = 0;
+            }
+            return;
         case GpsRxConfigMessage::CMD_TRACK:
             max_ch_ = req_.max_ch ? req_.max_ch : 8;
             seq_++;
             start_tracking(req_.prn_mask, req_.age_ms);
             return;
         default: /* stop (a search is the acquisition image's job) */
+            gal_search.stop();
             stop_tracking();
             state_ = GpsRxStatusMessage::IDLE;
             send_status();
@@ -157,8 +170,12 @@ void GpsRxProcessor::send_status() {
     status_.rms_x10 = static_cast<uint16_t>(keep.shared.level_x10);
     status_.clip_permille = keep.shared.clip_pm;
     status_.units = 0;
-    status_.unit_cycles = 0;
+    status_.unit_cycles = gal_cycles_; /* tracking image: this Galileo search's M4 cycles so far */
     status_.dt_ms = 0;
+    status_.gal_codes = &gal_codes;
+    status_.gal_result = &gal_search.result();
+    status_.gal_seq = gal_seq_;
+    status_.gal_busy = gal_search.busy() ? 1 : 0;
 #else
     status_.level = session.level();
     status_.confirming = session.confirming();
@@ -207,7 +224,21 @@ void GpsRxProcessor::execute(const buffer_c8_t& buffer) {
     /* the tracking loops: every buffer, ~11.5k cycles per channel + ~23k */
     const uint32_t t0 = DWT->CYCCNT;
     trk_->process(reinterpret_cast<const int8_t*>(buffer.p), samples_ - buffer.count);
-    const uint32_t dt = DWT->CYCCNT - t0;
+    uint32_t dt = DWT->CYCCNT - t0;
+    if (gal_search.busy()) { /* Galileo: capture, or one unit of work when the loops left room */
+        const uint32_t g0 = DWT->CYCCNT;
+        if (gal_search.wants_samples())
+            gal_search.put(reinterpret_cast<const int8_t*>(buffer.p), static_cast<int>(buffer.count), samples_ - buffer.count);
+        else /* units of <= ~40k cycles while the buffer's total stays under the budget */
+            while (dt + (DWT->CYCCNT - g0) + kGalUnit < kGalBudget && !gal_search.wants_samples())
+                if (!gal_search.step()) {
+                    gal_seq_++; /* done: the result is in gal_search.result() */
+                    break;
+                }
+        const uint32_t g = DWT->CYCCNT - g0;
+        gal_cycles_ += g;
+        dt += g; /* the M4 load shown includes it */
+    }
     if ((trk_buffers_ & 63u) == 0) { /* the input level, one buffer in 64 (~12k cycles) */
         const int8_t* x = reinterpret_cast<const int8_t*>(buffer.p);
         int32_t si = 0, sq = 0;
@@ -275,7 +306,7 @@ void GpsRxProcessor::execute(const buffer_c8_t& buffer) {
 void GpsRxProcessor::on_message(const Message* const message) {
     if (message->id == Message::ID::GpsRxConfig) {
         const auto& m = *reinterpret_cast<const GpsRxConfigMessage*>(message);
-        if (m.cmd == GpsRxConfigMessage::CMD_ADD) { /* only the aided-search fields: the search settings stay */
+        if (m.cmd == GpsRxConfigMessage::CMD_ADD || m.cmd == GpsRxConfigMessage::CMD_GAL) { /* only the aided-search fields: the search settings stay */
             req_.cmd = m.cmd;
             req_.add_prn = m.add_prn;
             req_.add_windows = m.add_windows;

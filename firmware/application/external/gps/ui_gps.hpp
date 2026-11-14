@@ -67,6 +67,7 @@
 #include "gps_image.hpp"
 #include "gps_keep.hpp"
 #include "gps_sys.hpp"
+#include "gal_e1.hpp"
 #endif
 
 namespace ui::external_app::gps {
@@ -221,6 +222,15 @@ struct GpsScratch {
     uint8_t cache_have;
     LogRing log; /* diagnostics log rows waiting for the card (ui_gps_log.cpp) */
     SysSky sys;  /* the other systems' satellites now (GNSSALM.TXT, ui_gps_sys.cpp) */
+    /* Galileo for the aided E1 search (ui_gps_gal.cpp): orbits from the last
+     * GNSSALM.TXT pass, and per PRN the search state (0 not yet, 1 searching,
+     * 2 heard, 3 not found), C/N0 dB-Hz and peak / mean x10 */
+    static constexpr size_t kMaxGal = 30;
+    GalAlm gal[kMaxGal];
+    uint8_t n_gal;
+    uint8_t gal_state[37];
+    uint8_t gal_cn0[37];
+    uint16_t gal_metric_x10[37];
 };
 
 class GpsView;
@@ -337,6 +347,7 @@ class HeardView : public View {
     GpsView& main_;
     OptionsField field_depth_;
     OptionsField field_sys_;
+    Checkbox check_gal_{{UI_POS_X(12), 0}, 2, "E1", true}; /* the aided Galileo E1 search */
     Button button_search_;
     Button button_stop_;
     static constexpr size_t kStatusRows = 2;
@@ -626,6 +637,7 @@ class GpsView : public View {
     uint32_t depth_{1};              /* Heard snapshot: 0 = 10 ms, 1 = 20 ms (saved) */
     uint32_t log_on_{0};             /* diagnostics log (Log box on the Fix tab, saved) */
     uint32_t sys_view_{VIEW_ALL_L1}; /* the System wheel (Heard, Passes; saved) */
+    uint32_t gal_on_{0};             /* the aided Galileo E1 search (Heard "E1" box; saved) */
     app_settings::SettingsManager settings_;
     int8_t bias_shown_{-1};  /* last antenna-power state shown (read only) */
     uint32_t tab_shown_{99}; /* tab whose content was last refreshed */
@@ -894,6 +906,27 @@ class GpsView : public View {
     size_t sys_top(uint8_t sys, uint8_t* idx, size_t max) const;
     void sys_label(const SysSat& s, char* b, size_t size) const;
     void log_sys(const char* event);
+    size_t sys_tmp_ngal_{0};
+    /* The aided Galileo E1 search (ui_gps_gal.cpp): after a precise GPS fix,
+     * one satellite at a time in the tracking image's spare M4 time */
+    void* gal_codes_{nullptr};        /* the tracking image's Codes buffer (status) */
+    const void* gal_result_{nullptr}; /* its Result */
+    uint16_t gal_status_seq_{0};      /* searches finished (status) */
+    uint8_t gal_status_busy_{0};
+    uint32_t gal_status_cycles_{0};
+    bool gal_pending_{false};
+    uint16_t gal_seq_sent_{0};
+    uint8_t gal_prn_{0};
+    uint8_t gal_file_{0}; /* GALE1.BIN: 0 not read, 1 ok, 2 missing, 3 not a code file */
+    systime_t gal_sent_t_{0}, gal_round_t_{0};
+    float gal_pred_el_{0}, gal_pred_clk_{0};
+    double gal_pred_cp_{0}, gal_pred_dop_{0};
+    uint32_t gal_pred_age_ms_{0};
+    void gal_step();
+    void gal_collect();
+    void gal_reset();
+    uint8_t gal_heard() const; /* satellites heard in this round */
+    void log_gal(const gal_acq::Result& r);
     void image_fallback_ram(); /* no image: use the kept block as plain RAM */
     /* Start now if the sky cache is ready, else as soon as it is. */
     void request_search(Job job, uint8_t k_ms);
