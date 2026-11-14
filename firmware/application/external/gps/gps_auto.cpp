@@ -183,6 +183,7 @@ int auto_build_pvt(AutoState& a, const Orbit* table, bool eph_only, int32_t week
         p.doppler_hz = m.doppler_hz;
         p.cn0 = m.cn0_x10 / 10.0f;
         p.prn = m.prn;
+        p.sys = 0;
         ne += o.ephemeris;
     }
     if (n_eph) *n_eph = ne;

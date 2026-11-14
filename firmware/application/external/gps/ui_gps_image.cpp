@@ -50,6 +50,10 @@ constexpr systime_t kImageRetryTicks = MS2ST(5000); /* a failed load is not retr
 
 gps_image::Check GpsView::load_image(gps_image::Id id) {
     const systime_t t0 = chTimeNow();
+    if (solver_ && solve_kind_ == 1 && solve_gal_n_ && mem_) { /* a GPS + Galileo solve reads the tracking image's RAM: stop it first */
+        mem_->autos.pvt.cancel = 1;
+        finish_solve(); /* waits for it; logged as cancelled */
+    }
     baseband::shutdown(); /* the M4 runs from m4_code: stop it before overwriting (no-op when none runs) */
     image_ = gps_image::ID_NONE;
     image_ready_ = false;

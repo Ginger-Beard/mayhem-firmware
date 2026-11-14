@@ -260,7 +260,8 @@ file starts with a header line and one "#TYPE,..." line per row type. Types:
           clock m, time correction ms (snapshot) or TCXO ppb (PVT), lat / lon
           1e-7 deg, alt m, speed cm/s; PVT also: satellites below the 5 deg
           mask left out, mean troposphere and ionosphere corrections m x10,
-          ionosphere source (0 none, 1 decoded off the air, 2 cached)
+          ionosphere source (0 none, 1 decoded off the air, 2 cached),
+          systems in it (G GPS / GE GPS + Galileo), Galileo satellites used
   IONO    the ionosphere source in use changed: none / air / cache, age of
           the cached set h, alpha0-3 x1e9, beta0-3
   SCREEN  the Fix tab's rows (joined by |) whenever they change, with the
@@ -310,6 +311,39 @@ file starts with a header line and one "#TYPE,..." line per row type. Types:
           (1) or not (0), alert page, pages good / bad on that channel so far,
           GST week and time of week s (word types 0, 5, 6), the 128-bit word
           in hex
+  GEPH    a Galileo ephemeris event from the pages: event (new: words 1-4 of
+          one IODnav and word 5 complete, SVID right: in the table / same:
+          the same batch again / iod_wait: words 1-4 of two batches, waiting
+          for the rest of the new one / bad_svid: word 4 names another
+          satellite, dropped / bad_value: not a plausible orbit / ggto: the
+          GST-GPS offset from word 10 / ggto_none: word 10 says it is not
+          available), PRN, IODnav, toe s of week, SISA index, E1-B signal
+          health (0 ok), data validity (0 ok), BGD(E1,E5b) ps, af0 ns, sqrt(A)
+          x1000, then ephemerides built / rejected / batch waits so far
+          (iod_wait: the four IODnav values; ggto: A0G ps, A1G x1e15, t0G h,
+          WN0G, the offset now ps)
+  GMEAS   the Galileo measurement set of each precise solve's input: number,
+          sample (x2048), channels, per channel PRN:why:symbol count:code
+          phase in the 4 ms period (hex, 2^-32):transmit ms of week (from the
+          page time):time pages that agreed:E1C C/N0 x10; why = 0 in the
+          PVT input, 1 not tracking, 2 secondary code not in sync, 3 weaker
+          than 25 dB-Hz, 4 no page time yet, 5 page time not yet confirmed
+          by a second time page, 6 no usable ephemeris (not decoded yet,
+          unhealthy or older than 4 h), 7 PVT input full (GPS first)
+  GFIX    each GPS + Galileo solve against the GPS-only one: mode (ggto: the
+          GST-GPS offset from word 10 applied, one clock / isb: the Galileo -
+          GPS offset solved as a fifth unknown), GPS-only ok, GPS + Galileo
+          ok, used for the fix (1) or not, gate (in / solve failed / few
+          galileo: fewer than the mode needs after the checks / unchecked:
+          no spare satellite to check it / galileo residuals: over 15 m rms /
+          moved: further from the GPS-only fix than its error allows (3 x the
+          estimate, at least 15 m) / rms grew), GPS and Galileo satellites
+          used, offset solved ps, GGTO ps, residual rms m x10 of GPS alone and
+          of the mixed solve, Galileo and GPS residual rms in it m x10, HDOP
+          x10 GPS alone and mixed, distance between the two fixes dm, each
+          Galileo satellite's residual dm (x: left out), Galileo alone (System
+          wheel on Galileo, 4 or more): ok, satellites, distance from the
+          GPS-only fix dm
   IMG     a baseband image loaded from /APPS: image (GPS_L1A / GPS_L1T),
           result (ok / missing / read error / not an image / wrong image /
           other firmware version / too large / damaged), bytes, load time ms
@@ -360,19 +394,38 @@ well under a minute for all). System wheel on Galileo: "E31 38 dB-Hz
 heard", "E23 not found", "searching".
 A satellite heard goes on to a Galileo tracking channel when the M4 has
 time for it: "E31 el62 40 dB trk CS" (E1C C/N0; CS = its pilot's secondary
-code found: a verified Galileo signal; " N" once its navigation pages
-decode with a good CRC: they go to the log, not yet into the fix), "lost:
-search" while a lost channel
+code found: a verified Galileo signal; then " N" once its navigation pages
+decode with a good CRC, " E" once its ephemeris is decoded, " F" while it
+is in the fix shown), "lost: search" while a lost channel
 is searched again (given up after 60 s). GPS comes first: the channels
 share the M4 time (a Galileo channel costs about 1.6 GPS channels), so with
 8 GPS satellites tracked one Galileo channel fits, with 6 three, at most 4;
 a GPS satellite that needs a channel frees the weakest Galileo one. While
 Galileo channels run, the M4 has less time for the next searches (they get
-slower). The status row says "Heard 8 of 11 up, 2 trk". Nothing of Galileo
-enters the fix yet. Unticking the box stops the search and frees the
-Galileo channels at once; with the box off GPS is exactly as before. To
-keep the search but not track: set gal_trk=0 in /SETTINGS/rx_gps.ini (the
-number of Galileo channels allowed, 0-4, default 4).
+slower). The status row says "Heard 8 of 11 up, 2 trk". Unticking the
+box stops the search and frees the Galileo channels at once; with the box
+off GPS is exactly as before. To keep the search but not track: set
+gal_trk=0 in /SETTINGS/rx_gps.ini (the number of Galileo channels allowed,
+0-4, default 4).
+
+Galileo in the fix. A tracked satellite's ephemeris and clock come from its
+pages (word types 1-4 of one issue, IODnav, plus word 5's health and group
+delay: ~30 s after its pages start); its transmit time from the page time of
+week and the code phase. Each second the receiver solves GPS alone first,
+then GPS + Galileo: with the GST-GPS offset from word type 10 (sent once a
+minute) one clock for both, else the Galileo - GPS offset is solved as an
+extra unknown (needs 2 Galileo satellites; one Galileo satellite without
+the offset is left out). The GPS + Galileo solution is used only when it
+can be checked (a spare satellite), its Galileo residuals are small, and it
+stays within the GPS-only fix's error (3 x the estimate, at least 15 m) with
+residuals no worse; else the GPS-only fix stays. The Fix tab says which:
+"Used G6+E3 HDOP 1.1 chk T" and "Galileo in fix: G6+E3 own clk" (offset
+solved) or "... GGTO", else "Galileo fix: waiting ephemeris" (or why it is
+out). The System wheel on Galileo also solves Galileo alone when 4 or more
+are in the input (Heard Galileo page: "E alone: 4 sat 16 m off" = its
+distance from the GPS-only fix; with 4 satellites it cannot be checked).
+To keep Galileo out of the fix (tracking and pages still logged): set
+gal_fix=0 in /SETTINGS/rx_gps.ini (default 1).
 Needs /GPS/GALE1.BIN, the Galileo E1 codes, which you make yourself (the
 Galileo ICD's terms do not allow us to ship them in another form):
 download the OS SIS ICD's E1 code attachments (files for annexes C.7 E1-B

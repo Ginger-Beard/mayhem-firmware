@@ -181,7 +181,7 @@ Orbit from_alm(const AlmRec& a) {
 
 Vec3 sat_position(const Orbit& o, double t, double* clock_s) {
     const double a = o.sqrt_a * o.sqrt_a;
-    const double n = std::sqrt(kMu / (a * a * a)) + o.dn;
+    const double n = std::sqrt((o.ephemeris == 2 ? kMuGal : kMu) / (a * a * a)) + o.dn;
     /* toe is continuous GPS time: fold only an ephemeris (valid for hours; its
      * toc/toe weeks may differ at a week boundary). An almanac is used for
      * weeks or months: folding to +-3.5 days would put the satellite ~14 deg

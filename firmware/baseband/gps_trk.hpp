@@ -1684,8 +1684,18 @@ class Tracker {
             n++;
         }
         m.n = static_cast<uint8_t>(n);
+        if (gsh_) measure_gal(seq + 1, at); /* complete before the GPS counter moves */
         mem_barrier();
         sh_->meas_seq = seq + 1;
+    }
+    GAL_COLD void measure_gal(uint32_t seq, uint64_t at) {
+        const uint32_t gs = gsh_->meas_seq;
+        gal_acq::MeasSet& g = gsh_->meas[gs & 1u];
+        g.seq = seq;
+        g.sample = at;
+        for (int i = 0; i < gal_trk::kMaxTrk; i++) gal_[i].meas(g.ch[i]);
+        mem_barrier();
+        gsh_->meas_seq = gs + 1;
     }
 };
 

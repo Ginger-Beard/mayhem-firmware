@@ -69,6 +69,7 @@
 #include "gps_sys.hpp"
 #include "gal_e1.hpp"
 #include "gal_inav.hpp"
+#include "gal_eph.hpp"
 #endif
 
 namespace ui::external_app::gps {
@@ -240,6 +241,24 @@ struct GpsScratch {
         uint32_t lock_ms;
     };
     GalPrev gal_prev[gal_acq::kMaxTrk];
+};
+
+/* What the tracking image lends the app for Galileo (gal_acq::kNavWorkBytes,
+ * valid while the tracking image runs; Galileo needs it): the I/NAV
+ * decoder, the ephemerides / GGTO decoded from it, the Galileo measurement
+ * set of the PVT being solved and the solver's GPS + Galileo outputs. */
+struct GalNavMem {
+    gal_inav::Work inav;
+    gal_eph::Store eph;
+    gal_acq::MeasSet meas;                   /* the set of the GPS measurement in AutoState::meas */
+    uint8_t meas_ok;                         /* meas belongs to that GPS set */
+    uint8_t why[gal_inav::Work::kCh];        /* gal_eph::Why per channel, last PVT input */
+    uint8_t gate;                            /* gal_eph::Gate of the last GPS + Galileo solve */
+    PvtSolution mix;                         /* GPS + Galileo */
+    PvtSolution alone;                       /* Galileo only (System wheel on Galileo) */
+    float mix_gal_rms, mix_gps_rms;          /* residual rms of each system's satellites in `mix`, m */
+    int16_t mix_res_dm[gal_inav::Work::kCh]; /* Galileo residuals in `mix` (dm; 32767 not used), by PVT order */
+    uint8_t mix_prn[gal_inav::Work::kCh];
 };
 
 class GpsView;
@@ -647,6 +666,7 @@ class GpsView : public View {
     uint32_t log_on_{0};             /* diagnostics log (Log box on the Fix tab, saved) */
     uint32_t sys_view_{VIEW_ALL_L1}; /* the System wheel (Heard, Passes; saved) */
     uint32_t gal_on_{0};             /* the aided Galileo E1 search (Heard "E1" box; saved) */
+    uint32_t gal_fix_on_{1};         /* Galileo in the fix (rx_gps.ini gal_fix; 0 = never, GPS-only fixes) */
     app_settings::SettingsManager settings_;
     int8_t bias_shown_{-1};  /* last antenna-power state shown (read only) */
     uint32_t tab_shown_{99}; /* tab whose content was last refreshed */
@@ -951,6 +971,31 @@ class GpsView : public View {
     void gal_nav_step();                   /* frame handler: at most one page part */
     uint16_t gal_nav_pages(int prn) const; /* pages with a good CRC on that PRN's channel */
     void log_gal_page(const gal_inav::Page& p);
+    /* Galileo in the fix (ui_gps_gal.cpp): ephemerides from the pages, the
+     * Galileo measurement set, the PVT input, the gate after the solve */
+    GalNavMem* gal_mem() const { return static_cast<GalNavMem*>(gal_nav_); }
+    void gal_meas_copy();                                           /* with a new GPS measurement set (UI thread) */
+    int gal_add_pvt(int n);                                         /* Galileo entries after the n GPS ones; decides the mode */
+    void gal_solve_stats();                                         /* solver thread: residuals of the GPS + Galileo solve */
+    bool gal_finish(bool gps_ok);                                   /* UI thread: the gate; true = use the GPS + Galileo solution */
+    uint8_t gal_eph_ready(int prn) const;                           /* 1: a usable ephemeris for that PRN */
+    uint8_t gal_eph_count() const;                                  /* tracked Galileo satellites with a usable ephemeris */
+    bool gal_in_fix(int prn) const;                                 /* that PRN was used in the fix shown */
+    void gal_fix_text(char* b, size_t n, bool alone = false) const; /* one line: Galileo in the fix, or why not */
+    void log_gal_eph(uint8_t ev, int ch, int slot, uint8_t prn);
+    void log_gal_meas();
+    void log_gal_fix(bool gps_ok, bool use);
+    uint8_t solve_gal_n_{0};     /* Galileo entries in the PVT input being solved */
+    uint8_t solve_gal_mode_{0};  /* 0 none, 1 GGTO applied (one clock), 2 Galileo - GPS offset solved */
+    uint8_t solve_gal_alone_{0}; /* also solve Galileo alone (wheel on Galileo, >= 4) */
+    bool solve_mix_ok_{false}, solve_alone_ok_{false};
+    float solve_ggto_ns_{0};
+    uint8_t fix_gal_{0};       /* Galileo satellites in the fix shown (0: GPS only) */
+    uint8_t fix_gal_mode_{0};  /* its solve_gal_mode_ */
+    uint64_t fix_gal_prns_{0}; /* bit prn - 1: Galileo satellites in the fix shown */
+    uint16_t alone_dm_{0};     /* Galileo alone: horizontal distance from the GPS-only fix, dm (0xFFFF none) */
+    uint8_t alone_n_{0};       /* its satellites (0: no Galileo-alone solution last time) */
+    uint8_t gal_out_why_{0};   /* why Galileo is not in the fix: 1 off (ini), 2 no input (gal_eph::Why of the best channel + 10), 3 gate (gal_eph::Gate + 20) */
     uint8_t gal_heard() const; /* satellites heard in this round */
     void log_gal(const gal_acq::Result& r);
     void image_fallback_ram(); /* no image: use the kept block as plain RAM */

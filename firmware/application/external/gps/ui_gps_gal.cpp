@@ -59,7 +59,7 @@ void GpsView::gal_reset() {
     std::memset(mem_->gal_state, 0, sizeof(mem_->gal_state));
     std::memset(mem_->gal_cn0, 0, sizeof(mem_->gal_cn0));
     std::memset(static_cast<void*>(mem_->gal_prev), 0, sizeof(mem_->gal_prev));
-    if (gal_nav_) std::memset(gal_nav_, 0, sizeof(gal_inav::Work));
+    if (gal_nav_) std::memset(gal_nav_, 0, sizeof(GalNavMem));
     gal_round_t_ = chTimeNow();
 }
 
@@ -148,22 +148,25 @@ void GpsView::gal_poll() {
     if (changed) view_heard_.show();
 }
 
-static_assert(sizeof(gal_inav::Work) <= gal_acq::kNavWorkBytes, "gal_inav::Work outgrew the RAM the tracking image lends");
+static_assert(sizeof(GalNavMem) <= gal_acq::kNavWorkBytes, "GalNavMem outgrew the RAM the tracking image lends");
 static_assert(gal_inav::Work::kCh >= gal_acq::kMaxTrk, "one decoder per Galileo channel");
 
 uint16_t GpsView::gal_nav_pages(int prn) const {
     if (!gal_nav_) return 0;
-    const gal_inav::Work& w = *static_cast<const gal_inav::Work*>(gal_nav_);
+    const gal_inav::Work& w = gal_mem()->inav;
     for (const auto& c : w.ch)
         if (c.prn == prn) return c.pages_ok;
     return 0;
 }
 
 /* frame handler (E1 box on, tracking image): the next channel's symbols, at
- * most one page part decoded per frame (~150k M0 instructions) */
+ * most one page part decoded per frame (~150k M0 instructions). Not while
+ * the solver runs: it may read the Galileo ephemerides a page would replace
+ * (the symbols wait in the 2 s rings). */
 void GpsView::gal_nav_step() {
-    if (!gal_on_ || !gal_nav_ || !gal_trk_sh_ || image_ != gps_image::ID_L1T || !tracking_) return;
-    gal_inav::Work& w = *static_cast<gal_inav::Work*>(gal_nav_);
+    if (!gal_on_ || !gal_nav_ || !gal_trk_sh_ || image_ != gps_image::ID_L1T || !tracking_ || solving()) return;
+    GalNavMem& gm = *gal_mem();
+    gal_inav::Work& w = gm.inav;
     for (int k = 0; k < gal_acq::kMaxTrk; k++) {
         const int i = (gal_nav_rr_ + k) % gal_acq::kMaxTrk;
         const uint8_t prn = mem_ ? mem_->gal_prev[i].prn : 0;
@@ -172,13 +175,172 @@ void GpsView::gal_nav_step() {
         const uint32_t parts = w.ch[i].parts;
         gal_inav::Page pg;
         const bool page = gal_inav::step(w, i, prn, gal_trk_sh_->sym[i], gal_acq::kSymRing, gal_trk_sh_->sym_write[i], gal_trk_sh_->sym_epoch[i], &pg);
-        if (page) log_gal_page(pg);
+        if (page) {
+            log_gal_page(pg);
+            int slot = -1;
+            const uint8_t ev = gal_eph::take(gm.eph, i, gal_trk_sh_->sym_epoch[i], pg, now_gps(), &slot);
+            if (ev != gal_eph::EV_NONE && ev != gal_eph::EV_WORD) log_gal_eph(ev, i, slot, prn);
+            if (ev == gal_eph::EV_NEW) view_heard_.show();
+        }
         if (page || w.ch[i].parts != parts) { /* one part decoded: the next channel next frame */
             gal_nav_rr_ = static_cast<uint8_t>((i + 1) % gal_acq::kMaxTrk);
             if (page && pg.crc_ok && w.ch[i].pages_ok == 1) view_heard_.show(); /* " N" on its row */
             return;
         }
     }
+}
+
+uint8_t GpsView::gal_eph_ready(int prn) const {
+    return gal_nav_ && gal_eph::usable(gal_mem()->eph, prn, now_gps()) ? 1 : 0;
+}
+
+uint8_t GpsView::gal_eph_count() const {
+    if (!mem_ || !gal_nav_) return 0;
+    uint8_t n = 0;
+    for (const auto& c : mem_->gal_prev)
+        if (c.prn && c.state != gps_trk::TRK_IDLE && c.state != gps_trk::TRK_FAILED) n += gal_eph_ready(c.prn);
+    return n;
+}
+
+bool GpsView::gal_in_fix(int prn) const {
+    return fix_gal_ && prn >= 1 && prn <= 64 && ((fix_gal_prns_ >> (prn - 1)) & 1u);
+}
+
+/* one short line (<= 23 characters: the Heard list) on Galileo in the fix;
+ * alone: the Galileo-alone solution when there is one (System wheel on Galileo) */
+void GpsView::gal_fix_text(char* b, size_t n, bool alone) const {
+    Fmt f{b, n};
+    if (alone && alone_n_) {
+        f.s("E alone: ").u(alone_n_).s(" sat ");
+        if (alone_dm_ == 0xFFFF)
+            f.s("no GPS");
+        else
+            f.u((alone_dm_ + 5u) / 10u).s(" m off");
+        return;
+    }
+    if (fix_gal_) {
+        f.s("in fix: G").u(static_cast<uint32_t>(fix_.used - fix_gal_)).s("+E").u(fix_gal_).s(fix_gal_mode_ == 1 ? " GGTO" : " own clk");
+        return;
+    }
+    static const char* const kIn[] = {"", "fix: none tracked", "fix: no sec. code yet", "fix: too weak", "fix: waiting page time", "fix: confirming time", "fix: waiting ephemeris", "fix: no room (GPS)",
+                                      "", "fix: 1 sat, no GGTO"};
+    static const char* const kGate[] = {"", "fix: out, solve failed", "fix: out, few left", "fix: out, unchecked", "fix: out, residuals", "fix: out, moved fix", "fix: out, rms grew"};
+    const uint8_t w = gal_out_why_;
+    if (w == 1)
+        f.s("fix: off (gal_fix=0)");
+    else if (w >= 10 && w < 20 && kIn[w - 10][0])
+        f.s(kIn[w - 10]);
+    else if (w >= 20 && w < 27)
+        f.s(kGate[w - 20]);
+    else
+        f.s("fix: not in it yet");
+}
+
+/* a new GPS measurement set was copied (UI thread): the Galileo set of the
+ * same sample, written by the image before the GPS counter moved (logged
+ * with the PVT input: gal_add_pvt) */
+void GpsView::gal_meas_copy() {
+    GalNavMem* gm = gal_mem();
+    if (!gm) return;
+    gm->meas_ok = 0;
+    if (!gal_on_ || !gal_trk_sh_ || image_ != gps_image::ID_L1T || !mem_) return;
+    const uint32_t s = gal_trk_sh_->meas_seq;
+    if (!s) return;
+    std::memcpy(static_cast<void*>(&gm->meas), const_cast<const gal_acq::MeasSet*>(&gal_trk_sh_->meas[(s - 1) & 1u]), sizeof(gm->meas));
+    const AutoState& a = mem_->autos;
+    gm->meas_ok = gal_trk_sh_->meas_seq == s && gm->meas.seq == a.meas.seq && gm->meas.sample == a.meas.sample;
+}
+
+/* PVT input (UI thread, before the solver starts): Galileo entries after the n
+ * GPS ones when Galileo may enter the fix. GST - GPS from word type 10 when
+ * known (one clock), else the offset is solved (needs 2 Galileo); one Galileo
+ * satellite and no GGTO: left out. Returns the new count. */
+int GpsView::gal_add_pvt(int n) {
+    solve_gal_n_ = 0;
+    solve_gal_mode_ = 0;
+    solve_gal_alone_ = 0;
+    GalNavMem* gm = gal_mem();
+    if (!gal_on_ || !gm || image_ != gps_image::ID_L1T || !mem_) return n;
+    if (!gal_fix_on_) {
+        gal_out_why_ = 1;
+        return n;
+    }
+    if (!gm->meas_ok) {
+        gal_out_why_ = 10 + gal_eph::W_IDLE;
+        return n;
+    }
+    AutoState& a = mem_->autos;
+    double ggto = 0;
+    const double t = a.pvt.t_ref;
+    const bool have_ggto = gal_eph::ggto_at(gm->eph, t, &ggto);
+    const int n2 = gal_eph::add_pvt(a.pvt, n, gm->meas, gm->inav, gm->eph, t, have_ggto ? ggto : 0.0, gm->why);
+    log_gal_meas(); /* with the reasons just found */
+    const int k = n2 - n;
+    /* the channel that got furthest, for the screen when none is used */
+    uint8_t best = gal_eph::W_IDLE;
+    for (int i = 0; i < gal_inav::Work::kCh; i++)
+        if (gm->why[i] != gal_eph::W_IDLE && (best == gal_eph::W_IDLE || gm->why[i] > best)) best = gm->why[i];
+    if (!k) {
+        gal_out_why_ = static_cast<uint8_t>(10 + best);
+        return n;
+    }
+    if (!have_ggto && k < 2) { /* its own clock offset would take the one satellite's information */
+        gal_out_why_ = 10 + 9;
+        return n;
+    }
+    solve_gal_n_ = static_cast<uint8_t>(k);
+    solve_gal_mode_ = have_ggto ? 1 : 2;
+    solve_ggto_ns_ = static_cast<float>(ggto * 1e9);
+    solve_gal_alone_ = (sys_view_ == VIEW_GAL && k >= 4) ? 1 : 0;
+    return n2;
+}
+
+/* solver thread, right after the GPS + Galileo solve: the residuals the gate
+ * and the log need (the Galileo-alone solve reuses the work space) */
+void GpsView::gal_solve_stats() {
+    GalNavMem* gm = gal_mem();
+    if (!gm) return;
+    const PvtWork& w = mem_->autos.pvt;
+    double sg = 0, se = 0;
+    int ng = 0, ne = 0, k = 0;
+    for (int i = 0; i < solve_pvt_n_; i++) {
+        const bool gal = w.in[i].sys != 0;
+        if (gal && k < gal_inav::Work::kCh) {
+            gm->mix_prn[k] = w.in[i].prn;
+            const double r = w.resid[i] * 10.0;
+            gm->mix_res_dm[k++] = static_cast<int16_t>(!solve_mix_ok_ || !w.use[i] ? 32767 : (r > 32766 ? 32766 : (r < -32766 ? -32766 : std::lround(r))));
+        }
+        if (!solve_mix_ok_ || !w.use[i]) continue;
+        (gal ? se : sg) += w.resid[i] * w.resid[i];
+        (gal ? ne : ng)++;
+    }
+    for (; k < gal_inav::Work::kCh; k++) gm->mix_prn[k] = 0;
+    gm->mix_gal_rms = ne ? static_cast<float>(std::sqrt(se / ne)) : 0.0f;
+    gm->mix_gps_rms = ng ? static_cast<float>(std::sqrt(sg / ng)) : 0.0f;
+}
+
+/* UI thread, after the solver: whether GPS + Galileo replaces GPS alone */
+bool GpsView::gal_finish(bool gps_ok) {
+    GalNavMem* gm = gal_mem();
+    if (!gm || !solve_gal_n_) {
+        alone_n_ = 0;
+        return false;
+    }
+    const gal_eph::Gate g = gal_eph::gate(gps_ok, mem_->pvt, solve_mix_ok_, gm->mix, solve_gal_mode_ == 2, gm->mix_gal_rms);
+    gm->gate = g;
+    const bool use = g == gal_eph::G_IN;
+    gal_out_why_ = use ? 0 : static_cast<uint8_t>(20 + g);
+    fix_gal_prns_ = 0;
+    if (use)
+        for (int k = 0; k < gal_inav::Work::kCh; k++)
+            if (gm->mix_prn[k] && gm->mix_res_dm[k] != 32767) fix_gal_prns_ |= 1ull << (gm->mix_prn[k] - 1);
+    alone_n_ = solve_alone_ok_ ? gm->alone.used : 0;
+    if (solve_alone_ok_) {
+        const double h = gps_ok ? gal_eph::horiz_m(gm->alone.pos, mem_->pvt.pos) * 10.0 : -1.0;
+        alone_dm_ = static_cast<uint16_t>(h < 0 ? 0xFFFF : (h > 65000 ? 65000 : h));
+    }
+    log_gal_fix(gps_ok, use);
+    return use;
 }
 
 /* the tracking image finished the search */
