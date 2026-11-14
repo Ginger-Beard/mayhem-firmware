@@ -239,7 +239,7 @@ class Acquirer {
         uint32_t prn_mask{0};  /* bit p-1: search PRN p */
         int16_t center[32]{};  /* Doppler window centre per PRN, Hz */
         uint8_t half_bins{12}; /* bins either side of the centre (12: +-6 kHz) */
-        uint8_t refine{1};     /* refine detected PRNs */
+        uint8_t refine{1};     /* refine detected PRNs: 1 Doppler (25 Hz) + code (1/16 chip), 2 Doppler only (50 Hz) */
     };
 
     explicit Acquirer(const Snapshot& snap)
@@ -301,6 +301,7 @@ class Acquirer {
                            REFINE,
                            DONE };
     static constexpr int kFineSteps = 21; /* fine Doppler: -250 .. +250 Hz, 25 Hz */
+    static constexpr int kFastSteps = 11; /* fast refine: -250 .. +250 Hz, 50 Hz */
     static constexpr int kCodePts = 49;   /* code offsets: -1.5 .. +1.5 chips, 1/16 */
     const Snapshot& snap_;
     Fft fft_{};
@@ -482,6 +483,20 @@ class Acquirer {
      * the powers 0.5 chip early and late balance (as a DLL settles). */
     void refine_unit() {
         Result& r = res_[refine_prn_ - 1];
+        if (req_.refine == 2) { /* fast (tracking hand-over): Doppler only, +-250 Hz in 50 Hz steps; the
+                                 * search's interpolated code phase (~0.1 chip) is kept */
+            const float f = r.doppler + 50.0f * (rj_ - kFastSteps / 2);
+            const double p = power(r.code_phase, f);
+            if (p > rp_best_) {
+                rp_best_ = p;
+                rf_best_ = f;
+            }
+            if (++rj_ < kFastSteps) return;
+            r.doppler = rf_best_;
+            r.refined = 2;
+            next_refine();
+            return;
+        }
         if (rj_ < kFineSteps) {
             const float f = r.doppler + 25.0f * (rj_ - kFineSteps / 2);
             const double p = power(r.code_phase, f);

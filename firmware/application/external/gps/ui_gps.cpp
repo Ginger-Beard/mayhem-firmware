@@ -2019,7 +2019,9 @@ bool GpsView::start_search(Job job, uint8_t k_ms, bool force_full) {
     GpsRxConfigMessage m;
     m.cmd = GpsRxConfigMessage::CMD_SEARCH;
     m.k_ms = k_ms;
-    m.refine = job == JOB_FIX || job == JOB_AUTO;
+    /* Autonomous: the fast refine (Doppler only): the hand-over is ~10 s younger on the
+     * device, and the coarse fix it also feeds is almanac-limited (~1 km) anyway */
+    m.refine = job == JOB_AUTO ? 2 : (job == JOB_FIX ? 1 : 0);
     m.confirm = 1; /* a PRN is reported only if a second snapshot confirms it */
     m.track = job == JOB_AUTO; /* the confirmed PRNs go straight to the tracking loops */
     m.max_ch = 8;              /* M4: ~60 % with 8 channels (notes, gps-autonomous) */
