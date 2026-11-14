@@ -53,6 +53,14 @@ struct PvtMeas {
     uint8_t prn;
 };
 
+/* why pvt_solve returned false (diagnostics log) */
+enum PvtFail : uint8_t { PVT_OK = 0,
+                         PVT_FEW,      /* fewer than 4 satellites */
+                         PVT_CANCEL,   /* stopped from the UI */
+                         PVT_LS,       /* least squares singular or not converging */
+                         PVT_RAIM,     /* residuals still above the limit with >= 5 */
+                         PVT_HEIGHT }; /* converged far from the earth's surface */
+
 struct PvtSolution {
     Vec3 pos{};
     Vec3 vel{};
@@ -67,6 +75,8 @@ struct PvtSolution {
     uint8_t checked{0};  /* 1: >= 5 satellites, residuals consistent */
     bool vel_ok{false};
     bool ok{false};
+    uint8_t fail{PVT_OK};
+    uint8_t iters{0}; /* least-squares iterations of the last solve */
 };
 
 struct PvtWork {

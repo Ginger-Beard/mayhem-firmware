@@ -164,10 +164,16 @@ bool pvt_solve(PvtWork& w, int n, const Vec3& prior, double dt_rx_guess, PvtSolu
     const double t_rx_guess = dt_rx_guess; /* all times below are relative to w.t_ref */
     out = PvtSolution{};
     if (n > kMaxPvt) n = kMaxPvt;
-    if (n < 4) return false;
+    if (n < 4) {
+        out.fail = PVT_FEW;
+        return false;
+    }
     /* satellite positions at transmission (the receive time does not enter) */
     for (int i = 0; i < n; i++) {
-        if (w.cancel) return false;
+        if (w.cancel) {
+            out.fail = PVT_CANCEL;
+            return false;
+        }
         const Orbit& o = *w.in[i].orbit;
         double clk = 0;
         sat_position(o, w.t_ref + w.in[i].dt_tx, &clk);
@@ -181,7 +187,10 @@ bool pvt_solve(PvtWork& w, int n, const Vec3& prior, double dt_rx_guess, PvtSolu
     double b = 0;
     double rms = 0;
     int used = 0;
-    if (!ls(w, n, x, b, t_rx_guess, true, &rms, &used)) return false;
+    if (!ls(w, n, x, b, t_rx_guess, true, &rms, &used)) {
+        out.fail = w.cancel ? PVT_CANCEL : PVT_LS;
+        return false;
+    }
     /* RAIM: drop the worst while the residuals disagree (>= 5 to check) */
     uint8_t dropped = 0;
     while (used >= 5 && rms > max_rms) {
@@ -192,15 +201,27 @@ bool pvt_solve(PvtWork& w, int n, const Vec3& prior, double dt_rx_guess, PvtSolu
         dropped++;
         Vec3 x2 = x;
         double b2 = b;
-        if (!ls(w, n, x2, b2, t_rx_guess, true, &rms, &used)) return false;
+        if (!ls(w, n, x2, b2, t_rx_guess, true, &rms, &used)) {
+            out.fail = w.cancel ? PVT_CANCEL : PVT_LS;
+            return false;
+        }
         x = x2;
         b = b2;
     }
-    if (used >= 5 && rms > max_rms) return false;
+    out.resid_rms_m = rms;
+    out.used = static_cast<uint8_t>(used);
+    out.dropped = dropped;
+    if (used >= 5 && rms > max_rms) {
+        out.fail = PVT_RAIM;
+        return false;
+    }
     /* plausibility: near the earth's surface */
     double lat, lon, h;
     ecef_to_lla(x, lat, lon, h);
-    if (h < -1000.0 || h > 20000.0) return false;
+    if (h < -1000.0 || h > 20000.0) {
+        out.fail = PVT_HEIGHT;
+        return false;
+    }
     out.pos = x;
     out.clock_m = b;
     out.dt_rx = t_rx_guess - b / kC;

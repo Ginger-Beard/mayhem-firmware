@@ -451,6 +451,7 @@ set(EXTCPPSRC
 	external/gps/gps_solve.cpp
 	external/gps/gps_pvt.cpp
 	external/gps/gps_auto.cpp
+	external/gps/ui_gps_log.cpp
 	external/gps/gps_freq.cpp
 	external/gps/gps_follow.cpp
 	external/gps/ui_gps_follow.cpp

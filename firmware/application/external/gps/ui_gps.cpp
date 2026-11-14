@@ -1092,7 +1092,11 @@ FixView::FixView(GpsView& main, Rect r)
       button_fix_{{UI_POS_X(0), UI_POS_Y(1), UI_POS_WIDTH(14), UI_POS_HEIGHT(1)}, "Get fix"},
       button_save_{{UI_POS_X(16), UI_POS_Y(1), UI_POS_WIDTH(14), UI_POS_HEIGHT(1)}, "Save pos"},
       text_{{0, UI_POS_Y(2) + 4, UI_POS_MAXWIDTH, UI_POS_HEIGHT(kRows)}, lines_, kRows, &ui::font::fixed_8x16} {
-    add_children({&field_method_, &button_fix_, &button_save_, &text_});
+    add_children({&field_method_, &check_log_, &button_fix_, &button_save_, &text_});
+    check_log_.set_value(main_.log_on_ != 0);
+    check_log_.on_select = [this](Checkbox&, bool v) {
+        main_.log_on_ = v ? 1 : 0; /* the file opens / closes in the frame handler */
+    };
     field_method_.set_selected_index(0, false);
     field_method_.on_change = [this](size_t, OptionsField::value_t) {
         show();
@@ -1386,6 +1390,8 @@ void FixView::show_auto() {
     }
     if (main_.fix_ok_ && main_.fix_mode_ == GpsView::FIX_COARSE && main_.tracking_)
         text_.set(9, "Keep it outdoors: upgrading", grey);
+    else if (!main_.fix_ok_ && main_.fix_tried_ && main_.tracking_)
+        text_.set(9, "No coarse fix: clock/Pos off?", yellow); /* the snapshot solve was refused; the PVT follows */
 }
 
 void FixView::show() {
@@ -1402,6 +1408,7 @@ void FixView::show() {
     text_.begin();
     if (field_method_.selected_index_value() != 0) {
         show_auto();
+        show_log_error();
         text_.end();
         return;
     }
@@ -1498,7 +1505,17 @@ void FixView::show() {
     }
     if (!result) show_blocker(6);
     if (save_msg_) text_.set(kRows - 1, save_msg_, save_color_);
+    show_log_error();
     text_.end();
+}
+
+/* a card problem with the diagnostics log: the bottom row, red (never halts) */
+void FixView::show_log_error() {
+    if (!main_.log_on_ || !main_.log_err_ || save_msg_) return;
+    char b[TextLines::kCols + 1];
+    Fmt f{b, sizeof(b)};
+    f.s("LOG ERROR: ").s(main_.log_err_).s(" (").u(main_.log_errs_).c(')');
+    text_.set(kRows - 1, b, Color::red());
 }
 
 /* ---------------------------------------------------------------- position */
@@ -1756,7 +1773,8 @@ GpsView::GpsView(NavigationView& nav, uint32_t reselect)
           app_settings::Mode::RX,
           {{"utc_off_min"sv, &utc_off_min_},
            {"tab"sv, &tab_},
-           {"depth"sv, &depth_}}},
+           {"depth"sv, &depth_},
+           {"log"sv, &log_on_}}},
       reselect_{reselect},
       view_fix_{*this, view_rect_},
       view_heard_{*this, view_rect_},
@@ -1812,6 +1830,16 @@ GpsView::GpsView(NavigationView& nav, uint32_t reselect)
 
 GpsView::~GpsView() {
     rtc_time::signal_tick_second -= tick_token_;
+    if (log_file_ && mem_) { /* what is still in the ring, then f_close (syncs) */
+        for (int k = 0; k < 16 && log_pending(mem_->log); k++) {
+            const char* p;
+            const size_t n = log_piece(mem_->log, log_pos_, &p);
+            if (log_file_->write(p, n).is_error()) break;
+            log_taken(mem_->log, n);
+            log_pos_ += static_cast<uint32_t>(n);
+        }
+    }
+    log_close();
     tab_ = tab_view_.selected();
     if (solver_) { /* it works in the lent RAM: stop it first (one satellite row at most) */
         if (mem_) mem_->solve.cancel = mem_->autos.pvt.cancel = 1;
@@ -2073,6 +2101,7 @@ void GpsView::on_status(const GpsRxStatusMessage& m) {
     status_.rms_x10 = m.rms_x10;
     status_.clip_permille = m.clip_permille;
     status_.seq = m.seq;
+    status_dt_ms_ = m.dt_ms;
     status_.units = m.units;
     status_.unit_cycles = m.unit_cycles;
     if (!mem_ && m.scratch && m.scratch_size >= sizeof(GpsScratch)) {
@@ -2102,6 +2131,7 @@ void GpsView::on_status(const GpsRxStatusMessage& m) {
     if (!awaiting_seq_ && job_ != JOB_NONE && m.seq == job_seq_ && m.state == GpsRxStatusMessage::DONE && !done_) {
         done_ = true;
         results_ = static_cast<const gps_rx::Result*>(m.results);
+        log_results(results_, m.k_ms);
         if (job_ == JOB_FIX || job_ == JOB_AUTO) solve_pending_ = pos_valid_ && (n_alm_ || n_eph_); /* Autonomous: the coarse fix first */
         if (mem_ && results_) {
             const uint32_t t = static_cast<uint32_t>(now_unix());
@@ -2113,7 +2143,10 @@ void GpsView::on_status(const GpsRxStatusMessage& m) {
         }
     }
     if (m.track) trk_sh_ = static_cast<const gps_trk::Shared*>(m.track);
-    if (job_ == JOB_AUTO && done_ && m.state == GpsRxStatusMessage::TRACKING) tracking_ = true;
+    if (job_ == JOB_AUTO && done_ && m.state == GpsRxStatusMessage::TRACKING && !tracking_) {
+        tracking_ = true;
+        log_handover();
+    }
     if (job_ == JOB_AUTO && tracking_) {
         auto_poll_m4();
         view_fix_.show();
@@ -2142,7 +2175,10 @@ void GpsView::solve_fix() {
     fix_ok_ = false;
     fix_heard_ = fix_cand_ = 0;
     fix_mode_ = FIX_NONE;
-    if (!mem_ || !results_ || !pos_valid_ || solver_) return;
+    if (!mem_ || !results_ || !pos_valid_ || solver_) {
+        log_fix(0, false, !pos_valid_ ? "not tried: no saved position" : (solver_ ? "not tried: solver busy" : "not tried: no results"));
+        return;
+    }
     Measurement* m = mem_->solve.in; /* off the stack */
     int n = 0;
     bool all_eph = true;
@@ -2159,11 +2195,17 @@ void GpsView::solve_fix() {
         if (o.ephemeris && o.toe > newest) newest = o.toe;
     }
     fix_cand_ = static_cast<uint8_t>(n);
-    if (n < kMinFixSats) return;
+    if (n < kMinFixSats) {
+        log_fix(0, false, "not tried: fewer than 6 heard with an orbit");
+        return;
+    }
     fix_mode_ = all_eph ? FIX_PRECISE : FIX_COARSE;
     fix_alm_age_d_ = alm_age_days();
     fix_eph_age_s_ = tg - newest;
-    if (fix_mode_ == FIX_COARSE && (fix_alm_age_d_ < 0 || fix_alm_age_d_ > kAlmMaxAgeDays)) return;
+    if (fix_mode_ == FIX_COARSE && (fix_alm_age_d_ < 0 || fix_alm_age_d_ > kAlmMaxAgeDays)) {
+        log_fix(0, false, "not tried: no almanac or older than 30 d");
+        return;
+    }
     solve_n_ = n;
     solve_t_ = tg;
     solve_prior_ = rx_;
@@ -2171,9 +2213,11 @@ void GpsView::solve_fix() {
     solve_max_dt_ = all_eph ? 60.0 : kAlmMaxDtS;
     solve_kind_ = 0;
     mem_->solve.cancel = 0;
+    log_solve_start(0);
     solver_done_ = false;
     solver_ = chThdCreateFromHeap(nullptr, kSolverStack, NORMALPRIO - 2, solver_fn, this);
     if (!solver_) { /* no heap for the thread: solve here (the UI waits) */
+        log_error("solver thread", "no heap: snapshot solve on the UI thread");
         solve_ok_ = snapshot_fix(mem_->solve.in, solve_n_, solve_prior_, solve_t_, solve_out_, mem_->solve, solve_max_rms_, solve_max_dt_);
         solver_done_ = true;
         finish_solve();
@@ -2207,6 +2251,7 @@ void GpsView::finish_solve() {
     }
     const bool cancelled = mem_ && mem_->solve.cancel;
     fix_ok_ = !cancelled && solve_ok_;
+    log_fix(0, fix_ok_, cancelled ? "cancelled" : (solve_ok_ ? "ok" : "rejected: residuals / clock over the limits (No fix: the N heard disagree)"));
     if (cancelled) fix_tried_ = false;
     if (fix_ok_) {
         fix_ = solve_out_;
@@ -2240,10 +2285,12 @@ void GpsView::auto_poll_m4() {
             if (sh->ch_seq == s1) break;
         }
     } else {
+        log_subframes();
         newmeas = auto_poll(a, sh, week_hint, mem_->orbits, [&](int prn) {
-            (void)prn;
             new_eph = true;
+            log_eph_event("decoded", prn);
         });
+        if (newmeas) log_meas();
     }
     if (new_eph) { /* off-air ephemerides now in the orbit table */
         int ne = 0;
@@ -2304,14 +2351,23 @@ void GpsView::auto_poll_m4() {
     solve_prior_ = (fix_ok_ ? fix_.pos : (pos_valid_ ? rx_ : Vec3{0, 0, 0}));
     solve_kind_ = 1;
     a.pvt.cancel = 0;
+    log_solve_start(eph_only ? 2 : 1);
     solver_done_ = false;
     solver_ = chThdCreateFromHeap(nullptr, kSolverStack, NORMALPRIO - 2, solver_fn, this);
-    if (!solver_) solve_kind_ = 0; /* no heap now: the next second */
+    if (!solver_) { /* no heap now: the next second */
+        solve_kind_ = 0;
+        log_error("solver thread", "no heap: PVT skipped");
+    }
 }
 
 void GpsView::auto_finish_pvt() {
     if (!mem_) return;
     const bool cancelled = mem_->autos.pvt.cancel;
+    {
+        static const char* const kWhy[] = {"ok", "rejected: fewer than 4", "cancelled", "rejected: least squares failed", "rejected: residuals over the limit (RAIM)", "rejected: height implausible"};
+        const uint8_t fl = mem_->pvt.fail;
+        log_fix(solve_pvt_eph_ ? 2 : 1, !cancelled && solve_ok_, cancelled ? "cancelled" : kWhy[fl < 6 ? fl : 0]);
+    }
     if (cancelled || !solve_ok_) return;
     PvtSolution& p = mem_->pvt;
     /* a coarse (almanac) PVT never replaces a precise fix */
@@ -2384,6 +2440,8 @@ void GpsView::auto_cache_step() {
     }
     delete f;
     if (!ok) { /* no card / no folder: give up on this one */
+        cache_errs_++;
+        log_error("EPH_AIR.TXT write failed", "");
         c.fresh = 0;
         cache_line_ = 0;
         return;
@@ -2392,11 +2450,13 @@ void GpsView::auto_cache_step() {
         cache_line_ = 0;
         c.fresh = 0;
         cache_written_++;
+        log_eph_event("cached", c.prn);
         cache_cursor_ = static_cast<uint8_t>((cache_cursor_ + 1) % kAutoSlots);
     }
 }
 
 void GpsView::on_frame() {
+    log_frame(); /* the diagnostics log: rows, card writes (sector-bounded), sync */
     /* the selected tab's content is refreshed when it becomes visible */
     const uint32_t sel = tab_view_.selected();
     if (sel != tab_shown_) {

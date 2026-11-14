@@ -270,6 +270,7 @@ class Framer {
                 }
                 words_[w] = d;
                 prev_ = raw;
+                words_ok_++;
                 if (w == 9) {
                     in_frame_ = false;
                     since_tlm_ = 300;
@@ -323,6 +324,7 @@ class Framer {
     uint8_t sfid() const { return static_cast<uint8_t>((words_[1] >> 2) & 7u); }
     uint32_t parity_errs() const { return parity_errs_; }
     uint32_t subframes() const { return subframes_; }
+    uint32_t words_ok() const { return words_ok_; }
     /* bits since the start of the current subframe (valid while synced): the
      * channel keeps its own count; this is for tests */
     uint32_t nbits() const { return nbits_; }
@@ -339,7 +341,7 @@ class Framer {
     uint32_t cand_tow_{0}, next_tow_{0}, cur_tow_s_{0};
     uint32_t words_[10]{};
     uint32_t prev_{0};
-    uint32_t parity_errs_{0}, subframes_{0};
+    uint32_t parity_errs_{0}, subframes_{0}, words_ok_{0};
 
     /* TLM + HOW in the last 60 bits, either polarity; *tow = HOW TOW count */
     bool try_tlm(uint32_t* tow) {
@@ -472,6 +474,14 @@ class Channel {
         o.subframes = framer_.subframes();
         o.parity_errs = framer_.parity_errs();
         o.tow_s = last_tow_s_;
+        o.mode = state_ == TRK_SEARCH ? 3 : (state_ == TRK_PULLIN ? 0 : (narrow_ ? 2 : 1));
+        const float pl = pld_s_ * 100.0f;
+        o.pld_x100 = static_cast<int8_t>(pl > 100.0f ? 100 : (pl < -100.0f ? -100 : pl));
+        o.bits = bits_out_;
+        o.words_ok = framer_.words_ok();
+        o.code_x64 = static_cast<uint16_t>((m_ + f_ / 4294967296.0) * 32.0);
+        o.sweeps = sweeps_;
+        o.code_err = code_err_;
     }
     uint8_t flags() const {
         uint8_t f = 0;
@@ -570,6 +580,8 @@ class Channel {
     int s_off_{0}; /* half chips currently applied */
     float s_f0_{0};
     uint32_t s_ms_{0};
+    uint16_t sweeps_{0};  /* diagnostics */
+    float code_err_{0};
 
     void restart(float doppler_hz) {
         freq_ = freq_int_ = good_freq_ = doppler_hz;
@@ -841,6 +853,7 @@ inline void Channel::lost() {
     if (++reacq_ == 0) reacq_ = 255;
     state_ = TRK_SEARCH;
     el_all_ = true;
+    sweeps_ = 0;
     reset_bits();
     pll_lock_ = narrow_ = verified_ = false;
     cn0_ = 0;
@@ -899,6 +912,7 @@ inline void Channel::search_epoch(float ie, float qe, float ip, float qp, float 
         return;
     }
     /* again (the code phase keeps running at the last Doppler) */
+    if (sweeps_ < 65535) sweeps_++;
     for (auto& c : cell_) c = 0;
     s_cell_ = 0;
     const int off = (0 - kSearchCode / 2) * 3;
@@ -936,6 +950,7 @@ inline void Channel::track_epoch(float ip, float qp, float id, float qd, bool va
     float code_err = p2_avg_ > 0 ? 2.0f * (id * ip + qd * qp) / p2_avg_ : 0.0f; /* chips (D = (E - L) / 2) */
     if (code_err > 0.5f) code_err = 0.5f;
     if (code_err < -0.5f) code_err = -0.5f;
+    code_err_ = code_err;
     /* carrier loop */
     if (state_ == TRK_PULLIN && mode_ms_ <= static_cast<uint32_t>(kPullinEpochs)) {
         const float k = 4.0f * lp_.fll_bn;
