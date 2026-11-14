@@ -43,9 +43,13 @@
  * dB over its family's mean reference level.
  *
  * hum_verdict(): of the harmonics 2..12 of a family, leaving out 300 and 600 Hz
- * (shared by both), at least kHumMinHarm at >= kHumBarDb, and
- * at most one of the other family's: a source periodic at 20 or 40 Hz (seen
- * on a weather broadcast) lights up both families and is not mains. Three,
+ * (shared by both), at least kHumMinHarm at >= kHumBarDb, the strongest at
+ * >= kHumMinBestDb, and at most one of the other family's: a source periodic
+ * at 20 or 40 Hz (seen on a weather broadcast) lights up both families and is
+ * not mains. The best >= 24 dB: through the device's path that broadcast's
+ * levels sat at 9-16 dB in both families, three of one just over the bar
+ * (best 16), while every check centred within the recorded mains source's
+ * sweep has 33-65 dB. Three,
  * not more: noise gated at twice the mains frequency (full-wave rectified
  * supplies, dimmers) has the even harmonics only, and they fall off. The
  * fundamental is left out: receivers pick up a little 50/60 Hz themselves, and
@@ -63,6 +67,20 @@ namespace sigdet {
 constexpr size_t kHumHarm = 12;
 constexpr int8_t kHumBarDb = 15;
 constexpr uint8_t kHumMinHarm = 3;
+constexpr int8_t kHumMinBestDb = 24; /* the strongest of them at least this */
+/* The hum dwell (PSDT MODE_METER with FLAG_HUM): the meter's boxcar 2^8 =
+ * 256 samples of 4 Msps (a 14 kHz channel), its 256 us blocks (3906.25 a
+ * second) into windows of 3906 blocks (~1 s); the M0 judges the second
+ * window, whose DC was removed with the first window's mean. 14 kHz, not
+ * 55: the boxcar's sidelobes fall slowly, and at 55 kHz a strong mains
+ * source leaked its pattern into channels 0.4-0.55 MHz away (the recordings'
+ * off-cluster controls read 60 Hz, best 24-29 dB; at 14 kHz 6-10 dB). A
+ * swept source is still seen anywhere within its sweep: the carrier crosses
+ * every frequency of it each cycle (host table, rf_test dd_scan_test). */
+constexpr uint8_t kHumLog2d = 8;
+constexpr float kHumBlockRate = 3906.25f;
+constexpr uint32_t kHumWindowBlocks = 3906;
+constexpr uint8_t kHumWindows = 2;
 
 struct HumLevels {
     int8_t h60[kHumHarm]; /* k x 60 Hz (k = 1..12) over the 60 Hz family's reference, dB */
@@ -99,9 +117,9 @@ inline HumVerdict hum_verdict(const HumLevels& l) {
     }
     HumVerdict v{0, 0, 0, 0};
     if (!l.blocks) return v;
-    if (c60 >= kHumMinHarm && c50 <= 1) {
+    if (c60 >= kHumMinHarm && c50 <= 1 && b60 >= kHumMinBestDb) {
         v = {60, c60, c50, b60};
-    } else if (c50 >= kHumMinHarm && c60 <= 1) {
+    } else if (c50 >= kHumMinHarm && c60 <= 1 && b50 >= kHumMinBestDb) {
         v = {50, c50, c60, b50};
     } else {
         /* Nothing, or both families: report the stronger count for the log. */
@@ -112,13 +130,15 @@ inline HumVerdict hum_verdict(const HumLevels& l) {
     return v;
 }
 
-/* Goertzel bank on block powers. Float (M4); the app never runs it. */
+/* Goertzel bank on block powers. Float (M4); the app never runs it.
+ * configure() and finish() run once a dwell / once a second: kept out of
+ * line and compiled for size (the M4 image's code space is short). */
 class HumLadder {
    public:
     static constexpr size_t kFreqs = 4 * kHumHarm; /* h60, h50, r60, r50 */
 
     /* rate: blocks per second; window: blocks per result. */
-    void configure(float rate, uint32_t window) {
+    __attribute__((noinline, cold)) void configure(float rate, uint32_t window) {
         window_ = window ? window : 1;
         for (size_t k = 0; k < kHumHarm; k++) {
             const float kk = static_cast<float>(k + 1);
@@ -133,7 +153,7 @@ class HumLadder {
         ready_ = false;
     }
 
-    void add(float p) {
+    __attribute__((noinline)) void add(float p) {
         if (!have_mean_) {
             /* The first window: the mean of its first 16 blocks stands in. */
             pre_ += p;
@@ -159,6 +179,8 @@ class HumLadder {
         ready_ = false;
         return true;
     }
+    /* Mean block power of the last finished window. */
+    float window_mean() const { return mean_; }
 
    private:
     float coef_[kFreqs]{};
@@ -199,8 +221,10 @@ class HumLadder {
         sum_ = 0.0f;
     }
 
-    void finish() {
-        float pw[kFreqs];
+    /* The powers go into s1_ (restart() clears it next): no 192 B array on
+     * the M4 baseband thread's stack. */
+    __attribute__((noinline, cold)) void finish() {
+        float* const pw = s1_;
         for (size_t i = 0; i < kFreqs; i++) {
             const float c = coef_[i];
             pw[i] = s1_[i] * s1_[i] + s2_[i] * s2_[i] - c * s1_[i] * s2_[i];

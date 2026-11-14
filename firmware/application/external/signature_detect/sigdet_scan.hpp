@@ -293,7 +293,9 @@ class ScanEngine {
         uint8_t duty;   /* last duty % */
         uint8_t type;   /* reported type, ST_NONE */
         uint8_t surveyed;
-        bool upd; /* seen this pass */
+        bool upd;           /* seen this pass */
+        uint8_t hum_family; /* ST_HUM: 50 or 60 */
+        uint8_t hum_count;  /* ... harmonics over the bar */
     };
     struct Comb {
         uint32_t sp_hz;

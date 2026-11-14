@@ -42,7 +42,11 @@
  * slowly, everything (so a continuous carrier becomes the floor in ~1-2 s);
  * a block over 4 x the floor (+6 dB) starts a pulse, one under 2 x ends it.
  * Start-to-start intervals go into a ring of 8; the report gives their median,
- * the last one and the last pulse width, to a block (256 us). */
+ * the last one and the last pulse width, to a block (256 us).
+ *
+ * Hum check (set_hum): every block's power also goes into a mains ladder
+ * (sigdet_hum.hpp), which lives in memory lent by the Wi-Fi hand-off
+ * (sigdet_wifi_slots.hpp). configure() disconnects it. */
 
 #ifndef __SIGDET_METER_HPP__
 #define __SIGDET_METER_HPP__
@@ -50,6 +54,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+
+#include "sigdet_hum.hpp"
 
 namespace sigdet {
 
@@ -85,9 +91,12 @@ class PowerMeter {
         nring_ = ring_pos_ = 0;
         blk_ = 0;
         last_period_us_ = width_us_ = 0;
+        hum_ = nullptr;
         start_interval();
     }
     uint8_t log2d() const { return log2d_; }
+    /* Block powers also into h (nullptr: none). */
+    void set_hum(HumLadder* h) { hum_ = h; }
 
     /* count complex samples (interleaved I, Q), a multiple of 4: the shift's
      * phase restarts with every buffer, which stays continuous as long as
@@ -213,6 +222,7 @@ class PowerMeter {
     float ipeak_{0.0f}, isum_{0.0f};
     uint32_t iblocks_{0};
     uint16_t ipulses_{0};
+    HumLadder* hum_{nullptr};
 
     void start_interval() {
         ipeak_ = 0.0f;
@@ -256,6 +266,7 @@ class PowerMeter {
             on_ = false;
             width_us_ = (blk_ - on_blk_) * kBlockUs;
         }
+        if (hum_) hum_->add(b);
     }
 
     uint32_t median_period() const {

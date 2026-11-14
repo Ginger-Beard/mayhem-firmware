@@ -248,27 +248,53 @@ INTERFERENCE SCAN (SCAN lines)
     Drift <MHz>      an always-on emission up to 1 MHz wide whose centre
                      moved at least 2 points and its own width, mostly one
                      way, in 6+ passes (81.5 kHz points: 163 kHz or more).
-    Hum<50|60> <MHz> modulated at mains harmonics (needs the hum check,
-                     not in this build).
+    Hum<50|60> <MHz> a steady emission whose power is modulated at
+                     harmonics of the mains (the hum check, below).
   Survey rows only (SCN_SRV, Survey ticked): steady emissions (why=steady;
   a licensed carrier and a stable interferer look the same by energy),
   intermittent ones (burst), flat-topped blocks with steep edges (block:
   TV, LTE, Wi-Fi), other wide emissions (wide), combs on a round spacing,
   a multiple of 100 kHz (round_spacing: the receiver's own clock lines or
   the occupied channels of a raster such as FM broadcast).
+  Hum check: at most once a pass, and with at least 8 s of other dwells
+  between two (at most ~22 % of the airtime), the strongest steady or
+  drifting emission (10 dB or more over the floor) not checked in the last
+  100 passes gets a ~2 s look: the meter at its centre, a 14 kHz channel,
+  its power every 256 us searched for harmonics of 50 and 60 Hz (3 or more
+  of harmonics 2-12, 300 and 600 Hz left out, 15 dB over the reference
+  levels between them, the strongest 24 dB, at most one of the other
+  family). A carrier swept by the mains is seen anywhere within its sweep.
+  The status line shows HUM<MHz>w<window>. A strong emission checked first
+  can delay a weaker one by a few minutes (one check every ~10 s). The
+  check's memory is the Wi-Fi receiver's, so it never runs during a Wi-Fi
+  dwell (it waits a few ms for a frame still being handled).
   It cannot: see anything under the noise; see emissions shorter than a
   pass reliably (an emission is looked at ~16 ms every ~6 s); find combs
   closer than 3 points or with fewer than 6 teeth a window, or a comb whose
   spacing is a multiple of 100 kHz; tell a steady interferer from a
   transmitter; follow a drift faster than about one width a pass; notice a
   noise source that was on from the start (it is the baseline) or noise
-  gated by the mains that leaves one look clean; tell intermodulation in the
+  gated by the mains that leaves one look clean (the hum check looks at
+  steady emissions only); label an emission within ~0.1 MHz of a strong
+  mains-modulated one correctly (its pattern leaks into the channel: Hum);
+  tell intermodulation in the
   receiver from real signals; give dBm, distance or the device. Opening a
   map or the track view restarts the scan (its tables live in the map's
   RAM). Log rows: SCN_NEW / SCN_DROP / SCN_SRV (detail: type, conf, why,
   lo_khz, hi_khz and what was measured: spacing_hz + teeth, rise_cdb +
-  windows, range_hz + rate_hz_min, ripple_cdb + fill_pct, passes, duty,
-  width_pts, pt_hz).
+  windows, range_hz + rate_hz_min, mains_hz + harmonics, ripple_cdb +
+  fill_pct, passes, duty, width_pts, pt_hz), SCN_HUM (each hum check; with
+  Log when mains was found, with Survey also when not): id SC<n>, label
+  Hum60 / Hum50 / NoHum and the centre, kind noise, freq_khz, bw_khz 14,
+  level = mean channel power, unit dBFS; detail class, type, conf, why
+  (mains_modulation, no_mains_pattern, no_result: two looks in a row
+  without a result), mains_hz, harmonics, other (the other family's over
+  15 dB), best_db, h60 / h50 (harmonics 1-12 in dB over the references,
+  '/' separated), blocks, clip, wait_buf (DMA buffers the look waited for
+  the Wi-Fi memory). HB3 every 60 s (classes with SCAN lines): scan_win,
+  scan_pass, hum_dwells, hum_checks, hum_found, hum_lost (looks without a
+  result), hum_deferred (looks that waited for a Wi-Fi frame), hum_windows,
+  hum_ms.
 
 LIST COLUMNS
   ID (name), Src (receiver letters; signature rows: the label continues here),
@@ -355,6 +381,8 @@ Events
            (detections|survey), class, part, lna, vga, amp
   CLASS    the signature class changed (same detail as START)
   STOP     the log closed (app exit or Log unticked): rows, lost
+  HB3      the interference scan's heartbeat (classes with SCAN lines; see
+           INTERFERENCE SCAN)
   HB, HB2  heartbeat every 60 s, two rows (each under 512 bytes; HB2 starts at
            wifi_frames). detail: up_s, cyc_ms (cycle time), cpu (M4 %),
            ble_aa / ble_ok / ble_crc (BLE syncs, CRC good, CRC bad), rid_ok,
