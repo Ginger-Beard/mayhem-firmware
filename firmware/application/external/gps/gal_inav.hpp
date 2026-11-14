@@ -113,7 +113,30 @@ struct ChanState {
     uint8_t misses; /* synchronisation patterns missed in a row */
     uint16_t pages_ok, pages_bad, parts;
     uint8_t even[kBits]; /* the last even part's bits */
+    /* time: the GST time of week of the last page that carried one (word
+     * types 0, 5, 6, CRC good) and the symbol count where that page starts
+     * (the TOW refers to the first chip of the page's first symbol) */
+    uint32_t t_sym, t_tow;
+    uint8_t t_ok;    /* a TOW is known for this lock */
+    uint8_t t_agree; /* later TOW pages that agreed with the count since (capped) */
+    uint8_t t_bad;   /* TOW pages that disagreed (the time restarted from them) */
 };
+
+/* GST time of week (whole ms, + fraction in 2^-32 ms) of the code period
+ * that starts at symbol count `sym` plus `frac` (2^-32 of the 4 ms period),
+ * from the channel's time; false without one, or too far from it */
+inline bool tx_time(const ChanState& c, uint32_t sym, uint32_t frac, uint32_t* ms, uint32_t* frac_ms) {
+    if (!c.t_ok) return false;
+    const int32_t d = static_cast<int32_t>(sym - c.t_sym);
+    if (d < -2500 || d > 900000) return false; /* -10 s .. +1 h of symbols */
+    const uint64_t x = static_cast<uint64_t>(frac) * 4u;
+    int64_t t = static_cast<int64_t>(c.t_tow) * 1000 + static_cast<int64_t>(d) * 4 + static_cast<int64_t>(x >> 32);
+    t %= 604800000;
+    if (t < 0) t += 604800000;
+    *ms = static_cast<uint32_t>(t);
+    *frac_ms = static_cast<uint32_t>(x & 0xFFFFFFFFu);
+    return true;
+}
 
 struct Work {
     static constexpr int kCh = 4;
@@ -290,6 +313,22 @@ inline bool step(Work& w, int ch, uint8_t prn, const int8_t* ring, uint32_t n_ri
         c.pages_ok++;
     else
         c.pages_bad++;
+    uint32_t wn = 0, tow = 0;
+    if (page->crc_ok && word_gst(*page, &wn, &tow) && tow < 604800u) {
+        const uint32_t start = s0 + kPart - 2 * kPart; /* the even part's first symbol */
+        if (c.t_ok) {
+            const int64_t want = (static_cast<int64_t>(c.t_tow) * 1000 + static_cast<int64_t>(static_cast<int32_t>(start - c.t_sym)) * 4) % 604800000;
+            if (want == static_cast<int64_t>(tow) * 1000) {
+                if (c.t_agree < 255) c.t_agree++;
+            } else {
+                if (c.t_bad < 255) c.t_bad++;
+                c.t_agree = 0;
+            }
+        }
+        c.t_sym = start;
+        c.t_tow = tow;
+        c.t_ok = 1;
+    }
     return true;
 }
 

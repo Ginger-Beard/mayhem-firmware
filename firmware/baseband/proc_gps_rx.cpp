@@ -42,7 +42,7 @@ alignas(8) static uint8_t tracker_mem[sizeof(gps_trk::Tracker)];
 static gal_acq::Searcher gal_search;
 static gal_acq::Codes gal_codes;
 static gal_acq::TrkShared gal_shared;
-alignas(8) static uint8_t gal_nav_work[gal_acq::kNavWorkBytes]; /* lent to the app's I/NAV decoder: never touched here */
+alignas(8) static uint8_t gal_nav_work[gal_acq::kNavWorkBytes]; /* lent to the app (I/NAV decoder, Galileo ephemerides and solutions): never touched here */
 static gps_trk::GalService gal_svc{gal_search};
 #else
 /* Big working memory, outside the processor object (bss). */

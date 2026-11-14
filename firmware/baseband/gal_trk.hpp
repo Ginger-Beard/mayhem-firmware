@@ -248,6 +248,21 @@ class Channel {
         o.fl_fixes = fl_fixes_;
     }
 
+    /* the measurement at the next sample (Tracker::measure): the symbol count
+     * of the code period in progress (each period ends with one symbol in the
+     * ring, a skipped one with a 0) and the code phase in it */
+    GAL_COLD void meas(gal_acq::MeasCh& o) const {
+        o.prn = prn_;
+        o.state = state_;
+        o.flags = static_cast<uint8_t>((pll_lock_ ? gal_acq::TF_PLL : 0) | (cs_sync_ ? gal_acq::TF_CS : 0) | (ever_cs_ ? gal_acq::TF_EVER : 0));
+        o.sym_epoch = sym_epoch_ ? *sym_epoch_ : 0;
+        o.sym = sym_write_ ? *sym_write_ : 0;
+        o.frac = static_cast<uint32_t>(((static_cast<uint64_t>(m_) << 32) | f_) / static_cast<uint32_t>(kHalf));
+        o.doppler_hz = freq_int_;
+        o.cn0c_x10 = static_cast<uint16_t>(cn0c_ > 0 ? cn0c_ * 10.0f + 0.5f : 0);
+        o.lock_ms = state_ == gps_trk::TRK_TRACK ? track_ms_ : 0;
+    }
+
    private:
     uint32_t hc_[2][kStreamWords]{}; /* E1B, E1C */
     /* replica state at the next sample (as gps_trk::Channel, 8184 half chips) */

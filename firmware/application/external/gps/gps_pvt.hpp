@@ -26,10 +26,11 @@
  * tracking loops measure each satellite's transmit time at a common sample
  * (whole ms from the decoded TOW and bit / epoch counts, plus the code phase),
  * so the pseudoranges have no millisecond ambiguity. Least squares in x, y,
- * z, clock (4 unknowns, >= 4 satellites), satellite clocks (incl. relativity
- * and TGD), Sagnac, a simple troposphere (2.4 m / sin el, as the snapshot
- * solver); NO ionosphere model (a few m, up to ~10 m at low elevation and
- * high solar activity: part of the error estimate). With >= 5 satellites a
+ * z, clock (4 unknowns, >= 4 satellites; a fifth, the Galileo - GPS clock
+ * offset, with PvtWork::isb and Galileo satellites), satellite clocks (incl.
+ * relativity and TGD / BGD), Sagnac, a simple troposphere (2.4 m / sin el, as
+ * the snapshot solver); NO ionosphere model (a few m, up to ~10 m at low
+ * elevation and high solar activity: part of the error estimate). With >= 5 satellites a
  * RAIM-style check drops the worst residual while the rms is too large.
  * Velocity and clock drift from the Dopplers (optional, 3 more orbit
  * evaluations per satellite). Runs in the app's low-priority solver thread. */
@@ -51,6 +52,7 @@ struct PvtMeas {
     double doppler_hz; /* observed carrier Doppler (incl. the receiver clock) */
     float cn0;
     uint8_t prn;
+    uint8_t sys; /* 0 GPS, 1 Galileo (dt_tx in GPS time when the GST-GPS offset is known, else GST) */
 };
 
 /* why pvt_solve returned false (diagnostics log) */
@@ -79,7 +81,9 @@ struct PvtSolution {
     bool vel_ok{false};
     bool ok{false};
     uint8_t fail{PVT_OK};
-    uint8_t iters{0}; /* least-squares iterations of the last solve */
+    uint8_t iters{0};    /* least-squares iterations of the last solve */
+    uint8_t used_gal{0}; /* of `used`: Galileo satellites */
+    int16_t isb_dm{0};   /* Galileo - GPS clock offset solved (PvtWork::isb), decimetres */
 };
 
 struct PvtWork {
@@ -90,6 +94,7 @@ struct PvtWork {
     double resid[kMaxPvt];
     double el[kMaxPvt];
     double az[kMaxPvt];
+    double atm[kMaxPvt]; /* troposphere + ionosphere delay at those elevations (m), set with them */
     /* corrections (set by the caller before pvt_solve; the defaults are what
      * the app uses): troposphere 0 none, 1 the old 2.4 m / sin(el), 2 standard
      * atmosphere zenith delay at the fix's height + mapping function;
@@ -100,10 +105,18 @@ struct PvtWork {
     float mask_deg{5.0f};
     float ion_a[4]{}, ion_b[4]{};         /* alpha s, s/sc, s/sc^2, s/sc^3; beta s ... */
     double rx_lat{0}, rx_lon{0}, rx_h{0}; /* deg, deg, m: set with the elevations */
-    double a[4][8];                       /* normal equations / inverse work (kept off the solver thread's stack) */
-    double q[4][4];
+    double a[5][6];                       /* normal equations (right side in column 5) / inverse (kept off the solver thread's stack) */
     uint8_t use[kMaxPvt];
     volatile uint8_t cancel;
+    /* systems: 1 = solve a Galileo - GPS clock offset as a fifth unknown
+     * (when Galileo satellites are used); 0 = one clock for all (Galileo
+     * transmit times already in GPS time, or Galileo only) */
+    uint8_t isb{0};
+    uint8_t sys_mask{0xFF}; /* bit s: satellites of system s (PvtMeas::sys) take part */
+    /* bit s: the satellite positions / clocks of system s are already in sat /
+     * clk from a previous call with the same input (a second solve of the
+     * same measurement skips those orbit evaluations) */
+    uint8_t sats_done{0};
 };
 
 /* dt_rx_guess: receive time of the measurement - w.t_ref (s); any value

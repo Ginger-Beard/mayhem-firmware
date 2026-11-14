@@ -64,9 +64,11 @@ constexpr int kMaxTrk = 4; /* Galileo channels at most */
 /* E1-B soft symbols per channel (one per 4 ms epoch, 0 = none: not in
  * secondary-code sync, or a gap), ~2 s: the app's I/NAV decoder reads them */
 constexpr int kSymRing = 512;
-/* RAM the tracking image lends the app's I/NAV decoder (its state and
- * Viterbi work; the app checks its size against this) */
-constexpr uint32_t kNavWorkBytes = 3072;
+/* RAM the tracking image lends the app for Galileo: its I/NAV decoder (state
+ * and Viterbi work), the ephemerides and GGTO decoded from it, the Galileo
+ * measurement set and the GPS + Galileo solutions (the app checks its size
+ * against this) */
+constexpr uint32_t kNavWorkBytes = 4352;
 
 enum TrkFlags : uint8_t {
     TF_PLL = 1,       /* phase lock indicator good */
@@ -108,8 +110,39 @@ struct TrkInfo {
     uint8_t fl_fixes;     /* 125 Hz false locks corrected (the carrier turning half a cycle per 4 ms) */
 };
 
+/* Galileo measurements, once a second at the same sample as the GPS
+ * measurement set (gps_trk::MeasSet::sample): per channel the E1-B symbol
+ * count of the code period in progress (the ring's write count: the app's
+ * I/NAV decoder dates symbols by it) and the code phase inside that period.
+ * The app adds the GST time of week its decoder found for some symbol count
+ * of the same lock (sym_epoch): transmit time = TOW + 4 ms x (sym - that
+ * count) + frac x 4 ms. */
+struct MeasCh {
+    uint8_t prn;
+    uint8_t flags;      /* TrkFlags (TF_CS required) */
+    uint16_t sym_epoch; /* the channel's start count (TrkShared::sym_epoch) */
+    uint32_t sym;       /* symbol count of the code period in progress */
+    uint32_t frac;      /* code phase in that period, 2^-32 of 4 ms */
+    float doppler_hz;   /* carrier Doppler incl. the receiver clock */
+    uint16_t cn0c_x10;
+    uint8_t state; /* gps_trk::ChState (TRK_TRACK required) */
+    uint8_t pad;
+    uint32_t lock_ms;
+};
+
+struct MeasSet {
+    uint32_t seq; /* the GPS set's seq it belongs to */
+    uint32_t pad;
+    uint64_t sample; /* = gps_trk::MeasSet::sample */
+    MeasCh ch[kMaxTrk];
+};
+
 struct TrkShared {
     volatile uint32_t seq;
+    /* written before the GPS set's counter moves (Tracker::measure): set
+     * (meas_seq - 1) & 1 is the newest */
+    volatile uint32_t meas_seq;
+    MeasSet meas[2];
     TrkInfo ch[kMaxTrk];
     uint8_t max_ch; /* Galileo channels allowed (the app's setting) */
     uint8_t active;

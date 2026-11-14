@@ -38,6 +38,7 @@ namespace ui::external_app::gps {
 
 constexpr double kPi = 3.14159265358979323846;
 constexpr double kMu = 3.986005e14;         /* WGS84 GM for GPS, m^3/s^2 */
+constexpr double kMuGal = 3.986004418e14;   /* Galileo (OS SIS ICD table 66) */
 constexpr double kOmegaE = 7.2921151467e-5; /* earth rotation, rad/s */
 constexpr double kC = 299792458.0;          /* m/s */
 constexpr double kFRel = -4.442807633e-10;  /* relativistic clock term, s/m^0.5 */
@@ -67,7 +68,7 @@ struct Orbit {
     float af0{0}, af1{0}, af2{0}, tgd{0};
     uint8_t prn{0};
     uint8_t health{0};    /* 0 = healthy */
-    uint8_t ephemeris{0}; /* 1: from a broadcast ephemeris (corrections valid) */
+    uint8_t ephemeris{0}; /* 1: from a broadcast ephemeris (corrections valid); 2: a Galileo one (its GM, BGD in tgd) */
     uint8_t valid{0};
 };
 

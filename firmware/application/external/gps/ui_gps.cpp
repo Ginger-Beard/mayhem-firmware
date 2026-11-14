@@ -1082,7 +1082,12 @@ void HeardView::show_other() {
                 } else if (tc) { /* a Galileo channel: E1C C/N0, CS = secondary code in sync (verified) */
                     g.c(' ').u(static_cast<uint32_t>((tc->cn0c_x10 + 5u) / 10u)).s(" dB trk");
                     if (tc->flags & gal_acq::TF_CS) g.s(" CS");
-                    if (main_.gal_nav_pages(t.prn)) g.s(" N"); /* I/NAV pages decoded */
+                    if (main_.gal_in_fix(t.prn)) /* in the fix shown */
+                        g.s(" F");
+                    else if (main_.gal_eph_ready(t.prn)) /* ephemeris decoded */
+                        g.s(" E");
+                    else if (main_.gal_nav_pages(t.prn)) /* I/NAV pages decoded */
+                        g.s(" N");
                     c = (tc->flags & gal_acq::TF_CS) ? Color::green() : yellow;
                 } else if (st == 2) {
                     g.c(' ').u(main_.mem_->gal_cn0[t.prn]).s(" dB-Hz heard");
@@ -1099,7 +1104,14 @@ void HeardView::show_other() {
                 text_list_.set(j, b, c);
             }
         }
-        if (sys == SYS_GAL) text_list_.set(kListRows - 2, gal ? (main_.gal_trk_max_ ? "tracked: not in the fix yet" : "heard only: not in the fix") : "E1 box: aided search", grey);
+        if (sys == SYS_GAL) {
+            if (gal && main_.gal_trk_max_) {
+                char gl[TextLines::kCols + 1];
+                main_.gal_fix_text(gl, sizeof(gl), true);
+                text_list_.set(kListRows - 2, gl, main_.fix_gal_ ? Color::green() : grey);
+            } else
+                text_list_.set(kListRows - 2, gal ? "heard only: not in the fix" : "E1 box: aided search", grey);
+        }
         if (sys == SYS_BDS) text_list_.set(kListRows - 2, "B1C: C19-C58 only", grey);
         if (sys == SYS_GLO) text_list_.set(kListRows - 2, "1602 MHz: not with GPS", grey);
         if (sys == SYS_SBAS) text_list_.set(kListRows - 2, "SBAS: after Galileo", grey);
@@ -1620,12 +1632,20 @@ void FixView::show_auto() {
     /* satellites */
     if (main_.tracking_) {
         Fmt f{b, sizeof(b)};
-        f.s("Tracked ").u(main_.auto_tracked_).s(", TOW ").u(main_.auto_synced_).s(", eph ").u(main_.auto_eph_);
+        const uint8_t gt = main_.gal_on_ ? main_.gal_tracking() : 0;
+        if (gt) /* Galileo channels: tracked and ephemerides as G+E */
+            f.s("Trk ").u(main_.auto_tracked_).s("+E").u(gt).s(" TOW ").u(main_.auto_synced_).s(" eph ").u(main_.auto_eph_).s("+E").u(main_.gal_eph_count());
+        else
+            f.s("Tracked ").u(main_.auto_tracked_).s(", TOW ").u(main_.auto_synced_).s(", eph ").u(main_.auto_eph_);
         text_.set(4, b, white);
         if (main_.fix_ok_) {
             Fmt g{b, sizeof(b)};
-            g.s("Used ").u(main_.fix_.used).s(" HDOP ").fixed(static_cast<int32_t>(main_.fix_.hdop * 10), 1);
-            if (main_.mem_ && main_.mem_->pvt_fix.ok && main_.mem_->pvt_fix.checked) g.s(" checked");
+            if (main_.fix_gal_)
+                g.s("Used G").u(static_cast<uint32_t>(main_.fix_.used - main_.fix_gal_)).s("+E").u(main_.fix_gal_);
+            else
+                g.s("Used ").u(main_.fix_.used);
+            g.s(" HDOP ").fixed(static_cast<int32_t>(main_.fix_.hdop * 10), 1);
+            if (main_.mem_ && main_.mem_->pvt_fix.ok && main_.mem_->pvt_fix.checked) g.s(main_.fix_gal_ ? " chk" : " checked");
             if (main_.mem_ && main_.mem_->pvt_fix.ok) g.s(main_.iono_src_ ? " T+I" : " T"); /* troposphere model, broadcast ionosphere */
             text_.set(5, b, white);
         }
@@ -1656,7 +1676,12 @@ void FixView::show_auto() {
         f.s("Saved ").u(main_.cache_written_).s(" eph to /GPS/EPH_AIR");
         text_.set(8, b, grey);
     }
-    if (main_.fix_ok_ && main_.fix_mode_ == GpsView::FIX_COARSE && main_.tracking_)
+    if (main_.fix_ok_ && main_.fix_mode_ == GpsView::FIX_PRECISE && main_.tracking_ && main_.gal_on_) {
+        char g[TextLines::kCols + 1];
+        std::memcpy(g, "Galileo ", 8);
+        main_.gal_fix_text(g + 8, sizeof(g) - 8);
+        text_.set(9, g, main_.fix_gal_ ? Color::green() : grey);
+    } else if (main_.fix_ok_ && main_.fix_mode_ == GpsView::FIX_COARSE && main_.tracking_)
         text_.set(9, "Keep it outdoors: upgrading", grey);
     else if (!main_.fix_ok_ && main_.fix_tried_ && main_.tracking_)
         text_.set(9, "No coarse fix: clock/Pos off?", yellow); /* the snapshot solve was refused; the PVT follows */
@@ -2045,7 +2070,8 @@ GpsView::GpsView(NavigationView& nav, uint32_t reselect)
            {"log"sv, &log_on_},
            {"sys"sv, &sys_view_},
            {"gal"sv, &gal_on_},
-           {"gal_trk"sv, &gal_trk_max_}}},
+           {"gal_trk"sv, &gal_trk_max_},
+           {"gal_fix"sv, &gal_fix_on_}}},
       reselect_{reselect},
       view_fix_{*this, view_rect_},
       view_heard_{*this, view_rect_},
@@ -2628,7 +2654,32 @@ msg_t GpsView::solver_fn(void* arg) {
     if (v->solve_kind_ == 1) { /* PVT from the tracking loops */
         GpsScratch& m = *v->mem_;
         const double max_rms = v->solve_pvt_eph_ ? 25.0 : almanac_max_rms(v->alm_age_days() < 0 ? 30.0 : v->alm_age_days());
-        v->solve_ok_ = pvt_solve(m.autos.pvt, v->solve_pvt_n_, v->solve_prior_, v->solve_pvt_trx_, m.pvt, max_rms, true);
+        PvtWork& w = m.autos.pvt;
+        w.sys_mask = 1; /* GPS alone first: the fix Galileo must not make worse */
+        w.isb = 0;
+        w.sats_done = 0;
+        v->solve_ok_ = pvt_solve(w, v->solve_pvt_n_, v->solve_prior_, v->solve_pvt_trx_, m.pvt, max_rms, true);
+        v->solve_mix_ok_ = v->solve_alone_ok_ = false;
+        GalNavMem* gm = v->gal_mem();
+        if (v->solve_gal_n_ && gm && !w.cancel) {
+            /* GPS + Galileo (the GPS orbits are kept from the first solve; no velocity: the
+             * GPS-only one is used), then Galileo alone on the System wheel's Galileo page */
+            const Vec3 prior = v->solve_ok_ ? m.pvt.pos : v->solve_prior_;
+            w.sys_mask = 3;
+            w.isb = v->solve_gal_mode_ == 2 ? 1 : 0;
+            w.sats_done = 1;
+            v->solve_mix_ok_ = pvt_solve(w, v->solve_pvt_n_, prior, v->solve_pvt_trx_, gm->mix, max_rms, false);
+            v->gal_solve_stats();
+            if (v->solve_gal_alone_ && !w.cancel) {
+                w.sys_mask = 2;
+                w.isb = 0;
+                w.sats_done = 3;
+                v->solve_alone_ok_ = pvt_solve(w, v->solve_pvt_n_, prior, v->solve_pvt_trx_, gm->alone, max_rms, false);
+            }
+        }
+        w.sys_mask = 0xFF;
+        w.isb = 0;
+        w.sats_done = 0;
         v->solver_done_ = true;
         return 0;
     }
@@ -2683,7 +2734,10 @@ void GpsView::auto_poll_m4() {
         new_eph = true;
         log_eph_event("decoded", prn);
     });
-    if (got) log_meas();
+    if (got) {
+        log_meas();
+        gal_meas_copy(); /* the Galileo set of the same sample */
+    }
     if (busy) { /* the measurement is logged now, solved after */
         newmeas = false;
         if (got) meas_waiting_ = true;
@@ -2749,6 +2803,8 @@ void GpsView::auto_poll_m4() {
         last = t;
     }
     if (n < 4) return;
+    solve_gal_n_ = 0;
+    if (eph_only) n = gal_add_pvt(n); /* Galileo next to a precise GPS solve (E1 box, gal_fix) */
     solve_pvt_n_ = n;
     solve_pvt_eph_ = eph_only;
     solve_pvt_trx_ = auto_t_rx_guess(a, n);
@@ -2851,16 +2907,27 @@ void GpsView::apply_iono() {
 void GpsView::auto_finish_pvt() {
     if (!mem_) return;
     const bool cancelled = mem_->autos.pvt.cancel;
+    /* GPS + Galileo replaces the GPS-only solution only through the gate */
+    const bool mix = !cancelled && gal_finish(solve_ok_);
+    if (mix) { /* its velocity / drift: the GPS-only Doppler solve's */
+        const PvtSolution g = mem_->pvt;
+        mem_->pvt = gal_mem()->mix;
+        mem_->pvt.vel = g.vel;
+        mem_->pvt.drift_mps = g.drift_mps;
+        mem_->pvt.vel_ok = solve_ok_ && g.vel_ok;
+    }
     {
         static const char* const kWhy[] = {"ok", "rejected: fewer than 4", "cancelled", "rejected: least squares failed", "rejected: residuals over the limit (RAIM)", "rejected: height implausible"};
         const uint8_t fl = mem_->pvt.fail;
-        log_fix(solve_pvt_eph_ ? 2 : 1, !cancelled && solve_ok_, cancelled ? "cancelled" : kWhy[fl < 6 ? fl : 0]);
+        log_fix(solve_pvt_eph_ ? 2 : 1, !cancelled && (solve_ok_ || mix), cancelled ? "cancelled" : (mix ? "ok: GPS + Galileo" : kWhy[fl < 6 ? fl : 0]));
     }
-    if (cancelled || !solve_ok_) return;
+    if (cancelled || !(solve_ok_ || mix)) return;
     PvtSolution& p = mem_->pvt;
     /* a coarse (almanac) PVT never replaces a precise fix */
     if (!solve_pvt_eph_ && fix_ok_ && fix_mode_ == FIX_PRECISE) return;
     mem_->pvt_fix = p;
+    fix_gal_ = mix ? p.used_gal : 0;
+    fix_gal_mode_ = mix ? solve_gal_mode_ : 0;
     fix_sample_ = solve_sample_;
     fix_trx_ = p.t_rx;
     fix_have_time_ = true;

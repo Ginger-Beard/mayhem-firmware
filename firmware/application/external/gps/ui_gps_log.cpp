@@ -107,7 +107,7 @@ void GpsView::log_header() {
         "#EPH,event,prn,have,fresh,in_table,toe_age_s,iode",
         "#MEAS,seq,sample,missed,n,prn:flags:tx_ms:tx_frac_hex:doppler:cn0_x10 ...",
         "#SOLVE,kind,n,prns,t_offset_s,prior_lat_e7,prior_lon_e7,max_rms_m,max_dt_s,alm_age_dx10,snapshot_age_ms",
-        "#FIX,kind,ok,why,used,dropped,rms_m_x10,hdop_x10,vdop_x10,clock_m,time_corr_ms_or_drift_ppb,lat_e7,lon_e7,alt_m,speed_cm_s,masked,trop_m_x10,iono_m_x10,iono_src",
+        "#FIX,kind,ok,why,used,dropped,rms_m_x10,hdop_x10,vdop_x10,clock_m,time_corr_ms_or_drift_ppb,lat_e7,lon_e7,alt_m,speed_cm_s,masked,trop_m_x10,iono_m_x10,iono_src,systems (G / GE),galileo_used",
         "#IONO,source (none / air / cache),age_h,a0..a3 (x1e9 s ...),b0..b3",
         "#SCREEN,tab,fix rows 0-10 joined by |",
         "#HEARD,heard rows (status | list)",
@@ -121,6 +121,9 @@ void GpsView::log_header() {
         "#GCH,ch,prn,state,mode,flags,cn0c_x10,cn0b_x10,pld_x100,doppler_x10,code_x16,code_err_x1000,lock_ms,side_e_x100,side_l_x100,side_jumps,cs_phase,cs_errs,cs_syncs,fl_fixes,reacq,epochs",
         "#GEV,prn,event (start / cs / cs_lost / side / lost / found / released),a,b (Galileo channel events; see README)",
         "#GNAV,prn,word_type,crc_ok,alert,pages_ok,pages_bad,gst_week,gst_tow,word (128 bits hex; an I/NAV page of a tracked Galileo satellite)",
+        "#GEPH,event (new / same / iod_wait / bad_svid / bad_value / ggto / ggto_none),prn,iodnav,toe_sow,sisa,e1b_hs,e1b_dvs,bgd_e1e5b_ps,af0_ns,sqrt_a_x1000,built,rejected,iod_waits (or for ggto: a0_ps,a1_x1e15,t0g_h,wn0g,ggto_ps_now)",
+        "#GMEAS,seq,sample,n,prn:why:sym:frac_hex:tx_ms:t_agree:cn0c_x10 ... (why: 0 used 1 idle 2 no CS 3 weak 4 no page time 5 time unconfirmed 6 no ephemeris 7 PVT full)",
+        "#GFIX,mode (ggto / isb),gps_ok,mix_ok,used,gate,n_gps_used,n_gal_used,isb_ps,ggto_ps,rms_gps_only_x10,rms_mix_x10,gal_rms_x10,gps_rms_in_mix_x10,hdop_gps_x10,hdop_mix_x10,moved_dm,prn:resid_dm ...,alone_ok,alone_used,alone_moved_dm (GPS + Galileo against GPS alone)",
     };
     for (const char* h : kHead) log_push(mem_->log, h, std::strlen(h));
 }
@@ -294,7 +297,7 @@ void GpsView::log_gal_second() {
 
 void GpsView::log_gal_page(const gal_inav::Page& p) {
     if (!log_active() || !gal_nav_) return;
-    const gal_inav::Work& w = *static_cast<const gal_inav::Work*>(gal_nav_);
+    const gal_inav::Work& w = gal_mem()->inav;
     uint16_t ok = 0, bad = 0;
     for (const auto& c : w.ch)
         if (c.prn == p.prn) ok = c.pages_ok, bad = c.pages_bad;
@@ -307,6 +310,90 @@ void GpsView::log_gal_page(const gal_inav::Page& p) {
     if (t) f.u(tow);
     f.c(',');
     for (uint8_t b : p.word) put_hex(f, b, 2);
+    log_end(f);
+}
+
+/* a Galileo ephemeris event (gal_eph::Event) */
+void GpsView::log_gal_eph(uint8_t ev, int ch, int slot, uint8_t prn) {
+    if (!log_active() || !gal_nav_) return;
+    static const char* const kEv[] = {"-", "word", "new", "same", "iod_wait", "bad_svid", "bad_value", "ggto", "ggto_none"};
+    const gal_eph::Store& s = gal_mem()->eph;
+    Fmt f = log_row("GEPH");
+    f.c(',').s(kEv[ev < 9 ? ev : 0]).c(',').c('E').d2(prn);
+    if (ev == gal_eph::EV_GGTO) {
+        const gal_eph::Ggto& g = s.ggto;
+        double dt = 0;
+        const bool now = gal_eph::ggto_at(s, now_gps(), &dt);
+        f.c(',').d(static_cast<int32_t>(std::lround(g.a0 * 1e12 / 34359738368.0))).c(',').d(static_cast<int32_t>(std::lround(g.a1 * 1e15 / 2251799813685248.0)));
+        f.c(',').u(g.t0).c(',').u(g.wn0).c(',');
+        if (now) f.d(static_cast<int32_t>(std::lround(dt * 1e12)));
+    } else if (slot >= 0 && slot < gal_eph::kSlots) {
+        const gal_eph::Eph& e = s.eph[slot];
+        f.c(',').u(e.iod).c(',').u(static_cast<uint32_t>(std::fmod(e.o.toe, kWeekS))).c(',').u(e.sisa).c(',').u(e.hs).c(',').u(e.dvs);
+        f.c(',').d(static_cast<int32_t>(std::lround(e.o.tgd * 1e12))).c(',').d(static_cast<int32_t>(std::lround(e.o.af0 * 1e9)));
+        f.c(',').u(static_cast<uint32_t>(std::lround(e.o.sqrt_a * 1000.0)));
+    } else {
+        const gal_eph::Collect& c = s.col[ch < gal_eph::kCh ? ch : 0];
+        f.c(',');
+        for (int k = 0; k < 4; k++) f.u(gal_eph::iod_of(c.w[k])).c(k < 3 ? '/' : ',');
+        f.s(",,,,,,");
+    }
+    f.c(',').u(s.built).c(',').u(s.rejected).c(',').u(s.iod_waits);
+    log_end(f);
+}
+
+/* the Galileo measurement set of the GPS one just copied: what each channel gives the PVT */
+void GpsView::log_gal_meas() {
+    if (!log_active() || !gal_nav_) return;
+    const GalNavMem& gm = *gal_mem();
+    Fmt f = log_row("GMEAS");
+    f.c(',').u(gm.meas.seq).c(',').u(static_cast<uint32_t>(gm.meas.sample / 2048u)).s("x2048,");
+    int n = 0;
+    for (const auto& c : gm.meas.ch) n += c.prn != 0;
+    f.u(static_cast<uint32_t>(n));
+    for (int i = 0; i < gal_acq::kMaxTrk; i++) {
+        const gal_acq::MeasCh& c = gm.meas.ch[i];
+        if (!c.prn) continue;
+        const gal_inav::ChanState& cs = gm.inav.ch[i];
+        uint32_t ms = 0, fr = 0;
+        const bool t = cs.prn == c.prn && cs.epoch == c.sym_epoch && gal_inav::tx_time(cs, c.sym, c.frac, &ms, &fr);
+        f.c(',').c('E').d2(c.prn).c(':').u(gm.why[i]).c(':').u(c.sym).c(':');
+        put_hex(f, c.frac, 8);
+        f.c(':');
+        if (t) f.u(ms);
+        f.c(':').u(cs.prn == c.prn ? cs.t_agree : 0).c(':').u(c.cn0c_x10);
+    }
+    log_end(f);
+}
+
+/* one GPS + Galileo solve against GPS alone, and the decision */
+void GpsView::log_gal_fix(bool gps_ok, bool use) {
+    if (!log_active() || !gal_nav_) return;
+    const GalNavMem& gm = *gal_mem();
+    const PvtSolution& g = mem_->pvt; /* still GPS alone here */
+    const PvtSolution& m = gm.mix;
+    static const char* const kGate[] = {"in", "solve failed", "few galileo", "unchecked", "galileo residuals", "moved", "rms grew"};
+    Fmt f = log_row("GFIX");
+    f.c(',').s(solve_gal_mode_ == 1 ? "ggto" : "isb").c(',').u(gps_ok ? 1u : 0u).c(',').u(solve_mix_ok_ ? 1u : 0u).c(',').u(use ? 1u : 0u);
+    f.c(',').s(kGate[gm.gate < 7 ? gm.gate : 0]).c(',').u(static_cast<uint32_t>(m.used - m.used_gal)).c(',').u(m.used_gal);
+    f.c(',').d(static_cast<int32_t>(std::lround(m.isb_dm * 0.1 / kC * 1e12))).c(',').d(static_cast<int32_t>(std::lround(solve_ggto_ns_ * 1000.0f)));
+    f.c(',').u(static_cast<uint32_t>(g.resid_rms_m * 10.0)).c(',').u(static_cast<uint32_t>(m.resid_rms_m * 10.0)).c(',').u(static_cast<uint32_t>(gm.mix_gal_rms * 10.0f));
+    f.c(',').u(static_cast<uint32_t>(gm.mix_gps_rms * 10.0f)).c(',').u(static_cast<uint32_t>(g.hdop * 10.0f)).c(',').u(static_cast<uint32_t>(m.hdop * 10.0f)).c(',');
+    if (gps_ok && solve_mix_ok_) f.u(static_cast<uint32_t>(std::lround(gal_eph::horiz_m(m.pos, g.pos) * 10.0)));
+    f.c(',');
+    for (int k = 0; k < gal_inav::Work::kCh; k++)
+        if (gm.mix_prn[k]) {
+            f.c('E').d2(gm.mix_prn[k]).c(':');
+            if (gm.mix_res_dm[k] != 32767)
+                f.d(gm.mix_res_dm[k]);
+            else
+                f.c('x');
+            f.c(' ');
+        }
+    f.c(',').u(solve_alone_ok_ ? 1u : 0u).c(',');
+    if (solve_alone_ok_) f.u(gm.alone.used);
+    f.c(',');
+    if (solve_alone_ok_ && gps_ok) f.u(static_cast<uint32_t>(std::lround(gal_eph::horiz_m(gm.alone.pos, g.pos) * 10.0)));
     log_end(f);
 }
 
@@ -560,7 +647,7 @@ void GpsView::log_solve_start(uint8_t kind) {
         f.c(',').d(e7(lat)).c(',').d(e7(lon)).c(',').u(static_cast<uint32_t>(solve_max_rms_)).c(',').u(static_cast<uint32_t>(solve_max_dt_));
     } else {
         f.c(',').s(kKind[kind < 3 ? kind : 1]).c(',').u(static_cast<uint32_t>(solve_pvt_n_)).c(',');
-        for (int i = 0; i < solve_pvt_n_; i++) f.c('G').d2(mem_->autos.pvt.in[i].prn).c(' ');
+        for (int i = 0; i < solve_pvt_n_; i++) f.c(mem_->autos.pvt.in[i].sys ? 'E' : 'G').d2(mem_->autos.pvt.in[i].prn).c(' ');
         f.c(',').d(static_cast<int32_t>(std::lround(solve_pvt_trx_ * 1000.0))).s("ms");
         f.c(',').d(e7(lat)).c(',').d(e7(lon)).c(',').u(solve_pvt_eph_ ? 25u : 0u).c(',');
     }
@@ -591,6 +678,7 @@ void GpsView::log_fix(uint8_t kind, bool ok, const char* why) {
         f.c(',').d(static_cast<int32_t>(std::lround(p.drift_mps / kC * 1e9)));
         f.c(',').d(e7(lat)).c(',').d(e7(lon)).c(',').d(static_cast<int32_t>(std::lround(h))).c(',').u(static_cast<uint32_t>(norm(p.vel) * 100.0));
         f.c(',').u(p.masked).c(',').u(static_cast<uint32_t>(p.trop_m * 10.0f)).c(',').u(static_cast<uint32_t>(p.iono_m * 10.0f)).c(',').u(iono_src_);
+        f.c(',').s(p.used_gal ? (p.used_gal == p.used ? "E" : "GE") : "G").c(',').u(p.used_gal);
     }
     log_end(f);
 }
