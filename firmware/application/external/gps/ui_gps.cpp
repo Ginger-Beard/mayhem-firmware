@@ -990,6 +990,9 @@ void HeardView::show_tracking() {
         } else if (c.state == gps_trk::TRK_PULLIN) {
             f.s(ever ? "pull-in" : "verifying");
             col = yellow;
+        } else if (c.mode == 5) { /* faded: the loops hold the frequency and keep the bit timing */
+            f.s("faded: holding");
+            col = yellow;
         } else {
             f.u((c.cn0_x10 + 5u) / 10u).s("  ");
             f.s(c.flags & gps_trk::F_PLL ? " L" : " -");

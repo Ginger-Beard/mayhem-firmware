@@ -48,8 +48,16 @@
  * then a 2nd-order Costas PLL with FLL assist, carrier-aided 1st-order DLL
  * (dot-product normalised E-L envelope). Lock: PLL indicator cos(2 phi)
  * over 20 ms, C/N0 by the M2M4 moment estimator over 100 ms windows.
- * Loss of lock -> local search (+-3.5 chips x +-500 Hz, 20 ms per cell) ->
- * pull-in again; given up after kSearchGiveUpMs. Bit sync by the histogram
+ * A fade (C/N0 below 25 dB-Hz) of a bit-synced channel first coasts: the NCO
+ * held at the last good frequency, bits and epochs still counted, for up to
+ * kCoastMs; the signal back -> the loops resume with the bit and subframe
+ * timing untouched. Loss of lock -> local search (+-3.5 chips x +-500 Hz,
+ * 20 ms per cell) -> pull-in again; given up after kSearchGiveUpMs. Found
+ * again within kKeepMs of a coast: the bit edge and subframe phase follow from
+ * the code periods counted across the loss (rep_, which also counts the
+ * search's code shifts), so the framer expects the next TLM instead of
+ * finding bit sync and two TLMs again; the bit-sync histogram checks the kept
+ * edge before the transmit time is used again. Bit sync by the histogram
  * of prompt sign changes, 20 ms bits, subframe sync on the TLM preamble
  * with IS-GPS-200 parity (confirmed by the next TLM 300 bits later with the
  * TOW one higher): then the transmit time of every sample is known. The
@@ -348,6 +356,16 @@ class Framer {
         return NONE;
     }
     bool synced() const { return confirmed_; }
+    /* the channel kept the subframe timing across a loss: the next bit is bit j
+     * of a subframe, and the next TLM checked must carry next_tow (the HOW's
+     * TOW count); bits before it are unknown */
+    void resync(uint32_t j, uint32_t next_tow) {
+        in_frame_ = cand_ = false;
+        confirmed_ = true;
+        misses_ = 0;
+        since_tlm_ = static_cast<uint16_t>(j < 60u ? 300u + j : j);
+        next_tow_ = next_tow;
+    }
     /* the TOW (s of week) of the start of the subframe being / last read */
     uint32_t sf_tow() const { return cur_tow_s_; }
     const uint32_t* words() const { return words_; }
@@ -444,7 +462,10 @@ class Channel {
     static constexpr int kSearchDop = 5;           /* Doppler bins, 250 Hz apart */
     static constexpr uint32_t kPullinMaxMs = 1500; /* not locked by then -> search */
     static constexpr uint32_t kSearchGiveUpMs = 30000;
-    static constexpr float kSearchThr = 2.75f; /* max / mean cell power, K = 20 (as acquisition) */
+    static constexpr float kSearchThr = 2.75f;    /* max / mean cell power, K = 20 (as acquisition) */
+    static constexpr uint16_t kCoastMs = 800;     /* a fade is coasted this long before the channel searches */
+    static constexpr uint32_t kKeepMs = 5000;     /* found again within this after the coast: bit / frame timing kept */
+    static constexpr float kCoastBackCn0 = 33.0f; /* one window at least this (or two at kVerifyCn0): the signal is back */
 
     void stop() {
         state_ = TRK_IDLE;
@@ -469,6 +490,10 @@ class Channel {
         lp_ = lp;
         reacq_ = 0;
         why_ = LOSS_NONE;
+        keep_ = restored_ = frame_pending_ = false;
+        keep_flags_ = 0;
+        coast_ms_ = 0;
+        rep_ = kRepBase;
         xs_ = 0;
         ever_ok_ = released_ = rel_reported_ = false;
         aided_ = false;
@@ -491,9 +516,11 @@ class Channel {
     /* Transmit time at the current sample (the next to be processed), for
      * the measurements: false without subframe sync. */
     bool tx_time(uint32_t* tx_ms, uint32_t* tx_frac) const {
-        if (!tsync_ || state_ != TRK_TRACK) return false;
+        /* not while coasting or re-locking after a coast, nor before the bit sync
+         * confirmed a bit edge kept across a loss */
+        if (!tsync_ || state_ != TRK_TRACK || coast_ms_ || relock_ || restored_) return false;
         /* whole ms since the reference subframe start + this epoch's fraction */
-        uint64_t ms = static_cast<uint64_t>(t_tow_ms_) + (epochs_ - t_epoch_);
+        uint64_t ms = static_cast<uint64_t>(t_tow_ms_) + (rep_ - t_epoch_);
         ms %= 604800000ull;
         /* half chips (m + f) / 2046 of a ms */
         const double fr = (m_ + f_ / 4294967296.0) / kHalfChips;
@@ -514,7 +541,7 @@ class Channel {
         o.subframes = framer_.subframes();
         o.parity_errs = framer_.parity_errs();
         o.tow_s = last_tow_s_;
-        o.mode = state_ == TRK_SEARCH ? (xs_ ? 4 : 3) : (state_ == TRK_PULLIN ? 0 : (narrow_ ? 2 : 1));
+        o.mode = state_ == TRK_SEARCH ? (xs_ ? 4 : 3) : (state_ == TRK_PULLIN ? 0 : (coast_ms_ ? 5 : (narrow_ ? 2 : 1)));
         const float pl = pld_s_ * 100.0f;
         o.pld_x100 = static_cast<int8_t>(pl > 100.0f ? 100 : (pl < -100.0f ? -100 : pl));
         o.bits = bits_out_;
@@ -524,7 +551,7 @@ class Channel {
         o.code_err = code_err_;
         o.half_fixes = half_fixes_;
         o.why = why_;
-        o.keep = 0;
+        o.keep = keep_flags_;
     }
     uint8_t flags() const {
         uint8_t f = 0;
@@ -630,6 +657,10 @@ class Channel {
     uint8_t reacq() const { return reacq_; }
     uint32_t bits_out() const { return bits_out_; }
     float freq_watch() const { return hf_last_; } /* the last half-epoch frequency error estimate, Hz */
+    uint32_t rep() const { return rep_; }         /* code periods of the replica, continuous across searches */
+    bool coasting() const { return coast_ms_ != 0; }
+    uint8_t keep_flags() const { return keep_flags_; }
+    uint8_t why() const { return why_; }
     /* per-bit callback for tests (nullptr in the firmware) */
     void (*on_bit)(void* ctx, int prn, int bit) = nullptr;
     void* on_bit_ctx = nullptr;
@@ -654,6 +685,21 @@ class Channel {
     uint32_t epoch_samples_{0};
     bool epoch_gap_{false};
     uint32_t epochs_{0}; /* prompt code epochs since start */
+    /* code periods of the replica: + 1 at each epoch end, +- 1 when a code shift
+     * (the search) crosses a period boundary, so it stays in step with the
+     * satellite's code periods across a loss and a local search (the bit and
+     * subframe timing use it). Starts at a multiple of 6000. */
+    static constexpr uint32_t kRepBase = 6000000u;
+    uint32_t rep_{kRepBase};
+    /* fades and kept timing */
+    uint16_t coast_ms_{0};      /* epochs coasted (0: not coasting) */
+    bool coast_hi_{false};      /* the last coast window was at kVerifyCn0 or more */
+    bool relock_{false};        /* resumed after a coast, no phase lock yet */
+    bool keep_{false};          /* bit / frame timing kept through the search until keep_until_ */
+    bool restored_{false};      /* re-acquired with kept timing; the bit-sync histogram has not checked it yet */
+    bool frame_pending_{false}; /* reseed: the framer is set at the next bit edge */
+    uint8_t keep_flags_{0};     /* KeepFlags of the last re-acquisition */
+    uint32_t keep_until_{0};    /* rep_ deadline */
 
     LoopParams lp_{};
     uint8_t prn_{0};
@@ -763,12 +809,43 @@ class Channel {
         cn0_wins_ = 0;
         verify_ms_ = 0;
         verified_ = false;
-        reset_bits();
+        coast_ms_ = 0;
+        relock_ = false;
+        if (keeping())
+            reseed();
+        else
+            reset_bits();
         for (auto& a : acc_) a = 0;
         epoch_samples_ = 0;
         epoch_gap_ = false;
     }
+    bool keeping() const { return keep_ && bit_edge_ >= 0 && static_cast<int32_t>(keep_until_ - rep_) > 0; }
+    /* found again with the timing kept: the bit edge stays, the framer expects
+     * the next TLM at the subframe phase counted from the last subframe start,
+     * the histogram checks the edge (bit_epoch) */
+    __attribute__((noinline)) void reseed() {
+        restored_ = true;
+        keep_flags_ = KEEP_BITS;
+        for (auto& h : hist_) h = 0;
+        hist_n_ = 0;
+        prev_sign_ = 0;
+        bit_acc_ = 0;
+        bit_cnt_ = -1;           /* the next full bit */
+        frame_pending_ = tsync_; /* the framer is set at the next bit edge (bit_epoch: frame_resync) */
+        if (!tsync_) framer_.reset();
+    }
+    /* at the first bit edge after reseed (epoch rep_ starts a bit): the framer's
+     * place in the subframe and the TOW it expects next, from the last subframe
+     * start (t_epoch_, t_tow_ms_) */
+    __attribute__((noinline)) void frame_resync() {
+        frame_pending_ = false;
+        const uint32_t bits = (rep_ - t_epoch_) / 20u, j = bits % 300u;
+        const uint32_t t_cur = (t_tow_ms_ / 1000u + 6u * (bits / 300u)) % 604800u; /* that subframe's start, s of week */
+        framer_.resync(j, (t_cur / 6u + (j < 60u ? 1u : 2u)) % 100800u);
+        keep_flags_ |= KEEP_FRAME;
+    }
     void reset_bits() {
+        restored_ = frame_pending_ = false;
         for (auto& h : hist_) h = 0;
         hist_n_ = 0;
         prev_sign_ = 0;
@@ -792,10 +869,17 @@ class Channel {
         delta_res_ = d - dr;
         delta_ = static_cast<uint32_t>(static_cast<int32_t>(dr));
     }
+    /* m_ must be the replica's true position in its code period (see slow_block) */
     void shift_code(int halfchips) {
         int m = static_cast<int>(m_) + halfchips;
-        while (m < 0) m += kHalfChips;
-        while (m >= kHalfChips) m -= kHalfChips;
+        while (m < 0) {
+            m += kHalfChips;
+            rep_--;
+        }
+        while (m >= kHalfChips) {
+            m -= kHalfChips;
+            rep_++;
+        }
         m_ = static_cast<uint32_t>(m);
     }
 
@@ -807,6 +891,10 @@ class Channel {
     void bit_epoch(float ip, bool valid, Shared* sh, int ch);
     void got_bit(int b, Shared* sh, int ch);
     void lost(uint8_t why);
+    void start_coast();
+    float cn0_window(float p2);
+    void coast_epoch(float ip, float qp, bool valid, Shared* sh, int ch);
+    void hist_epoch(float ip, bool valid, int e20);
     __attribute__((noinline)) void xs_track() { /* the code the loops moved since an offset-search hit */
         xs_acc_ += 2e-3f * (code_corr_ + static_cast<float>(kChip / kL1) * (freq_ - s_f0_));
     }
@@ -935,15 +1023,19 @@ __attribute__((noinline)) inline void Channel::slow_block(const uint32_t* lut, u
         return;
     }
     epoch_samples_ += t;
-    m_ = m, f_ = f;
+    /* the replica is at the end of its period here: position 0 of the next while
+     * epoch_end runs, so a search shift there counts the periods it crosses (rep_) */
+    m_ = 0, f_ = f;
     epoch_end(sh, ch); /* may change the NCO rates and, in the search, move m_ */
-    const int sft = static_cast<int>(m_) - static_cast<int>(m);
+    const int sft = static_cast<int>(m_);
     f -= d32;
     int mm = static_cast<int>(m) + static_cast<int>(adv) - kHalfChips;
     if (sft != 0) { /* the search moved the replica: drop the rest of this block */
         mm += sft;
-        while (mm < 0) mm += kHalfChips;
-        while (mm >= kHalfChips) mm -= kHalfChips;
+        while (mm >= kHalfChips) { /* the period boundary passes in the dropped samples */
+            mm -= kHalfChips;
+            rep_++;
+        }
         m_ = static_cast<uint32_t>(mm), f_ = f;
         return;
     }
@@ -1010,6 +1102,7 @@ inline void Channel::epoch_end(Shared* sh, int ch) {
         if (xs_ == 2) xs_track();
     }
     epochs_++;
+    rep_++;
     if (lp_.verify_timeout_ms && !ever_ok_) {
         if (verified_ || bit_edge_ >= 0)
             ever_ok_ = true;
@@ -1024,6 +1117,7 @@ inline void Channel::epoch_end(Shared* sh, int ch) {
 inline void Channel::epoch_skipped(Shared* sh, int ch) {
     if (state_ != TRK_SEARCH) bit_epoch(0, false, sh, ch);
     epochs_++;
+    rep_++;
     mode_ms_++;
     if (state_ == TRK_TRACK) track_ms_++;
 }
@@ -1034,7 +1128,15 @@ __attribute__((noinline)) inline void Channel::lost(uint8_t why) {
     state_ = TRK_SEARCH;
     el_all_ = true;
     sweeps_ = 0;
-    reset_bits();
+    coast_ms_ = 0;
+    relock_ = false;
+    if (keeping()) { /* found again soon: the bit / frame timing continues from rep_ */
+        bit_acc_ = 0;
+        bit_cnt_ = -1;
+    } else {
+        keep_ = restored_ = false;
+        reset_bits();
+    }
     pll_lock_ = narrow_ = verified_ = false;
     cn0_ = 0;
     s_f0_ = good_freq_;
@@ -1055,6 +1157,73 @@ __attribute__((noinline)) inline void Channel::lost(uint8_t why) {
     s_off_ = -6;
     freq_ = s_f0_ - 500.0f;
     set_nco();
+}
+
+/* M2M4 C/N0: the prompt power of one epoch; at the end of a window of kCn0Win
+ * the estimate (dB-Hz, >= 0), else -1 */
+__attribute__((noinline)) inline float Channel::cn0_window(float p2) {
+    m2_ += p2;
+    m4_ += p2 * p2;
+    if (++cn0_n_ < kCn0Win) return -1.0f;
+    const float M2 = m2_ / kCn0Win, M4 = m4_ / kCn0Win;
+    const float pd2 = 2.0f * M2 * M2 - M4;
+    float est = 0;
+    if (pd2 > 0) {
+        const float pd = std::sqrt(pd2), pn = M2 - pd;
+        if (pn > 0) est = 10.0f * std::log10(pd / pn / 1e-3f);
+    }
+    m2_ = m4_ = 0;
+    cn0_n_ = 0;
+    return est < 0 ? 0.0f : est;
+}
+
+/* A fade of a bit-synced channel: the carrier NCO held at the last good
+ * frequency (the code follows it), no loop updates, bits and epochs counted as
+ * before (the bits of the fade fail parity; the framer keeps its place) */
+__attribute__((noinline)) inline void Channel::start_coast() {
+    coast_ms_ = 1;
+    coast_hi_ = false;
+    freq_ = freq_int_ = good_freq_;
+    code_corr_ = 0;
+    set_nco();
+    pll_lock_ = narrow_ = false;
+    have_prev_ = false;
+    m2_ = m4_ = 0;
+    cn0_n_ = 0;
+}
+
+__attribute__((noinline)) inline void Channel::coast_epoch(float ip, float qp, bool valid, Shared* sh, int ch) {
+    mode_ms_++;
+    track_ms_++;
+    bit_epoch(ip, valid, sh, ch);
+    dop_sum_ += freq_;
+    dop_n_++;
+    if (valid) {
+        const float est = cn0_window(ip * ip + qp * qp);
+        if (est >= 0) {
+            if (est >= kCoastBackCn0 || (est >= kVerifyCn0 && coast_hi_)) { /* back: the loops resume, wide */
+                coast_ms_ = 0;
+                relock_ = true;
+                cn0_ = est;
+                cn0_low_ = 0;
+                cn0_wins_ = 1;
+                mode_ms_ = 0;
+                lock_good_ = lock_bad_ = 0;
+                pld_s_ = pld_i_ = pld_q_ = 0;
+                pld_n_ = 0;
+                hf_dot_ = hf_cross_ = hf_p1_ = hf_p2_ = 0;
+                hf_n_ = 0;
+                hf_hits_ = 0;
+                return;
+            }
+            coast_hi_ = est >= kVerifyCn0;
+        }
+    }
+    if (++coast_ms_ > kCoastMs) { /* not back: search, the timing kept for kKeepMs */
+        keep_ = true;
+        keep_until_ = rep_ + kKeepMs;
+        lost(LOSS_COAST);
+    }
 }
 
 inline void Channel::search_epoch(float ie, float qe, float ip, float qp, float il, float ql) {
@@ -1110,10 +1279,12 @@ inline void Channel::search_epoch(float ie, float qe, float ip, float qp, float 
     s_cell_ = 0;
     if (s_wmax_) {
         const int nwin = 2 * s_wmax_ + 1;
-        /* the offset search: its share of the windows done at the hand-over Doppler
-         * (strong signals: ~4 s with 3 channels), then +-250 Hz as well (weak ones,
-         * whose search Doppler is less exact) */
-        if (xs_ && s_ndop_ == 1 && static_cast<int>(sweeps_) * s_wstep_ >= nwin) s_ndop_ = 3;
+        /* the offset search: two passes over the windows at the hand-over Doppler
+         * (strong signals: ~4 s with 3 channels; the second pass gives each window
+         * to another channel, as the window count 137 is prime: one faded during
+         * the first pass costs one pass, not three), then +-250 Hz as well (weak
+         * ones, whose search Doppler is less exact) */
+        if (xs_ && s_ndop_ == 1 && static_cast<int>(sweeps_) * s_wstep_ >= 2 * nwin) s_ndop_ = 3;
         int w = s_win_ + s_wstep_;
         if (w >= nwin) w -= nwin;
         s_win_ = static_cast<uint8_t>(w);
@@ -1128,6 +1299,10 @@ inline void Channel::search_epoch(float ie, float qe, float ip, float qp, float 
 }
 
 inline void Channel::track_epoch(float ip, float qp, float id, float qd, bool valid, Shared* sh, int ch) {
+    if (coast_ms_) {
+        coast_epoch(ip, qp, valid, sh, ch);
+        return;
+    }
     mode_ms_++;
     if (state_ == TRK_TRACK) track_ms_++;
     bit_epoch(ip, valid, sh, ch);
@@ -1197,6 +1372,7 @@ inline void Channel::track_epoch(float ip, float qp, float id, float qd, bool va
             lock_good_ = 0;
         }
         pll_lock_ = pld_s_ > 0.6f && state_ == TRK_TRACK;
+        if (pll_lock_) relock_ = false;
         if (!narrow_ && state_ == TRK_TRACK && mode_ms_ >= static_cast<uint32_t>(kWideEpochs) && lock_good_ >= 10) {
             narrow_ = true;
         } else if (narrow_ && lock_bad_ >= (bit_edge_ >= 0 ? 40 : 160)) { /* ~0.8 s of poor phase lock: widen again */
@@ -1255,21 +1431,10 @@ inline void Channel::track_epoch(float ip, float qp, float id, float qd, bool va
         }
     }
     /* C/N0: M2M4 over windows of kCn0Win epochs */
-    m2_ += p2;
-    m4_ += p2 * p2;
-    if (++cn0_n_ >= kCn0Win) {
-        const float M2 = m2_ / kCn0Win, M4 = m4_ / kCn0Win;
-        float pd2 = 2.0f * M2 * M2 - M4;
-        float est = 0;
-        if (pd2 > 0) {
-            const float pd = std::sqrt(pd2), pn = M2 - pd;
-            if (pn > 0) est = 10.0f * std::log10(pd / pn / T);
-        }
-        if (est < 0) est = 0;
+    const float est = cn0_window(p2);
+    if (est >= 0) {
         cn0_ = cn0_wins_ == 0 ? est : cn0_ + 0.3f * (est - cn0_);
         cn0_wins_++;
-        m2_ = m4_ = 0;
-        cn0_n_ = 0;
         if (est < kLossCn0) {
             cn0_low_++;
         } else {
@@ -1279,7 +1444,10 @@ inline void Channel::track_epoch(float ip, float qp, float id, float qd, bool va
         /* lost: three windows in a row below, or the smoothed estimate below after
          * half a second (noise alone gives scattered single windows above 25) */
         if ((cn0_low_ >= 3 && cn0_wins_ >= 3) || (cn0_wins_ >= 5 && cn0_ < kLossCn0 - 2.0f)) {
-            lost(LOSS_CN0);
+            if (bit_edge_ >= 0 && state_ == TRK_TRACK)
+                start_coast(); /* a fade: hold the NCO, keep counting */
+            else
+                lost(LOSS_CN0);
             return;
         }
     }
@@ -1300,44 +1468,60 @@ inline void Channel::track_epoch(float ip, float qp, float id, float qd, bool va
     }
 }
 
-inline void Channel::bit_epoch(float ip, bool valid, Shared* sh, int ch) {
-    const int e20 = static_cast<int>(epochs_ % 20u);
-    if (bit_edge_ < 0) {
-        if (!pll_lock_ || !valid) {
-            prev_sign_ = 0;
-            return;
-        }
-        const int8_t sgn = ip >= 0 ? 1 : -1;
-        if (prev_sign_ && sgn != prev_sign_) {
-            hist_[e20]++;
-            hist_n_++;
-        }
-        prev_sign_ = sgn;
-        if (hist_n_ >= 30 && hist_n_ % 10 == 0) {
-            int best = 0;
-            for (int k = 1; k < 20; k++)
-                if (hist_[k] > hist_[best]) best = k;
-            float others = 0;
-            for (int k = 0; k < 20; k++)
-                if (k != best) others += hist_[k];
-            others /= 19.0f;
-            /* the edge bin must stand out from the noise sign flips */
-            if (hist_[best] >= 15 && hist_[best] - others > 5.0f * std::sqrt(others + 1.0f)) {
-                bit_edge_ = best;
-                bit_acc_ = 0;
-                bit_cnt_ = -1; /* wait for the first full bit */
-            } else if (hist_n_ >= 1500) {
-                for (auto& h : hist_) h = 0;
-                hist_n_ = 0;
-            }
-        }
+/* The bit-sync histogram of prompt sign changes: finds the bit edge, or
+ * checks one kept across a loss (restored_). */
+__attribute__((noinline)) inline void Channel::hist_epoch(float ip, bool valid, int e20) {
+    if (!pll_lock_ || !valid) {
+        prev_sign_ = 0;
         return;
     }
+    const int8_t sgn = ip >= 0 ? 1 : -1;
+    if (prev_sign_ && sgn != prev_sign_) {
+        hist_[e20]++;
+        hist_n_++;
+    }
+    prev_sign_ = sgn;
+    if (hist_n_ >= 30 && hist_n_ % 10 == 0) {
+        int best = 0;
+        for (int k = 1; k < 20; k++)
+            if (hist_[k] > hist_[best]) best = k;
+        float others = 0;
+        for (int k = 0; k < 20; k++)
+            if (k != best) others += hist_[k];
+        others /= 19.0f;
+        /* the edge bin must stand out from the noise sign flips */
+        if (hist_[best] >= 15 && hist_[best] - others > 5.0f * std::sqrt(others + 1.0f)) {
+            if (restored_) {
+                restored_ = false;
+                keep_ = false;
+                if (best == bit_edge_) {
+                    keep_flags_ |= KEEP_OK;
+                    return;
+                }
+                keep_flags_ |= KEEP_BAD; /* the kept timing was wrong: start over from this edge */
+                reset_bits();
+            }
+            bit_edge_ = best;
+            bit_acc_ = 0;
+            bit_cnt_ = -1; /* wait for the first full bit */
+        } else if (hist_n_ >= 1500) {
+            for (auto& h : hist_) h = 0;
+            hist_n_ = 0;
+        }
+    }
+}
+
+__attribute__((noinline)) inline void Channel::bit_epoch(float ip, bool valid, Shared* sh, int ch) {
+    const int e20 = static_cast<int>(rep_ % 20u);
+    if (bit_edge_ < 0 || restored_) hist_epoch(ip, valid, e20);
+    if (bit_edge_ < 0) return;
     if (e20 == bit_edge_) {
         if (bit_cnt_ >= 10)
             got_bit(bit_acc_ < 0 ? 1 : 0, sh, ch);
         else if (bit_cnt_ >= 0)
             got_bit(0, sh, ch); /* mostly lost to gaps: a guess (parity will tell) */
+        else if (frame_pending_)
+            frame_resync(); /* the first bit after a re-acquisition with kept timing starts here */
         bit_acc_ = 0;
         bit_cnt_ = 0;
     }
@@ -1353,7 +1537,7 @@ inline void Channel::got_bit(int b, Shared* sh, int ch) {
     bits_out_++;
     if (on_bit) on_bit(on_bit_ctx, prn_, b);
     /* the bit just finished started 20 epochs before this epoch */
-    const uint32_t bit_start = epochs_ - 20u;
+    const uint32_t bit_start = rep_ - 20u;
     const bool was_synced = framer_.synced();
     const auto ev = framer_.bit(static_cast<uint8_t>(b));
     if (framer_.synced()) {
@@ -1617,13 +1801,18 @@ class Tracker {
         }
         int n_on = 0, n_used = 0;
         nbuf_++;
+        /* a lost channel's search (exact path, ~2x the cost of tracking) runs on
+         * every other buffer when the pool is busy (8 lost at once stay within the M4
+         * time), on every buffer while searches cost no more than the pool allows
+         * (the hand-over offset search and a re-acquisition then take half the time) */
+        int cost = pool_used();
+        for (int i = 0; i < kMaxCh; i++) cost += ch_[i].state() == TRK_SEARCH ? kGpsCost : 0;
+        const bool halve = cost > pool_budget_;
         for (int i = 0; i < kMaxCh; i++) {
             const auto st = ch_[i].state();
             on_[i] = st != TRK_IDLE && st != TRK_FAILED;
             n_used += on_[i];
-            /* a lost channel's search (exact path, ~2x the cost of tracking) runs on
-             * every other buffer: 8 lost at once stay within the M4 time */
-            if (on_[i] && st == TRK_SEARCH && ((nbuf_ + i) & 1u)) {
+            if (on_[i] && st == TRK_SEARCH && halve && ((nbuf_ + i) & 1u)) {
                 ch_[i].skip(kBufN, sh_, i);
                 on_[i] = false;
             }

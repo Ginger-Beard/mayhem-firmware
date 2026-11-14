@@ -151,6 +151,9 @@ and shows per tracked satellite which of subframes 1-3 it has so far
 ("05:1.3": 1 and 3 held, 2 missing; "05:eph": decoded). Get fix again keeps
 what was collected (subframes, almanac pages, ionosphere) for 2 hours, so a
 restart does not start the 30 s per satellite over.
+A fade (C/N0 under 25 dB-Hz: a roof, trees, a bridge) is first coasted for
+0.8 s ("faded: holding" on Heard); a satellite found again within 5 s keeps
+its bit and subframe timing, so its subframes continue at the next one.
 While it tracks, the app takes GPS time from the satellites (the clock and Zone
 are not needed): from then on passes, the sky and the search use GPS time, so a
 wrong clock cannot block a fix or the predictions. The Fix tab shows it with
@@ -226,7 +229,7 @@ file starts with a header line and one "#TYPE,..." line per row type. Types:
           while tracking (AC rms LSB x10, DC I and Q x10, clipping per mille)
   CH      every second per channel: channel, PRN, state (1 pull-in, 2 track,
           3 lost: searching, 4 given up), loop (0 FLL, 1 PLL wide, 2 PLL narrow,
-          3 search, 4 hand-over offset search), flags (L phase lock, B bit sync, T subframe time,
+          3 search, 4 hand-over offset search, 5 coasting: faded, NCO held), flags (L phase lock, B bit sync, T subframe time,
           V verified, E verified since the hand-over, R released: never
           verified, channel freed, A aided search for a newly risen
           satellite), C/N0 x10, phase lock indicator x100 (cos 2 phi; ~100 =
