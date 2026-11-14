@@ -91,6 +91,15 @@ struct AutoState {
 };
 
 void auto_reset(AutoState& a); /* also the PVT's correction defaults (troposphere model, 5 deg mask) */
+/* Get fix again: the ring counters, channel table, measurement and PVT work
+ * start over (the new tracking loops count from 0); the partial subframe 1-3
+ * collections, the almanac pages, the ionosphere and the week are kept, so a
+ * restart does not throw away what was decoded. Subframes older than
+ * kAutoKeepS against a newer one of the same satellite are dropped when it
+ * arrives; the IODE / IODC check keeps issues from mixing. */
+void auto_new_run(AutoState& a);
+#define GPS_AUTO_NEW_RUN 1
+constexpr uint32_t kAutoKeepS = 7200;
 
 /* One parity-checked subframe. Updates week / TOW / almanac pages; when it
  * completes a satellite's subframes 1-3 the ephemeris replaces table[prn-1]
@@ -171,6 +180,14 @@ void auto_predict(const Orbit& o, const Vec3& rx, double t_rx, double* code_chip
 /* half-width of the aided code search (windows of 15 half chips either side):
  * the orbit's position error over the light time, from the almanac's age */
 int auto_aided_windows(bool ephemeris, double age_days);
+/* Before the first fix (aided search with GPS time from a tracked satellite):
+ * the GPS time at which a tracked satellite's signal arrives, from its
+ * transmit time tx_sv (its clock, s on the GPS-week timeline) and an
+ * approximate receiver position (error: the position error along the line of
+ * sight / c); and the search half-width widened for that position error. */
+double auto_rx_time(const Orbit& o, const Vec3& rx, double tx_sv);
+int auto_aided_windows_pos(bool ephemeris, double age_days, double pos_err_m);
+#define GPS_AUTO_RX_TIME 1
 int auto_almanac_decode(const AutoState& a, int32_t week_now, AlmRec* recs);
 
 }  // namespace ui::external_app::gps

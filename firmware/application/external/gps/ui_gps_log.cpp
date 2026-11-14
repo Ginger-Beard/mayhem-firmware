@@ -31,6 +31,7 @@
 
 #include "ui_gps.hpp"
 #include "gps_nav.hpp"
+#include "gps_log_rows.hpp"
 
 #include "file_path.hpp"
 #include "portapack.hpp"
@@ -92,41 +93,11 @@ void GpsView::log_end(const Fmt& f) {
     log_push(mem_->log, mem_->log.row, f.len());
 }
 
+/* the header goes to the file first, straight from flash (log_frame): it no
+ * longer passes through the 4 KB ring, which it used to fill at log start so
+ * the first rows after it (SEC, SCREEN, HEARD ...) were dropped */
 void GpsView::log_header() {
-    static const char* const kHead[] = {
-        "ms,utc,type,fields (one row type per line below; README.TXT 'Diagnostics log')",
-        "#START,fw,lna,vga,amp,ant_bias,zone_min,pos_valid,pos_src,pos_age_s,pos_acc_m,lat_e7,lon_e7,alt_m,alm_n,alm_age_dx10,eph_n,tle_n,rtc_local,rtc_utc,heap_free,scratch,method,tab,file,e1,sys_view,iq_conj",
-        "#SEC,job,done,tracking,search,pgpr_state,level,confirming,done_prn,total_prn,pct,rms_x10,clip_pm,unit_cyc,units,seq,dt_ab_ms,solving,solve_kind,solve_pending,fix_ok,fix_mode,fix_tried,heard,cand,est_m,ttff_s,ttff_coarse_s,tracked,synced,eph,gps_time,gps_off_ms,heap_free,log_rows,log_dropped,log_errs,cached,cache_errs,n_eph,n_alm,ant,iq_conj,xs_found,xs_ms",
-        "#M4,cyc_avg,cyc_max,buffers,missed,active,handovers,handover_age_ms,sf_write,meas_seq,level_x10,dc_i_x10,dc_q_x10,clip_pm",
-        "#CH,ch,prn,state,mode,flags,cn0_x10,pld_x100,doppler_x10,code_x64,code_err_x1000,lock_ms,bits,words_ok,parity_errs,subframes,tow,reacq,sweeps,half_fixes",
-        "#SR,seq,search,k_ms,prn,searched,detected,once,refined,metric_x100,thr_x100,cn0_x10,doppler,code_x1000,verdict,b_metric_x100,b_doppler,b_code_x1000",
-        "#HO,handovers,age_ms,prns",
-        "#REL,prn,after_ms,released,refills (channel freed: detection never verified)",
-        "#ADD,prn,el_deg,code_x1000,doppler,clock_hz,windows,fix_age_ms,orbit,aided_starts (aided search: newly risen satellite)",
-        "#SF,prn,ch,sfid,page,tow,w1..w10 (24-bit data words hex)",
-        "#EPH,event,prn,have,fresh,in_table,toe_age_s,iode",
-        "#MEAS,seq,sample,missed,n,prn:flags:tx_ms:tx_frac_hex:doppler:cn0_x10 ...",
-        "#SOLVE,kind,n,prns,t_offset_s,prior_lat_e7,prior_lon_e7,max_rms_m,max_dt_s,alm_age_dx10,snapshot_age_ms",
-        "#FIX,kind,ok,why,used,dropped,rms_m_x10,hdop_x10,vdop_x10,clock_m,time_corr_ms_or_drift_ppb,lat_e7,lon_e7,alt_m,speed_cm_s,masked,trop_m_x10,iono_m_x10,iono_src,systems (G / GE),galileo_used",
-        "#IONO,source (none / air / cache),age_h,a0..a3 (x1e9 s ...),b0..b3",
-        "#SCREEN,tab,fix rows 0-10 joined by |",
-        "#HEARD,heard rows (status | list)",
-        "#CLK,event (tow / pvt: GPS time in use; set: RTC written by Set clock),gps_minus_rtc_ms,rtc_utc,gps_utc,zone_min",
-        "#ERR,what,detail",
-        "#IQ,source (search / tracking),evidence (search: candidates mirrored; tracking: best C/N0),iq_conj now,flips (the samples arrived mirrored: Q negated from here on)",
-        "#LOG,event,errors (the log file reopened after the Log box was ticked again)",
-        "#IMG,image,result,bytes,load_ms,loads (a baseband image loaded from /APPS)",
-        "#SYS,event (view / sky),view,file (1 read 2 missing 3 empty),age_dx10,sats,E up/total,C up/total,R up/total,S up/total,bad_lines",
-        "#GAL,prn,el_deg,pred_code_chips_x100,pred_doppler_hz,clock_term_hz,fix_age_ms,result,metric_x100,cn0_x10,offset_half_samples,side_db_x10,found_doppler,blocks,m4_kcycles,search_s,handover",
-        "#GTRK,max_ch,active,handovers,refused,preempted,reacq_searches,pool_x10,pool_budget_x10,last_ho_prn,last_ho (Galileo channels, 1/s)",
-        "#GCH,ch,prn,state,mode,flags,cn0c_x10,cn0b_x10,pld_x100,doppler_x10,code_x16,code_err_x1000,lock_ms,side_e_x100,side_l_x100,side_jumps,cs_phase,cs_errs,cs_syncs,fl_fixes,reacq,epochs",
-        "#GEV,prn,event (start / cs / cs_lost / side / lost / found / released),a,b (Galileo channel events; see README)",
-        "#GNAV,prn,word_type,crc_ok,alert,pages_ok,pages_bad,gst_week,gst_tow,word (128 bits hex; an I/NAV page of a tracked Galileo satellite)",
-        "#GEPH,event (new / same / iod_wait / bad_svid / bad_value / ggto / ggto_none),prn,iodnav,toe_sow,sisa,e1b_hs,e1b_dvs,bgd_e1e5b_ps,af0_ns,sqrt_a_x1000,built,rejected,iod_waits (or for ggto: a0_ps,a1_x1e15,t0g_h,wn0g,ggto_ps_now)",
-        "#GMEAS,seq,sample,n,prn:why:sym:frac_hex:tx_ms:t_agree:cn0c_x10 ... (why: 0 used 1 idle 2 no CS 3 weak 4 no page time 5 time unconfirmed 6 no ephemeris 7 PVT full)",
-        "#GFIX,mode (ggto / isb),gps_ok,mix_ok,used,gate,n_gps_used,n_gal_used,isb_ps,ggto_ps,rms_gps_only_x10,rms_mix_x10,gal_rms_x10,gps_rms_in_mix_x10,hdop_gps_x10,hdop_mix_x10,moved_dm,prn:resid_dm ...,alone_ok,alone_used,alone_moved_dm (GPS + Galileo against GPS alone)",
-    };
-    for (const char* h : kHead) log_push(mem_->log, h, std::strlen(h));
+    log_head_pos_ = 0;
 }
 
 void GpsView::log_start_row() {
@@ -157,6 +128,8 @@ void GpsView::log_start_row() {
  * a few pieces to the card, sync */
 void GpsView::log_frame() {
     if (!log_on_ || !mem_) {
+        /* the Log box was unticked: what is queued (its UI row) goes out, then f_close */
+        if (log_file_ && mem_ && log_pending(mem_->log) && log_write_some(kLogPiecesPerFrame)) return;
         if (log_file_) log_close();
         return;
     }
@@ -169,23 +142,40 @@ void GpsView::log_frame() {
     }
     log_screen();
     if (!log_file_) return;
-    for (int k = 0; k < kLogPiecesPerFrame && log_pending(mem_->log); k++) {
-        const char* p;
-        const size_t n = log_piece(mem_->log, log_pos_, &p);
-        const auto r = log_file_->write(p, n);
-        if (r.is_error()) {
-            log_fail("write");
-            return;
-        }
-        log_taken(mem_->log, n);
-        log_pos_ += static_cast<uint32_t>(n);
-        log_dirty_ = true;
-    }
+    if (!log_write_some(kLogPiecesPerFrame)) return;
     if (log_dirty_ && now - log_sync_t_ >= kLogSyncTicks) {
         log_sync_t_ = now;
         log_dirty_ = false;
         if (log_file_->sync().is_valid()) log_fail("sync");
     }
+}
+
+/* up to n sector-bounded pieces: the rest of the header first, then the ring;
+ * false after a write error (the file is closed, retried later) */
+bool GpsView::log_write_some(int n) {
+    for (int k = 0; k < n; k++) {
+        const char* p;
+        const bool head = log_head_pos_ < kLogHeadLen;
+        size_t len;
+        if (head)
+            len = log_head_piece(kLogHead, kLogHeadLen, log_head_pos_, log_pos_, &p);
+        else if (log_pending(mem_->log))
+            len = log_piece(mem_->log, log_pos_, &p);
+        else
+            break;
+        const auto r = log_file_->write(p, len);
+        if (r.is_error()) {
+            log_fail("write");
+            return false;
+        }
+        if (head)
+            log_head_pos_ = static_cast<uint16_t>(log_head_pos_ + len);
+        else
+            log_taken(mem_->log, len);
+        log_pos_ += static_cast<uint32_t>(len);
+        log_dirty_ = true;
+    }
+    return true;
 }
 
 /* LOGS/GPS_<yyyymmdd>_<hhmmss>.CSV (RTC time), one per app start; the same
@@ -215,7 +205,7 @@ void GpsView::log_open() {
     log_err_ = nullptr;
     if (!log_started_) {
         log_started_ = true;
-        log_header();
+        log_header(); /* written from flash before the ring's rows */
         log_start_row();
     } else if (prev_err) { /* after a card error */
         Fmt f = log_row("ERR");
@@ -275,24 +265,18 @@ void GpsView::log_gal(const gal_acq::Result& r) {
 
 /* the Galileo channels once a second (with the E1 box on, while the tracking image runs) */
 void GpsView::log_gal_second() {
-    if (!log_active() || !gal_on_ || !gal_trk_sh_ || !mem_) return;
+    if (!mem_ || !gal_rows_wanted(log_active(), gal_on_ != 0, gal_trk_sh_, tracking_)) return;
     const gal_acq::TrkShared& t = *gal_trk_sh_; /* counters: a torn read only mixes two seconds */
     {
         Fmt f = log_row("GTRK");
-        f.c(',').u(t.max_ch).c(',').u(t.active).c(',').u(t.handovers).c(',').u(t.refused).c(',').u(t.preempted).c(',').u(t.reacq_searches);
-        f.c(',').u(t.pool_x10).c(',').u(t.pool_budget_x10).c(',').u(t.last_ho_prn).c(',').u(t.last_ho_result);
+        row_gtrk(f, t);
         log_end(f);
     }
     for (int i = 0; i < gal_acq::kMaxTrk; i++) {
         gal_acq::TrkInfo c;
         if (!gal_channel(i, c) || c.state == gps_trk::TRK_IDLE || c.state == gps_trk::TRK_FAILED) continue;
         Fmt f = log_row("GCH");
-        f.c(',').u(static_cast<uint32_t>(i)).c(',').c('E').d2(c.prn).c(',').u(c.state).c(',').u(c.mode).c(',');
-        f.s(c.flags & gal_acq::TF_PLL ? "L" : "-").s(c.flags & gal_acq::TF_CS ? "C" : "-").s(c.flags & gal_acq::TF_EVER ? "E" : "-");
-        f.s(c.flags & gal_acq::TF_SIDE ? "S" : "-").s(c.flags & gal_acq::TF_REACQ ? "Q" : "-");
-        f.c(',').u(c.cn0c_x10).c(',').u(c.cn0b_x10).c(',').d(c.pld_x100).c(',').d(static_cast<int32_t>(std::lround(c.doppler_hz * 10.0f))).c(',').u(c.code_x16);
-        f.c(',').d(static_cast<int32_t>(std::lround(c.code_err * 1000.0f))).c(',').u(c.lock_ms).c(',').u(c.side_e_x100).c(',').u(c.side_l_x100).c(',').u(c.side_jumps);
-        f.c(',').u(c.cs_phase).c(',').u(c.cs_errs).c(',').u(c.cs_syncs).c(',').u(c.fl_fixes).c(',').u(c.reacq).c(',').u(c.epochs);
+        row_gch(f, i, c);
         log_end(f);
     }
 }
@@ -432,6 +416,7 @@ void GpsView::log_second() {
         f.c(',').u(static_cast<uint32_t>(heap)).c(',').u(mem_->log.rows).c(',').u(mem_->log.dropped).c(',').u(log_errs_);
         f.c(',').u(cache_written_).c(',').u(cache_errs_).c(',').u(n_eph_).c(',').u(n_alm_).c(',').u(portapack::get_antenna_bias() ? 1u : 0u);
         f.c(',').u(iq_conj_).c(',').u(trk_sh_ && tracking_ ? trk_sh_->xs_found : 0u).c(',').u(trk_sh_ && tracking_ ? trk_sh_->xs_ms : 0u);
+        f.c(',').u(gal_on_ ? 1u : 0u).c(',').u(gal_trk_sh_ ? 1u : 0u); /* E1 box, the tracking image's Galileo block known (GTRK rows need both) */
         log_end(f);
         mem_->log.row[f.len()] = 0;
         UsbSerialAsyncmsg::asyncmsg(static_cast<const char*>(mem_->log.row)); /* only with `asyncmsg enable` and a client connected */
@@ -701,6 +686,44 @@ void GpsView::log_iono() {
         for (int k = 0; k < 4; k++) f.c(',').d(static_cast<int32_t>(std::lround(ia[k] * 1e9 * (k == 0 ? 1.0 : 1.0))));
         for (int k = 0; k < 4; k++) f.c(',').d(static_cast<int32_t>(std::lround(ib[k])));
     }
+    log_end(f);
+}
+
+void GpsView::log_ui(const char* event, const char* detail) {
+    if (!log_active()) return;
+    Fmt f = log_row("UI");
+    f.c(',').s(event).c(',');
+    put_text(f, detail);
+    log_end(f);
+}
+
+/* channel events from the channel table just copied (UI thread, ~5 times a second) */
+void GpsView::log_ch_events() {
+    if (!mem_) return;
+    const AutoState& a = mem_->autos;
+    for (int i = 0; i < gps_trk::kMaxCh; i++) {
+        const gps_trk::ChInfo& c = a.ch[i];
+        const char* ev = ch_event(ev_prn_[i], ev_state_[i], ev_reacq_[i], ev_mode_[i], c);
+        ev_prn_[i] = c.prn;
+        ev_state_[i] = c.state;
+        ev_reacq_[i] = c.reacq;
+        ev_mode_[i] = c.mode;
+        if (!ev || !log_active()) continue;
+        Fmt f = log_row("EV");
+        row_ev(f, i, c, ev);
+        log_end(f);
+    }
+}
+
+/* a mirrored-spectrum check that could not run (once per hand-over or search) */
+void GpsView::log_iq_skip(const char* source, const char* why, uint32_t v) {
+    if (iq_skip_logged_) return;
+    iq_skip_logged_ = true;
+    if (!log_active()) return;
+    Fmt f = log_row("IQ");
+    f.c(',').s(source).c(',').u(v).c(',');
+    put_text(f, why);
+    f.c(',').u(iq_flips_);
     log_end(f);
 }
 

@@ -145,6 +145,19 @@ from the almanac at once if one is on the card, then "Upgrading: n of 4
 ephemerides" while it tracks (each satellite needs about 30 s of clean signal),
 then "PRECISE" (a few metres; "Err est." is an estimate). Keep it outdoors with
 open sky and the active antenna powered. Stop works at any time.
+With fewer than 6 heard there is no coarse fix: the tab then says "Heard 3,
+4 needed: tracking" (or "Heard 5: waiting for eph" with 4 or more tracked)
+and shows per tracked satellite which of subframes 1-3 it has so far
+("05:1.3": 1 and 3 held, 2 missing; "05:eph": decoded). Get fix again keeps
+what was collected (subframes, almanac pages, ionosphere) for 2 hours, so a
+restart does not start the 30 s per satellite over. Before the first fix,
+once a tracked satellite gave GPS time, the app searches for more satellites
+(one every 5 s while a channel is free) from the saved position, assumed up to
+10 km off (or its accuracy, if the position file gives a better one): 3 heard
+cannot give a fix, a fourth found this way can (ADD rows).
+A fade (C/N0 under 25 dB-Hz: a roof, trees, a bridge) is first coasted for
+0.8 s ("faded: holding" on Heard); a satellite found again within 5 s keeps
+its bit and subframe timing, so its subframes continue at the next one.
 While it tracks, the app takes GPS time from the satellites (the clock and Zone
 are not needed): from then on passes, the sky and the search use GPS time, so a
 wrong clock cannot block a fix or the predictions. The Fix tab shows it with
@@ -211,7 +224,8 @@ file starts with a header line and one "#TYPE,..." line per row type. Types:
           full), log errors, ephemerides cached, cache write errors,
           ephemerides held, almanac entries, antenna power as read, I/Q
           correction (0/1), hand-over offset found (0/1) and ms after the
-          hand-over
+          hand-over, E1 box (0/1), tracking image's Galileo block known
+          (0/1; the GTRK / GCH rows need both)
   M4      every second while tracking: M4 cycles per 1 ms buffer (mean, max;
           200000 = 100 %), buffers handled, buffers missed, channels in use,
           hand-overs, age of the search result at the hand-over (ms),
@@ -219,7 +233,7 @@ file starts with a header line and one "#TYPE,..." line per row type. Types:
           while tracking (AC rms LSB x10, DC I and Q x10, clipping per mille)
   CH      every second per channel: channel, PRN, state (1 pull-in, 2 track,
           3 lost: searching, 4 given up), loop (0 FLL, 1 PLL wide, 2 PLL narrow,
-          3 search, 4 hand-over offset search), flags (L phase lock, B bit sync, T subframe time,
+          3 search, 4 hand-over offset search, 5 coasting: faded, NCO held), flags (L phase lock, B bit sync, T subframe time,
           V verified, E verified since the hand-over, R released: never
           verified, channel freed, A aided search for a newly risen
           satellite), C/N0 x10, phase lock indicator x100 (cos 2 phi; ~100 =
@@ -228,6 +242,19 @@ file starts with a header line and one "#TYPE,..." line per row type. Types:
           words, parity failures, subframes, last TOW s, losses of lock,
           search sweeps since the last loss, carrier corrections (a measured
           frequency error over 250 Hz, e.g. the 500 Hz false lock)
+  EV      a channel event, when it happens: channel, PRN, event (start: a
+          new detection in the channel / lost / found: the search found it
+          again / coast: faded, the loops hold the frequency / coast_end: the
+          signal came back while coasting / released: never verified, freed /
+          given_up: searched too long), why it was lost (cn0: C/N0 below 25
+          before bit sync / coast: faded longer than the coast / pullin: no
+          lock after the pull-in / nolock: no phase lock in 6 s / search:
+          started by a search), C/N0 x10, ms in track, losses so far, kept
+          timing (B bit edge, F subframe phase kept across the loss; ok / bad
+          once the bit sync confirmed or rejected it)
+  UI      what you did, in order with the rest: event (getfix / stop /
+          method / tab / e1 / log / setclock / savepos / heard_search /
+          heard_stop / ant_power: switched by you, read only here), detail
   SR      each search result (after every search): search number, search
           kind, snapshot ms, PRN, searched, detected, seen once only, refined,
           peak/mean x100, threshold x100, C/N0 x10, Doppler Hz, code phase
@@ -364,7 +391,16 @@ file starts with a header line and one "#TYPE,..." line per row type. Types:
           the code move against the Doppler; tracking: strong satellites
           handed over but no lock in 20 s), evidence (search: candidates;
           tracking: best C/N0), correction now (1: the images negate Q),
-          corrections so far (4 at most per app start)
+          corrections so far (4 at most per app start). Source doppler:
+          Autonomous (no 2nd snapshot) compared each detection's Doppler with
+          the predicted one, as received and mirrored: the mirrored reading
+          agreed (evidence: detections agreeing), so that hand-over went to a
+          tracking image that negates Q, Dopplers negated. Source
+          skipped_search / skipped_tracking: the check could not run, once
+          per search or hand-over: a value (Autonomous search: detections whose
+          Dopplers agree as received; best C/N0 x10 below 35 among those with
+          a Doppler of 400 Hz or more; the PRN of a
+          verified channel; corrections used), why, corrections so far
 The log holds your position: keep it to yourself.
 
 System wheel (Heard and Passes)
@@ -470,7 +506,14 @@ component, DC removed). Target 4-30 LSB: below 1.5 LSB the ADC is starved
 and the app does not search ("Signal too low"); below 4 the list ends with
 "Level 2.1: target 4-30" and the gains in use (gains saved by an older
 version or another app carry over: raise them). "CLIP" means lower them.
-Starting gains: LNA 40, VGA 46, AMP off.
+Starting gains: LNA 40, VGA 46, AMP off. At these gains (LNA 32 and up, VGA
+40 and up) a powered active antenna gives about 10-14 LSB and the receiver
+alone about 4.5, so below 7 the line says "low: ant?" and the list "no
+antenna gain: power, cable, active antenna?". With the antenna-power setting
+off the line says "Ant power OFF" in red (also on the Fix tab's bottom row
+and the Heard tracking line): an active antenna needs it, and it is off after
+every power-up. The app only reads that setting; switch it yourself (status
+bar or Settings > Radio).
 
 Fix tab (your position)
 -----------------------

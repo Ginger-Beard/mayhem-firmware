@@ -58,13 +58,32 @@ enum ChFlags : uint8_t {
     F_AIDED = 128,   /* started by the aided search for a newly risen satellite */
 };
 
+/* why a channel last lost lock (ChInfo::why, the log's EV rows) */
+enum LossWhy : uint8_t {
+    LOSS_NONE = 0,
+    LOSS_CN0 = 1,    /* C/N0 below 25 dB-Hz (no bit sync yet: not coasted) */
+    LOSS_COAST = 2,  /* faded: coasted with the NCO held, the signal did not come back in time */
+    LOSS_PULLIN = 3, /* the frequency pull-in did not lock in time */
+    LOSS_NOLOCK = 4, /* tracked 6 s without phase lock */
+    LOSS_START = 5,  /* started by a search (aided search, hand-over offset search) */
+};
+
+/* what a re-acquisition kept (ChInfo::keep): the bit edge and the subframe
+ * phase follow from the code epochs counted across the loss */
+enum KeepFlags : uint8_t {
+    KEEP_BITS = 1,  /* bit edge kept */
+    KEEP_FRAME = 2, /* subframe phase and time of week kept (the framer expects the next TLM) */
+    KEEP_OK = 4,    /* the bit-sync histogram found the same edge */
+    KEEP_BAD = 8,   /* it found another edge: the kept timing was dropped */
+};
+
 struct ChInfo {
     uint8_t prn;
     uint8_t state; /* ChState */
     uint8_t flags; /* ChFlags */
     uint8_t reacq; /* re-acquisitions so far */
     uint16_t cn0_x10;
-    uint8_t mode;    /* loop mode: 0 FLL pull-in, 1 PLL wide + FLL assist, 2 PLL narrow, 3 search, 4 hand-over offset search */
+    uint8_t mode;    /* loop mode: 0 FLL pull-in, 1 PLL wide + FLL assist, 2 PLL narrow, 3 search, 4 hand-over offset search, 5 coasting (faded: NCO held) */
     int8_t pld_x100; /* PLL lock indicator cos(2 phi), x100 (smoothed) */
     float doppler_hz;
     uint32_t lock_ms;     /* time in TRK_TRACK since the last (re)start */
@@ -77,7 +96,8 @@ struct ChInfo {
     uint16_t sweeps;      /* search sweeps since the last loss of lock */
     float code_err;       /* last DLL discriminator, chips (code lock: near 0) */
     uint16_t half_fixes;  /* +-500 Hz false locks corrected (the carrier turning half a cycle per ms) */
-    uint16_t pad2;
+    uint8_t why;          /* LossWhy of the last loss of lock */
+    uint8_t keep;         /* KeepFlags: what the last re-acquisition kept of the bit / frame timing */
 };
 
 struct SubframeSlot {
