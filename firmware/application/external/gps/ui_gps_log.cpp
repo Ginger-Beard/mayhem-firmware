@@ -95,8 +95,8 @@ void GpsView::log_end(const Fmt& f) {
 void GpsView::log_header() {
     static const char* const kHead[] = {
         "ms,utc,type,fields (one row type per line below; README.TXT 'Diagnostics log')",
-        "#START,fw,lna,vga,amp,ant_bias,zone_min,pos_valid,pos_src,pos_age_s,pos_acc_m,lat_e7,lon_e7,alt_m,alm_n,alm_age_dx10,eph_n,tle_n,rtc_local,rtc_utc,heap_free,scratch,method,tab,file",
-        "#SEC,job,done,tracking,search,pgpr_state,level,confirming,done_prn,total_prn,pct,rms_x10,clip_pm,unit_cyc,units,seq,dt_ab_ms,solving,solve_kind,solve_pending,fix_ok,fix_mode,fix_tried,heard,cand,est_m,ttff_s,ttff_coarse_s,tracked,synced,eph,gps_time,gps_off_ms,heap_free,log_rows,log_dropped,log_errs,cached,cache_errs,n_eph,n_alm,ant",
+        "#START,fw,lna,vga,amp,ant_bias,zone_min,pos_valid,pos_src,pos_age_s,pos_acc_m,lat_e7,lon_e7,alt_m,alm_n,alm_age_dx10,eph_n,tle_n,rtc_local,rtc_utc,heap_free,scratch,method,tab,file,e1,sys_view,iq_conj",
+        "#SEC,job,done,tracking,search,pgpr_state,level,confirming,done_prn,total_prn,pct,rms_x10,clip_pm,unit_cyc,units,seq,dt_ab_ms,solving,solve_kind,solve_pending,fix_ok,fix_mode,fix_tried,heard,cand,est_m,ttff_s,ttff_coarse_s,tracked,synced,eph,gps_time,gps_off_ms,heap_free,log_rows,log_dropped,log_errs,cached,cache_errs,n_eph,n_alm,ant,iq_conj,xs_found,xs_ms",
         "#M4,cyc_avg,cyc_max,buffers,missed,active,handovers,handover_age_ms,sf_write,meas_seq,level_x10,dc_i_x10,dc_q_x10,clip_pm",
         "#CH,ch,prn,state,mode,flags,cn0_x10,pld_x100,doppler_x10,code_x64,code_err_x1000,lock_ms,bits,words_ok,parity_errs,subframes,tow,reacq,sweeps,half_fixes",
         "#SR,seq,search,k_ms,prn,searched,detected,once,refined,metric_x100,thr_x100,cn0_x10,doppler,code_x1000,verdict,b_metric_x100,b_doppler,b_code_x1000",
@@ -113,6 +113,7 @@ void GpsView::log_header() {
         "#HEARD,heard rows (status | list)",
         "#CLK,event (tow / pvt: GPS time in use; set: RTC written by Set clock),gps_minus_rtc_ms,rtc_utc,gps_utc,zone_min",
         "#ERR,what,detail",
+        "#IQ,source (search / tracking),evidence (search: candidates mirrored; tracking: best C/N0),iq_conj now,flips (the samples arrived mirrored: Q negated from here on)",
         "#LOG,event,errors (the log file reopened after the Log box was ticked again)",
         "#IMG,image,result,bytes,load_ms,loads (a baseband image loaded from /APPS)",
         "#SYS,event (view / sky),view,file (1 read 2 missing 3 empty),age_dx10,sats,E up/total,C up/total,R up/total,S up/total,bad_lines",
@@ -148,6 +149,7 @@ void GpsView::log_start_row() {
     chHeapStatus(nullptr, &heap);
     f.c(',').u(static_cast<uint32_t>(heap)).c(',').u(static_cast<uint32_t>(sizeof(GpsScratch)));
     f.c(',').u(view_fix_.method()).c(',').u(tab_view_.selected()).c(',').s(log_name_);
+    f.c(',').u(gal_on_ ? 1u : 0u).c(',').u(sys_view_).c(',').u(iq_conj_);
     log_end(f);
 }
 
@@ -429,6 +431,7 @@ void GpsView::log_second() {
         chHeapStatus(nullptr, &heap);
         f.c(',').u(static_cast<uint32_t>(heap)).c(',').u(mem_->log.rows).c(',').u(mem_->log.dropped).c(',').u(log_errs_);
         f.c(',').u(cache_written_).c(',').u(cache_errs_).c(',').u(n_eph_).c(',').u(n_alm_).c(',').u(portapack::get_antenna_bias() ? 1u : 0u);
+        f.c(',').u(iq_conj_).c(',').u(trk_sh_ && tracking_ ? trk_sh_->xs_found : 0u).c(',').u(trk_sh_ && tracking_ ? trk_sh_->xs_ms : 0u);
         log_end(f);
         mem_->log.row[f.len()] = 0;
         UsbSerialAsyncmsg::asyncmsg(static_cast<const char*>(mem_->log.row)); /* only with `asyncmsg enable` and a client connected */
@@ -444,6 +447,7 @@ void GpsView::log_second() {
         log_end(f);
     }
     /* channels the loops gave back (unconfirmed detections that never verified) */
+    if (sh.released < log_rel_seen_) log_rel_seen_ = sh.released; /* a new tracker (hand-over) counts from 0 */
     while (log_rel_seen_ != sh.released) {
         if (static_cast<uint16_t>(sh.released - log_rel_seen_) > 8) log_rel_seen_ = static_cast<uint16_t>(sh.released - 8);
         const uint16_t k = log_rel_seen_++;
@@ -528,10 +532,11 @@ void GpsView::log_results(const gps_rx::Result* r, uint8_t k_ms) {
         f.c(',').u(x.searched).c(',').u(x.detected).c(',').u(x.once).c(',').u(x.refined);
         f.c(',').u(static_cast<uint32_t>(x.metric * 100.0f + 0.5f)).c(',').u(k_ms >= 1 && k_ms <= 20 ? kThr100[k_ms - 1] : 0u);
         f.c(',').u(static_cast<uint32_t>(x.cn0 * 10.0f + 0.5f)).c(',').d(static_cast<int32_t>(std::lround(x.doppler))).c(',').u(static_cast<uint32_t>(x.code_phase * 1000.0f));
-        static const char* const kWhy[4] = {",rejected: not confirmed by the 2nd snapshot", ",rejected: 2nd snapshot did not find it",
-                                            ",rejected: 2nd snapshot Doppler moved > 750 Hz", ",rejected: 2nd snapshot code phase off the prediction"};
+        static const char* const kWhy[5] = {",rejected: not confirmed by the 2nd snapshot", ",rejected: 2nd snapshot did not find it",
+                                            ",rejected: 2nd snapshot Doppler moved > 750 Hz", ",rejected: 2nd snapshot code phase off the prediction",
+                                            ",rejected: 2nd snapshot code moved as the opposite Doppler predicts (mirrored spectrum)"};
         f.s(x.detected ? (req_confirm_ ? ",accepted" : ",detected (unconfirmed: the tracker verifies)")
-                       : (x.once ? kWhy[x.reject < 4 ? x.reject : 0] : ",rejected: below threshold"));
+                       : (x.once ? kWhy[x.reject < 5 ? x.reject : 0] : ",rejected: below threshold"));
         if (x.once) f.c(',').u(static_cast<uint32_t>(x.b_metric * 100.0f + 0.5f)).c(',').d(static_cast<int32_t>(std::lround(x.b_doppler))).c(',').u(static_cast<uint32_t>(x.b_code * 1000.0f));
         log_end(f);
     }

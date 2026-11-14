@@ -73,7 +73,9 @@ GpsRxProcessor::GpsRxProcessor() {
 #define GPS_RX_COLD __attribute__((optimize("Os")))
 
 GPS_RX_COLD void GpsRxProcessor::start_tracking(uint32_t prn_mask, uint32_t age_ms) {
-    const gps_acq::Result* res = keep.results;
+    gps_acq::Result* res = keep.results;
+    if (req_.neg_dop)
+        for (auto& r : keep.results) r.doppler = -r.doppler;
     int n = 0;
     for (int i = 0; i < 32; i++)
         if (((prn_mask >> i) & 1u) && res[i].detected && !res[i].once) n++;
@@ -87,12 +89,14 @@ GPS_RX_COLD void GpsRxProcessor::start_tracking(uint32_t prn_mask, uint32_t age_
     trk_->params().verify_timeout_ms = req_.confirm ? 0 : kVerifyTimeoutMs;
     /* code phases refer to the first sample of the result snapshot, taken by
      * the acquisition image age_ms ago; samples_ is the index of the next
-     * buffer's first sample */
+     * buffer's first sample. That age is good to ~1 ms only (the app's clock,
+     * the samples lost in the switch), a random code offset (the code repeats
+     * every 1 ms) common to all channels: the channels search for it. */
     const uint64_t now = samples_;
     const uint64_t age = static_cast<uint64_t>(age_ms) * (gps_acq::kFs / 1000u);
     const uint64_t at = age < now ? now - age : 0;
     results_sample_ = at;
-    trk_->handover(res, prn_mask, at, now);
+    trk_->handover(res, prn_mask, at, now, true);
     keep.shared.handover_age_ms = static_cast<uint32_t>((now - at) * 1000u / gps_acq::kFs);
     keep.shared.handovers++;
     trk_->publish();
@@ -227,6 +231,15 @@ void GpsRxProcessor::send_status() {
     last_status_ = DWT->CYCCNT;
 }
 
+/* Q negated in place (complex conjugate): the spectrum mirrored back (-128 -> 127) */
+static void conjugate(const buffer_c8_t& buffer) {
+    int8_t* x = reinterpret_cast<int8_t*>(buffer.p);
+    for (size_t k = 0; k < buffer.count; k++) {
+        const int8_t q = x[2 * k + 1];
+        x[2 * k + 1] = q == -128 ? 127 : static_cast<int8_t>(-q);
+    }
+}
+
 void GpsRxProcessor::execute(const buffer_c8_t& buffer) {
     const uint16_t missed = shared_memory.m4_buffer_missed;
     samples_ += static_cast<uint64_t>(buffer.count) * (1u + static_cast<uint16_t>(missed - missed_seen_));
@@ -239,6 +252,7 @@ void GpsRxProcessor::execute(const buffer_c8_t& buffer) {
     }
     /* the tracking loops: every buffer, ~11.5k cycles per channel + ~23k */
     const uint32_t t0 = DWT->CYCCNT;
+    if (conj_) conjugate(buffer);
     trk_->process(reinterpret_cast<const int8_t*>(buffer.p), samples_ - buffer.count);
     uint32_t dt = DWT->CYCCNT - t0;
     { /* Galileo: the searcher captures, or works in units of <= ~17k cycles while the
@@ -289,6 +303,7 @@ void GpsRxProcessor::execute(const buffer_c8_t& buffer) {
         return;
     }
     if (session.want_samples()) {
+        if (conj_) conjugate(buffer);
         session.put(reinterpret_cast<const int8_t*>(buffer.p), buffer.count, static_cast<double>(samples_) / gps_acq::kFs);
         if (session.phase() == gps_acq::Session::DONE)
             state_ = GpsRxStatusMessage::DONE; /* level too low */
@@ -338,6 +353,8 @@ void GpsRxProcessor::on_message(const Message* const message) {
         req_.track = m.track;
         req_.max_ch = m.max_ch;
         req_.age_ms = m.age_ms;
+        req_.neg_dop = m.neg_dop;
+        conj_ = m.conj;
         pending_ = true;
     }
 }

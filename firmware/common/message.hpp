@@ -2645,6 +2645,12 @@ struct GpsRxConfigMessage : public Message {
     /* CMD_GAL: Galileo channels the detection may go to (gal_acq::kMaxTrk at
      * most; the M4 time decides too: GPS first); 0 = search only (Heard) */
     uint8_t gal_max{0};
+    /* CMD_SEARCH / CMD_TRACK: negate Q of every sample (the search saw the
+     * spectrum mirrored: Doppler and code drift of opposite sign) */
+    uint8_t conj{0};
+    /* CMD_TRACK: the kept results' Dopplers negated first (conj changed after the
+     * search that measured them) */
+    uint8_t neg_dop{0};
 };
 
 /* M4 -> M0: progress, noise statistics, and where the results and the lent

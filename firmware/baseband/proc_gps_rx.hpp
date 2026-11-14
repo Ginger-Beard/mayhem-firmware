@@ -85,7 +85,9 @@ class GpsRxProcessor : public BasebandProcessor {
         float add_code{0}, add_doppler{0};
         uint64_t add_at{0};
         uint8_t gal_max{0};
+        uint8_t neg_dop{0};
     } req_{};
+    volatile uint8_t conj_{0}; /* negate Q (the app's correction of a mirrored spectrum) */
 
     uint8_t state_{GpsRxStatusMessage::IDLE};
     uint32_t seq_{0};

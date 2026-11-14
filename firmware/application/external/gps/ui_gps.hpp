@@ -903,7 +903,20 @@ class GpsView : public View {
     uint8_t pending_kms_{20};
     bool pending_full_{false};
     uint32_t pending_track_mask_{0}; /* Autonomous: PRNs for the tracking image */
-    uint32_t results_ms_{0};         /* the app's ms clock at the result snapshot's first sample */
+    /* a mirrored spectrum (I/Q orientation, seen once on the device): the
+     * search's 2nd snapshot tells (reject 4), or the tracking image finds no
+     * code offset for strong satellites; the images then negate Q (conj) */
+    static constexpr uint8_t kIqMaxFlips = 4;             /* per app session */
+    static constexpr systime_t kIqTrkWait = MS2ST(20000); /* the offset search: ~4-9 s for strong signals */
+    uint8_t iq_conj_{0};                                  /* the acquisition image (set by the search's evidence) */
+    uint8_t iq_trk_flip_{0};                              /* the tracking image: flipped against iq_conj_ for this hand-over only */
+    uint8_t iq_flips_{0};
+    bool iq_trk_retried_{false};
+    uint32_t track_mask_{0}; /* the last hand-over's PRNs */
+    systime_t track_t_{0};   /* ... and when it was sent */
+    void iq_flip(bool trk, uint32_t n);
+    void iq_trk_check();
+    uint32_t results_ms_{0}; /* the app's ms clock at the result snapshot's first sample */
     bool results_ms_ok_{false};
     /* the last loads, for the log (IMG rows) */
     uint16_t img_loads_{0}, img_logged_{0};
@@ -914,7 +927,7 @@ class GpsView : public View {
     void want_image(gps_image::Id id);             /* ask for a switch (frame handler) */
     void image_step();                             /* frame handler: a due switch */
     void on_image_ready();                         /* the wanted image reported: what was waiting */
-    void send_track();                             /* Autonomous: CMD_TRACK to the tracking image */
+    void send_track(bool neg_dop = false);         /* Autonomous: CMD_TRACK to the tracking image */
     void log_image();
     /* The System wheel and the other systems' sky (ui_gps_sys.cpp) */
     bool sys_active_{false};  /* GNSSALM.TXT being read */

@@ -1363,7 +1363,7 @@ FixView::FixView(GpsView& main, Rect r)
     check_log_.on_select = [this](Checkbox&, bool v) {
         main_.log_on_ = v ? 1 : 0; /* the file opens / closes in the frame handler */
     };
-    field_method_.set_selected_index(0, false);
+    field_method_.set_selected_index(1, false); /* Autonomous (the owner's choice); Snapshot one step left */
     field_method_.on_change = [this](size_t, OptionsField::value_t) {
         show();
     };
@@ -2407,6 +2407,7 @@ bool GpsView::start_search(Job job, uint8_t k_ms, bool force_full) {
     req_confirm_ = m.confirm != 0;
     m.track = job == JOB_AUTO;
     m.max_ch = 8; /* M4: ~60 % with 8 channels (notes, gps-autonomous) */
+    m.conj = iq_conj_;
     int nprn = 0;
     if (!force_full && assisted_possible() && geo_ready_) {
         /* visible PRNs and their Doppler from the sky cache (at most kGeoPeriodS
@@ -2520,6 +2521,22 @@ void GpsView::on_status(const GpsRxStatusMessage& m) {
         awaiting_seq_ = false;
         job_seq_ = m.seq;
     }
+    if (!awaiting_seq_ && job_ != JOB_NONE && m.seq == job_seq_ && m.state == GpsRxStatusMessage::DONE && !done_ && m.results &&
+        iq_flips_ < kIqMaxFlips) {
+        /* candidates whose code moved as the OPPOSITE Doppler predicts: the samples
+         * arrive mirrored. Negate Q in the images and search again. */
+        const auto* r = static_cast<const gps_rx::Result*>(m.results);
+        uint32_t mirrored = 0;
+        for (int p = 0; p < 32; p++) mirrored += r[p].once && r[p].reject == 4;
+        if (mirrored >= 2) {
+            log_results(r, m.k_ms);
+            iq_flip(false, mirrored);
+            start_search(job_, search_kind_ == SK_FULL_AFTER ? 20 : m.k_ms);
+            view_heard_.show();
+            view_fix_.show();
+            return;
+        }
+    }
     if (!awaiting_seq_ && job_ != JOB_NONE && m.seq == job_seq_ && m.state == GpsRxStatusMessage::DONE && !done_ &&
         search_kind_ == SK_ASSISTED && m.level != GpsRxStatusMessage::LEVEL_LOW && m.results) {
         /* the assisted search found nothing: the prediction may be wrong (position,
@@ -2529,6 +2546,7 @@ void GpsView::on_status(const GpsRxStatusMessage& m) {
         int det = 0;
         for (int p = 0; p < 32; p++) det += r[p].detected;
         if (!det) {
+            log_results(r, m.k_ms); /* what the assisted search saw (candidates it did not confirm) */
             start_search(job_, 10, true);
             view_heard_.show();
             view_fix_.show();
@@ -2560,6 +2578,7 @@ void GpsView::on_status(const GpsRxStatusMessage& m) {
                 if (results_[p].detected && !results_[p].once) mask |= 1u << p;
             if (mask) {
                 pending_track_mask_ = mask;
+                iq_trk_flip_ = 0; /* a new hand-over: the search's orientation */
                 want_image(gps_image::ID_L1T);
             }
         }
@@ -2567,9 +2586,11 @@ void GpsView::on_status(const GpsRxStatusMessage& m) {
     if (m.track) trk_sh_ = static_cast<const gps_trk::Shared*>(m.track);
     if (job_ == JOB_AUTO && done_ && m.state == GpsRxStatusMessage::TRACKING && !tracking_) {
         tracking_ = true;
+        iq_trk_retried_ = false;
         log_handover();
     }
     if (job_ == JOB_AUTO && tracking_) {
+        iq_trk_check();
         auto_poll_m4();
         view_fix_.show();
         view_heard_.show();
