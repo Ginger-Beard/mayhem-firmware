@@ -20,6 +20,22 @@ the app.
 Press "Load" on the Passes tab after copying new files (they are also read
 when the app opens).
 
+Baseband images (/APPS)
+-----------------------
+The receiver's signal processing comes from two files in /APPS, next to the
+.ppma apps, built with the firmware (they are in the APPS folder of the
+firmware package, portapack-mayhem_OCI.ppfw.tar):
+  /APPS/GPS_L1A.BIN   L1 acquisition: the snapshot search (Heard, Fix)
+  /APPS/GPS_L1T.BIN   L1 tracking: the Autonomous method's tracking loops
+Like the .ppma apps they must come from the same firmware build: copy the
+whole APPS folder after every firmware update. The app loads the search
+image when it opens and swaps to the tracking image (and back) by itself;
+the swap takes a fraction of a second. If a file is missing, damaged or from
+another build, the Fix and Heard tabs say so in red ("GPS_L1A.BIN:
+missing", "... other firmware version", "... damaged") and searching is
+off; the Passes tab still works. Copy the files and press Get fix (or
+Search) again.
+
 The bundled almanac
 -------------------
 ALMANAC.TXT is the US Coast Guard NAVCEN almanac downloaded 2026-11-13: GPS
@@ -249,6 +265,10 @@ file starts with a header line and one "#TYPE,..." line per row type. Types:
   ERR     card, ring or solver problems (what, detail)
   LOG     the log file reopened because the Log box was ticked again (event,
           errors so far); after a card error the reopen is an ERR row
+  IMG     a baseband image loaded from /APPS: image (GPS_L1A / GPS_L1T),
+          result (ok / missing / read error / not an image / wrong image /
+          other firmware version / too large / damaged), bytes, load time ms
+          (card read and start), loads so far
 The log holds your position: keep it to yourself.
 
 Heard tab (what the receiver hears)

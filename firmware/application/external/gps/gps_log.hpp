@@ -36,8 +36,8 @@
 
 namespace ui::external_app::gps {
 
-constexpr size_t kLogRing = 4096;  /* ~2 s of rows while tracking 8 channels */
-constexpr size_t kLogRow = 480;    /* one row, < one sector with its CR LF */
+constexpr size_t kLogRing = 4096; /* ~2 s of rows while tracking 8 channels */
+constexpr size_t kLogRow = 480;   /* one row, < one sector with its CR LF */
 constexpr size_t kLogSector = 512;
 
 struct LogRing {
@@ -63,7 +63,9 @@ inline bool log_push(LogRing& r, const char* s, size_t n) {
     return true;
 }
 
-inline size_t log_pending(const LogRing& r) { return r.head - r.tail; }
+inline size_t log_pending(const LogRing& r) {
+    return r.head - r.tail;
+}
 
 /* The next piece to write at file position pos: contiguous in the ring, to
  * the end of the current sector at most, and below 512 bytes. */
@@ -78,7 +80,9 @@ inline size_t log_piece(const LogRing& r, uint32_t pos, const char** p) {
     return n;
 }
 
-inline void log_taken(LogRing& r, size_t n) { r.tail += static_cast<uint32_t>(n); }
+inline void log_taken(LogRing& r, size_t n) {
+    r.tail += static_cast<uint32_t>(n);
+}
 
 }  // namespace ui::external_app::gps
 

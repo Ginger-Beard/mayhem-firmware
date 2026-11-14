@@ -71,11 +71,11 @@ struct PvtSolution {
     double resid_rms_m{0};
     float hdop{0}, vdop{0}, pdop{0};
     uint8_t used{0};
-    uint8_t dropped{0};  /* satellites removed by the RAIM check */
-    uint8_t masked{0};   /* satellites below the elevation mask left out */
-    float trop_m{0};     /* mean troposphere / ionosphere correction applied, m (diagnostics) */
+    uint8_t dropped{0}; /* satellites removed by the RAIM check */
+    uint8_t masked{0};  /* satellites below the elevation mask left out */
+    float trop_m{0};    /* mean troposphere / ionosphere correction applied, m (diagnostics) */
     float iono_m{0};
-    uint8_t checked{0};  /* 1: >= 5 satellites, residuals consistent */
+    uint8_t checked{0}; /* 1: >= 5 satellites, residuals consistent */
     bool vel_ok{false};
     bool ok{false};
     uint8_t fail{PVT_OK};
@@ -98,9 +98,9 @@ struct PvtWork {
     uint8_t tropo{2};
     uint8_t iono_ok{0};
     float mask_deg{5.0f};
-    float ion_a[4]{}, ion_b[4]{}; /* alpha s, s/sc, s/sc^2, s/sc^3; beta s ... */
+    float ion_a[4]{}, ion_b[4]{};         /* alpha s, s/sc, s/sc^2, s/sc^3; beta s ... */
     double rx_lat{0}, rx_lon{0}, rx_h{0}; /* deg, deg, m: set with the elevations */
-    double a[4][8]; /* normal equations / inverse work (kept off the solver thread's stack) */
+    double a[4][8];                       /* normal equations / inverse work (kept off the solver thread's stack) */
     double q[4][4];
     uint8_t use[kMaxPvt];
     volatile uint8_t cancel;
@@ -121,7 +121,9 @@ double iono_delay_m(const float a[4], const float b[4], double lat_deg, double l
 
 /* On-screen error estimate (horizontal, m): HDOP x 6 m (code noise, no
  * ionosphere model, simple troposphere); an estimate, not a measured figure. */
-inline double pvt_err_m(float hdop) { return hdop * 6.0; }
+inline double pvt_err_m(float hdop) {
+    return hdop * 6.0;
+}
 
 }  // namespace ui::external_app::gps
 

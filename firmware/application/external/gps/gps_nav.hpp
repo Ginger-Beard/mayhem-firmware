@@ -107,12 +107,14 @@ inline uint32_t field32(const uint32_t words[10], int pos_msb8, int pos_lsb24) {
 
 constexpr double kGpsPi = 3.1415926535898; /* the value IS-GPS-200 specifies */
 
-/* ---- subframe-level decoding (the PGPR tracking loops deliver parity-checked
+/* ---- subframe-level decoding (the tracking loops deliver parity-checked
  * subframes: 10 words of 24 data bits) */
 
 /* HOW: subframe ID (1..5) and the TOW (s of week) of this subframe's START
  * (the HOW holds the next subframe's TOW count). */
-inline int sf_id(const uint32_t w[10]) { return static_cast<int>(field(w, 50, 3)); }
+inline int sf_id(const uint32_t w[10]) {
+    return static_cast<int>(field(w, 50, 3));
+}
 inline uint32_t sf_tow_start(const uint32_t w[10]) {
     const uint32_t t = field(w, 31, 17);
     return (t == 0 ? 100799u : t - 1u) * 6u;
@@ -122,7 +124,9 @@ inline uint32_t sf_tow_start(const uint32_t w[10]) {
  * 2000 (or 1980) would otherwise resolve the 10-bit week 1024 weeks too early.
  * Right while the RTC is within ~9.8 years after kMinWeek. */
 constexpr int32_t kMinWeek = 2440; /* 2026-10 */
-inline int32_t week_floor(int32_t w) { return w < kMinWeek ? kMinWeek : w; }
+inline int32_t week_floor(int32_t w) {
+    return w < kMinWeek ? kMinWeek : w;
+}
 
 inline int32_t full_week(uint32_t wn10, int32_t week_hint) {
     int32_t wn = static_cast<int32_t>(wn10 & 0x3FFu);
@@ -133,10 +137,18 @@ inline int32_t full_week(uint32_t wn10, int32_t week_hint) {
     }
     return wn;
 }
-inline uint32_t sf1_week10(const uint32_t w[10]) { return field(w, 61, 10); }
-inline int sf1_iodc(const uint32_t w[10]) { return static_cast<int>((field(w, 83, 2) << 8) | field(w, 211, 8)); }
-inline int sf2_iode(const uint32_t w[10]) { return static_cast<int>(field(w, 61, 8)); }
-inline int sf3_iode(const uint32_t w[10]) { return static_cast<int>(field(w, 271, 8)); }
+inline uint32_t sf1_week10(const uint32_t w[10]) {
+    return field(w, 61, 10);
+}
+inline int sf1_iodc(const uint32_t w[10]) {
+    return static_cast<int>((field(w, 83, 2) << 8) | field(w, 211, 8));
+}
+inline int sf2_iode(const uint32_t w[10]) {
+    return static_cast<int>(field(w, 61, 8));
+}
+inline int sf3_iode(const uint32_t w[10]) {
+    return static_cast<int>(field(w, 271, 8));
+}
 
 /* Ephemeris from subframes 1, 2, 3 of one issue (IODC low 8 bits = IODE in
  * both). week_hint resolves the 10-bit week. False if the issues differ. */

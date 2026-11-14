@@ -126,7 +126,7 @@ void set_epirb_rx_config(EPIRBRXConfig& message);
 void set_p25tx_data(const uint8_t* dibits, uint16_t frame_length);
 void set_hunter_config(uint32_t threshold, uint32_t hangtime_ms, bool start);
 void set_wmbus_config(uint8_t mode = 0);
-/* GPS receiver (PGPR): start a snapshot search or stop. */
+/* GPS receiver (the GPS app's baseband images): search, track, stop. */
 void gps_rx_config(const GpsRxConfigMessage& message);
 
 void request_roger_beep();
@@ -138,6 +138,9 @@ bool is_image_running();
 bool supports_rx_fs4();
 void set_rx_fs4_direction(RxFs4Direction direction);
 void run_image(const portapack::spi_flash::image_tag_t image_tag, bool enforce_core_sync = true);
+/* Start an image the caller already placed in m4_code (the GPS app loads its
+ * baseband images from the SD card). */
+void run_prepared_image(const uint32_t m4_code, bool enforce_core_sync = true, const portapack::spi_flash::image_tag_t prepared_image_tag = portapack::spi_flash::image_tag_none);
 void shutdown();
 
 void spectrum_streaming_start();

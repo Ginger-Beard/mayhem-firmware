@@ -129,6 +129,8 @@ add_custom_command(
 	COMMAND mkdir -p firmware_tar/APPS
 	COMMAND cp application/*.ppma firmware_tar/APPS
 	COMMAND cp standalone/*/*.ppmp firmware_tar/APPS
+	# the GPS app's baseband images (HackRF Pro builds only)
+	COMMAND cp baseband/GPS_L1?.BIN firmware_tar/APPS 2>/dev/null || true
 	COMMAND cd firmware_tar && tar -caf ../${PPFW_FILENAME} *
 	DEPENDS firmware ${FIRMWARE_FILENAME} standalone_apps
 	# Dont use VERBATIM here as it prevents usage of globbing (*)

@@ -574,13 +574,38 @@ set(MODE_CPPSRC
 DeclareTargets(PPVW protoview)
 
 
-### GPS receiver (L1 C/A snapshot acquisition; HackRF Pro only: needs the LPC4330's RAM)
+### GPS receiver (HackRF Pro only: needs the LPC4330's RAM)
+# Not in the firmware's image table: the GPS app loads these images from the
+# SD card (/APPS/GPS_L1A.BIN, /APPS/GPS_L1T.BIN, see common/gps_image.hpp),
+# one per job, so each has the whole m4_code region. They are linked with the
+# M4 RAM shortened by GPS_KEEP_SIZE: the block above survives an image switch
+# (common/gps_keep.hpp). The .ppfw.tar carries them in its APPS folder.
 
 if(BOARD STREQUAL "PRALINE")
+	set(GPS_KEEP_SIZE 28672)
+	math(EXPR GPS_M4_RAM "${M4_RAM_SIZE} - ${GPS_KEEP_SIZE}")
+	set(GPS_SAVED_ADD_TO_FIRMWARE ${add_to_firmware})
+	set(add_to_firmware FALSE)
 	set(MODE_CPPSRC
 		proc_gps_rx.cpp
 	)
-	DeclareTargets(PGPR gps_rx)
+	foreach(GPS_IMG "PGRA;gps_l1a;1;GPS_L1A" "PGRT;gps_l1t;2;GPS_L1T")
+		list(GET GPS_IMG 0 GPS_TAG)
+		list(GET GPS_IMG 1 GPS_NAME)
+		list(GET GPS_IMG 2 GPS_ID)
+		list(GET GPS_IMG 3 GPS_FILE)
+		DeclareTargets(${GPS_TAG} ${GPS_NAME})
+		target_compile_definitions(baseband_${GPS_NAME}.elf PUBLIC "-DGPS_KEEP_SIZE=${GPS_KEEP_SIZE}")
+		target_link_options(baseband_${GPS_NAME}.elf PRIVATE "-Wl,--defsym=LD_M4_RAM_LEN=${GPS_M4_RAM}")
+		add_custom_command(
+			OUTPUT ${GPS_FILE}.BIN
+			COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tools/make_gps_image.py ${GPS_TAG}.bin ${GPS_TAG} ${GPS_ID} ${VERSION_MD5} ${GPS_FILE}.BIN ${M4_CODE_SIZE}
+			DEPENDS ${GPS_TAG}.bin ${CMAKE_CURRENT_SOURCE_DIR}/../tools/make_gps_image.py
+			VERBATIM
+		)
+		set(BASEBAND_EXTERNAL_IMAGES ${BASEBAND_EXTERNAL_IMAGES} ${GPS_FILE}.BIN)
+	endforeach()
+	set(add_to_firmware ${GPS_SAVED_ADD_TO_FIRMWARE})
 endif()
 
 
