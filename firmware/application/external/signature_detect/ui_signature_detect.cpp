@@ -355,7 +355,7 @@ SignatureDetectView::SignatureDetectView(NavigationView& nav)
     async_tx_was_ = portapack::async_tx_enabled;
     baseband::run_image(portapack::spi_flash::image_tag_signature_detect);
 
-    add_children({&labels_, &field_lna_, &field_vga_, &field_amp_, &check_log_, &text_status_, &labels_sig_, &field_sig_,
+    add_children({&labels_, &field_lna_, &field_vga_, &field_amp_, &check_log_, &field_vol_, &text_status_, &labels_sig_, &field_sig_,
                   &check_survey_, &list_, &button_map_, &button_track_, &button_setup_, &button_debug_});
     list_.set_parent_rect({0, UI_POS_Y(4), UI_POS_MAXWIDTH, UI_POS_HEIGHT_REMAINING(7)});
     check_log_.set_value(log_on());
@@ -559,6 +559,16 @@ void SignatureDetectView::apply_options() {
     rf_.set_hop24(SIGDET_FULL && (opt_.mode & 4));
     update_columns();
     refresh_status();
+}
+
+void SignatureDetectView::bind_option(Checkbox& box, uint8_t byte, uint8_t mask, bool invert) {
+    uint8_t* const opts = &opt_.alert;
+    box.set_value(((opts[byte] & mask) != 0) != invert);
+    box.on_select = [this, byte, mask, invert](Checkbox&, bool v) {
+        uint8_t* const o = &opt_.alert;
+        o[byte] = (v != invert) ? (o[byte] | mask) : (o[byte] & ~mask);
+        apply_options();
+    };
 }
 
 /* The list's 4th column: distance for Remote ID, the kind tag (TRKR, LITE,
@@ -1778,8 +1788,15 @@ void SignatureDetectView::on_frame_sync() {
         next_phase();
     }
 
+    /* The ESP32 module's list is Remote ID: as on-board Remote ID, a
+     * detection only in a class that has it (Drones, RX rid). */
     Summary s;
-    if (esp_.poll(s, now)) tracker_.ingest_summary(s, now_s());
+    if (esp_.poll(s, now)) {
+        if (detector_on(RX_RID))
+            tracker_.ingest_summary(s, now_s());
+        else
+            rid_skip_++;
+    }
 }
 
 void SignatureDetectView::on_tick_second() {
@@ -3650,7 +3667,7 @@ void TrackHistory::paint(Painter& painter) {
 TrackView::TrackView(NavigationView& nav, SignatureDetectView& main, const TrackTarget& target)
     : nav_{nav}, main_{main}, target_{target} {
     add_children({&labels_, &field_lna_, &field_vga_, &field_amp_, &check_beep_, &text_target_, &field_freq_, &field_bw_, &field_ble_,
-                  &field_sq_, &text_status_, &level_, &history_, &button_reset_, &button_listen_, &button_cap_, &button_back_});
+                  &field_sq_, &field_vol_, &text_status_, &level_, &history_, &button_reset_, &button_listen_, &button_cap_, &button_back_});
     const bool freq = target_.kind == TrackTarget::FREQ;
     field_freq_.hidden(!freq);
     field_bw_.hidden(!freq);
@@ -4588,48 +4605,19 @@ void SigdetCaptureView::log_row(const char* event, uint32_t dur_ms, uint64_t byt
 
 SettingsView::SettingsView(NavigationView& nav, SignatureDetectView& main)
     : main_{main} {
-    add_children({&labels_, &check_alert_, &check_json_, &check_esp_, &text_src_, &text_pos_, &button_set_, &button_clear_, &button_load_, &button_save_, &text_msg_, &check_rid_, &check_rf_, &check_eu_,
-                  &check_b4_, &check_b0_, &check_b5_, &check_b1_, &check_pat_, &check_wifi_, &check_did_});
+    add_children({&labels_, &check_alert_, &check_json_, &text_src_, &text_pos_, &button_set_, &button_clear_, &button_load_, &button_save_, &text_msg_,
+                  &button_drones_});
+    /* Option byte and bit of each box (SigdetOptions; unchanged by the split
+     * into two pages, so older settings files read the same). */
+    main_.bind_option(check_alert_, 0, 1, false);
+    main_.bind_option(check_json_, 2, 1, false);
 #if SIGDET_FULL
-    add_children({&check_b2_, &check_b3_, &check_beep_low_, &check_hop24_});
+    add_children({&check_beep_low_});
+    main_.bind_option(check_beep_low_, 7, 1, false);
 #endif
-
-    /* Each checkbox is a bit of one of the option bytes (inverted: set means off). */
-    struct Bind {
-        Checkbox* box;
-        uint8_t byte, mask, invert;
+    button_drones_.on_select = [this, &nav](Button&) {
+        nav.push<DronesSetupView>(main_);
     };
-    const Bind binds[] = {
-        {&check_alert_, 0, 1, 0},
-        {&check_json_, 2, 1, 0},
-        {&check_esp_, 3, 1, 0},
-        {&check_rid_, 4, 2, 1},
-        {&check_rf_, 4, 1, 1},
-        {&check_b0_, 5, 1, 0},
-        {&check_b1_, 5, 2, 0},
-#if SIGDET_FULL
-        {&check_b2_, 5, 4, 0},
-        {&check_b3_, 5, 8, 0},
-#endif
-        {&check_b4_, 5, 16, 0},
-        {&check_b5_, 5, kBandInverted, 1},
-        {&check_eu_, 6, 1, 0},
-        {&check_pat_, 4, 8, 1},
-        {&check_wifi_, 4, 16, 1},
-        {&check_did_, 4, 32, 1},
-#if SIGDET_FULL
-        {&check_beep_low_, 7, 1, 0},
-        {&check_hop24_, 4, 4, 0},
-#endif
-    };
-    uint8_t* const opts = &main_.opt_.alert;
-    for (const auto& b : binds) {
-        b.box->set_value(((opts[b.byte] & b.mask) != 0) != (b.invert != 0));
-        b.box->on_select = [this, b, opts](Checkbox&, bool v) {
-            opts[b.byte] = (v != (b.invert != 0)) ? (opts[b.byte] | b.mask) : (opts[b.byte] & ~b.mask);
-            main_.apply_options();
-        };
-    }
     button_set_.on_select = [this, &nav](Button&) {
         if (!main_.map_fits()) {
             text_pos_.set(main_.log_ ? "No memory for map: Log off?" : "Not enough memory for the map");
@@ -4706,6 +4694,37 @@ void SettingsView::focus() {
 
 void SettingsView::on_show() {
     main_.pause_rf(false);
+}
+
+DronesSetupView::DronesSetupView(NavigationView& nav, SignatureDetectView& main)
+    : main_{main} {
+    (void)nav;
+    add_children({&labels_, &check_rid_, &check_wifi_, &check_did_, &check_pat_, &check_rf_, &check_b4_, &check_b0_, &check_b5_, &check_b1_, &check_eu_,
+                  &check_esp_});
+#if SIGDET_FULL
+    add_children({&check_hop24_, &check_b3_, &check_b2_});
+#endif
+    /* Option byte and bit of each box (SigdetOptions; inverted: set means off). */
+    main_.bind_option(check_rid_, 4, 2, true);
+    main_.bind_option(check_rf_, 4, 1, true);
+    main_.bind_option(check_pat_, 4, 8, true);
+    main_.bind_option(check_wifi_, 4, 16, true);
+    main_.bind_option(check_did_, 4, 32, true);
+    main_.bind_option(check_b0_, 5, 1, false);
+    main_.bind_option(check_b1_, 5, 2, false);
+    main_.bind_option(check_b4_, 5, 16, false);
+    main_.bind_option(check_b5_, 5, kBandInverted, true);
+    main_.bind_option(check_eu_, 6, 1, false);
+    main_.bind_option(check_esp_, 3, 1, false);
+#if SIGDET_FULL
+    main_.bind_option(check_b2_, 5, 4, false);
+    main_.bind_option(check_b3_, 5, 8, false);
+    main_.bind_option(check_hop24_, 4, 4, false);
+#endif
+}
+
+void DronesSetupView::focus() {
+    check_rid_.focus();
 }
 
 void SettingsView::show_position() {
