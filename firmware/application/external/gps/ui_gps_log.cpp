@@ -105,7 +105,8 @@ void GpsView::log_header() {
         "#EPH,event,prn,have,fresh,in_table,toe_age_s,iode",
         "#MEAS,seq,sample,missed,n,prn:flags:tx_ms:tx_frac_hex:doppler:cn0_x10 ...",
         "#SOLVE,kind,n,prns,t_offset_s,prior_lat_e7,prior_lon_e7,max_rms_m,max_dt_s,alm_age_dx10",
-        "#FIX,kind,ok,why,used,dropped,rms_m_x10,hdop_x10,vdop_x10,clock_m,time_corr_ms_or_drift_ppb,lat_e7,lon_e7,alt_m,speed_cm_s",
+        "#FIX,kind,ok,why,used,dropped,rms_m_x10,hdop_x10,vdop_x10,clock_m,time_corr_ms_or_drift_ppb,lat_e7,lon_e7,alt_m,speed_cm_s,masked,trop_m_x10,iono_m_x10,iono_src",
+        "#IONO,source (none / air / cache),age_h,a0..a3 (x1e9 s ...),b0..b3",
         "#SCREEN,tab,fix rows 0-10 joined by |",
         "#HEARD,heard rows (status | list)",
         "#CLK,event (tow / pvt: GPS time in use; set: RTC written by Set clock),gps_minus_rtc_ms,rtc_utc,gps_utc,zone_min",
@@ -483,6 +484,23 @@ void GpsView::log_fix(uint8_t kind, bool ok, const char* why) {
         f.c(',').u(static_cast<uint32_t>(p.vdop * 10.0f)).c(',').d(static_cast<int32_t>(std::lround(p.clock_m)));
         f.c(',').d(static_cast<int32_t>(std::lround(p.drift_mps / kC * 1e9)));
         f.c(',').d(e7(lat)).c(',').d(e7(lon)).c(',').d(static_cast<int32_t>(std::lround(h))).c(',').u(static_cast<uint32_t>(norm(p.vel) * 100.0));
+        f.c(',').u(p.masked).c(',').u(static_cast<uint32_t>(p.trop_m * 10.0f)).c(',').u(static_cast<uint32_t>(p.iono_m * 10.0f)).c(',').u(iono_src_);
+    }
+    log_end(f);
+}
+
+void GpsView::log_iono() {
+    if (!log_active()) return;
+    static const char* const kSrc[] = {"none", "air", "cache"};
+    const AutoState& a = mem_->autos;
+    Fmt f = log_row("IONO");
+    f.c(',').s(kSrc[iono_src_ < 3 ? iono_src_ : 0]).c(',');
+    if (iono_src_ == 2) f.d(static_cast<int32_t>(std::lround((now_gps() - mem_->iono_cache_t) / 3600.0)));
+    if (iono_src_) {
+        const float* ia = a.pvt.ion_a;
+        const float* ib = a.pvt.ion_b;
+        for (int k = 0; k < 4; k++) f.c(',').d(static_cast<int32_t>(std::lround(ia[k] * 1e9 * (k == 0 ? 1.0 : 1.0))));
+        for (int k = 0; k < 4; k++) f.c(',').d(static_cast<int32_t>(std::lround(ib[k])));
     }
     log_end(f);
 }

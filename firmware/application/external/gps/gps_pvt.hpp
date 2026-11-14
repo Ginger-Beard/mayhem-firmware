@@ -72,6 +72,9 @@ struct PvtSolution {
     float hdop{0}, vdop{0}, pdop{0};
     uint8_t used{0};
     uint8_t dropped{0};  /* satellites removed by the RAIM check */
+    uint8_t masked{0};   /* satellites below the elevation mask left out */
+    float trop_m{0};     /* mean troposphere / ionosphere correction applied, m (diagnostics) */
+    float iono_m{0};
     uint8_t checked{0};  /* 1: >= 5 satellites, residuals consistent */
     bool vel_ok{false};
     bool ok{false};
@@ -86,6 +89,17 @@ struct PvtWork {
     double clk[kMaxPvt]; /* satellite clock, s */
     double resid[kMaxPvt];
     double el[kMaxPvt];
+    double az[kMaxPvt];
+    /* corrections (set by the caller before pvt_solve; the defaults are what
+     * the app uses): troposphere 0 none, 1 the old 2.4 m / sin(el), 2 standard
+     * atmosphere zenith delay at the fix's height + mapping function;
+     * ionosphere: the broadcast (Klobuchar) model when iono_ok; elevation mask
+     * for the solution (applied while >= 5 satellites stay above it) */
+    uint8_t tropo{2};
+    uint8_t iono_ok{0};
+    float mask_deg{5.0f};
+    float ion_a[4]{}, ion_b[4]{}; /* alpha s, s/sc, s/sc^2, s/sc^3; beta s ... */
+    double rx_lat{0}, rx_lon{0}, rx_h{0}; /* deg, deg, m: set with the elevations */
     double a[4][8]; /* normal equations / inverse work (kept off the solver thread's stack) */
     double q[4][4];
     uint8_t use[kMaxPvt];
@@ -96,6 +110,14 @@ struct PvtWork {
  * within ~0.1 s works (the clock absorbs it); prior: a position or {0,0,0}.
  * max_rms: RAIM residual limit (m). velocity: also solve v and the drift. */
 bool pvt_solve(PvtWork& w, int n, const Vec3& prior, double dt_rx_guess, PvtSolution& out, double max_rms = 25.0, bool velocity = true);
+
+/* Troposphere slant delay (m): standard atmosphere (1013.25 hPa, 15 C, 50 %
+ * humidity at sea level, lapse rate 6.5 K/km) zenith delays after Saastamoinen
+ * at height h, with the Black & Eisner mapping 1.001 / sqrt(0.002001 + sin^2 el)
+ * (finite at the horizon). */
+double tropo_delay_m(double el_deg, double lat_deg, double h_m);
+/* Broadcast ionosphere (IS-GPS-200 20.3.3.5.2.5, Klobuchar) on L1, m. */
+double iono_delay_m(const float a[4], const float b[4], double lat_deg, double lon_deg, double az_deg, double el_deg, double tow_s);
 
 /* On-screen error estimate (horizontal, m): HDOP x 6 m (code noise, no
  * ionosphere model, simple troposphere); an estimate, not a measured figure. */

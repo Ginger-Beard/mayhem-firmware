@@ -339,6 +339,15 @@ void OrbitLoader::take(GpsView& v) {
         int32_t week;
         uint32_t tow, w[10];
         if (!eph_air_parse(line_, &prn, &week, &sfid, &tow, w)) return;
+        if (sfid == 4) { /* the ionosphere coefficients: keep the newest */
+            nav::Iono io;
+            const double t = week * kWeekS + tow;
+            if (nav::decode_iono_page18(w, io) && t > v.mem_->iono_cache_t) {
+                v.mem_->iono_cache = io;
+                v.mem_->iono_cache_t = t;
+            }
+            return;
+        }
         if (prn != air_prn_ || sfid == 1) {
             air_prn_ = prn;
             v.mem_->cache_have = 0;
@@ -1376,6 +1385,7 @@ void FixView::show_auto() {
             Fmt g{b, sizeof(b)};
             g.s("Used ").u(main_.fix_.used).s(" HDOP ").fixed(static_cast<int32_t>(main_.fix_.hdop * 10), 1);
             if (main_.mem_ && main_.mem_->pvt_fix.ok && main_.mem_->pvt_fix.checked) g.s(" checked");
+            if (main_.mem_ && main_.mem_->pvt_fix.ok) g.s(main_.iono_src_ ? " T+I" : " T"); /* troposphere model, broadcast ionosphere */
             text_.set(5, b, white);
         }
     }
@@ -2423,6 +2433,7 @@ void GpsView::auto_poll_m4() {
     solve_prior_ = (fix_ok_ ? fix_.pos : (pos_valid_ ? rx_ : Vec3{0, 0, 0}));
     solve_kind_ = 1;
     solve_sample_ = a.meas.sample;
+    apply_iono();
     a.pvt.cancel = 0;
     log_solve_start(eph_only ? 2 : 1);
     solver_done_ = false;
@@ -2492,6 +2503,29 @@ void GpsView::auto_aided_step() {
     log_aided(best + 1, mem_->geo[best].el, code, dop + clk, clk, win, static_cast<uint32_t>(age * 1000u / kFsHz), eph);
 }
 
+void GpsView::apply_iono() {
+    AutoState& a = mem_->autos;
+    const nav::Iono* io = nullptr;
+    iono_src_ = 0;
+    if (a.ion_have) {
+        io = &a.ion;
+        iono_src_ = 1;
+    } else if (mem_->iono_cache_t > 0 && std::fabs(now_gps() - mem_->iono_cache_t) <= kIonoMaxAgeS) {
+        io = &mem_->iono_cache;
+        iono_src_ = 2;
+    }
+    a.pvt.iono_ok = io ? 1 : 0;
+    if (io)
+        for (int k = 0; k < 4; k++) {
+            a.pvt.ion_a[k] = io->a[k];
+            a.pvt.ion_b[k] = io->b[k];
+        }
+    if (iono_src_ != iono_logged_) {
+        iono_logged_ = iono_src_;
+        log_iono();
+    }
+}
+
 void GpsView::auto_finish_pvt() {
     if (!mem_) return;
     const bool cancelled = mem_->autos.pvt.cancel;
@@ -2536,6 +2570,32 @@ void GpsView::auto_finish_pvt() {
  * loader reads. A user's EPHEM.RNX is never written. */
 void GpsView::auto_cache_step() {
     AutoState& a = mem_->autos;
+    if (cache_line_ == 0 && a.ion_fresh) { /* the ionosphere page, one line (an ephemeris set is not split) */
+        a.ion_fresh = 0;
+        char line[100];
+        const int32_t week = a.week > 0 ? a.week : static_cast<int32_t>(now_gps() / kWeekS);
+        const size_t n = eph_air_line(line, sizeof(line), a.ion_prn, week, 4, a.ion_tow, a.ion_sf);
+        File* f = new File();
+        bool exists = !f->open(u"GPS/EPH_AIR.TXT").is_valid();
+        f->close();
+        if (!exists && !f->create(u"GPS/EPH_AIR.TXT").is_valid()) {
+            const char* hdr = "# GPS ephemerides decoded off the air (HackRF GPS app, source off-air)\n# S prn week subframe tow_s 10 data words (hex); read with EPHEM.RNX\n";
+            f->write(hdr, std::strlen(hdr));
+            f->close();
+        }
+        bool ok = false;
+        if (!f->append(u"GPS/EPH_AIR.TXT").is_valid()) {
+            ok = !f->write(line, n).is_error();
+            f->close();
+        }
+        delete f;
+        if (!ok) {
+            cache_errs_++;
+            log_error("EPH_AIR.TXT write failed", "ionosphere");
+        } else
+            log_eph_event("iono cached", a.ion_prn);
+        return;
+    }
     if (cache_line_ == 0) { /* find a fresh set */
         int k = 0;
         for (; k < kAutoSlots; k++) {

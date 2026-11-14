@@ -87,15 +87,61 @@ bool inv4(double (*a)[8], double r[4][4]) {
  * one geodetic conversion per call, not per satellite */
 __attribute__((noinline)) void elevations(PvtWork& w, int n, const Vec3& x, double t_rx, double b) {
     const Observer ob = make_observer(x);
+    ecef_to_lla(x, w.rx_lat, w.rx_lon, w.rx_h);
     for (int i = 0; i < n; i++) {
         const Vec3 s = earth_rotate(w.sat[i], t_rx - w.in[i].dt_tx - b / kC);
         double az, el;
         az_el(ob, s, az, el);
         w.el[i] = el;
+        w.az[i] = az;
     }
 }
 
-inline double trop_m(double el) { return 2.4 / std::sin((el < 3 ? 3 : el) * kPi / 180.0); }
+}  // namespace
+
+double tropo_delay_m(double el_deg, double lat_deg, double h_m) {
+    const double h = h_m < 0 ? 0 : (h_m > 9000 ? 9000 : h_m);
+    const double p = 1013.25 * std::pow(1.0 - 2.2557e-5 * h, 5.2568); /* hPa */
+    const double t = 288.15 - 6.5e-3 * h;                           /* K */
+    const double e = 6.108 * 0.5 * std::exp((17.15 * t - 4684.0) / (t - 38.45));
+    const double zhd = 0.0022768 * p / (1.0 - 0.00266 * std::cos(2.0 * lat_deg * kPi / 180.0) - 0.00028e-3 * h);
+    const double zwd = 0.002277 * (1255.0 / t + 0.05) * e;
+    const double se = std::sin((el_deg < 0 ? 0 : el_deg) * kPi / 180.0);
+    return (zhd + zwd) * 1.001 / std::sqrt(0.002001 + se * se);
+}
+
+double iono_delay_m(const float a[4], const float b[4], double lat_deg, double lon_deg, double az_deg, double el_deg, double tow_s) {
+    const double e = (el_deg < 0 ? 0 : el_deg) / 180.0; /* semicircles */
+    const double az = az_deg * kPi / 180.0;
+    const double psi = 0.0137 / (e + 0.11) - 0.022;
+    double phi = lat_deg / 180.0 + psi * std::cos(az);
+    if (phi > 0.416) phi = 0.416;
+    if (phi < -0.416) phi = -0.416;
+    const double lam = lon_deg / 180.0 + psi * std::sin(az) / std::cos(phi * kPi);
+    const double phm = phi + 0.064 * std::cos((lam - 1.617) * kPi);
+    double t = 4.32e4 * lam + tow_s;
+    t = std::fmod(t, 86400.0);
+    if (t < 0) t += 86400.0;
+    const double f = 1.0 + 16.0 * std::pow(0.53 - e, 3);
+    double amp = a[0] + phm * (a[1] + phm * (a[2] + phm * a[3]));
+    double per = b[0] + phm * (b[1] + phm * (b[2] + phm * b[3]));
+    if (amp < 0) amp = 0;
+    if (per < 72000.0) per = 72000.0;
+    const double x = 2.0 * kPi * (t - 50400.0) / per;
+    const double tiono = std::fabs(x) < 1.57 ? f * (5e-9 + amp * (1.0 - x * x / 2.0 + x * x * x * x / 24.0)) : f * 5e-9;
+    return tiono * kC;
+}
+
+namespace {
+
+/* the atmosphere's delay on satellite i (m), as configured in w */
+inline double atmo_m(const PvtWork& w, int i, double t_rx) {
+    double d = 0;
+    if (w.tropo == 1) d += 2.4 / std::sin((w.el[i] < 3 ? 3 : w.el[i]) * kPi / 180.0);
+    if (w.tropo == 2) d += tropo_delay_m(w.el[i], w.rx_lat, w.rx_h);
+    if (w.iono_ok) d += iono_delay_m(w.ion_a, w.ion_b, w.rx_lat, w.rx_lon, w.az[i], w.el[i], std::fmod(w.t_ref + t_rx, 604800.0));
+    return d;
+}
 
 /* one least-squares solution with the satellites marked in w.use */
 __attribute__((noinline)) bool ls(PvtWork& w, int n, Vec3& x, double& b, double t_rx, bool tropo, double* rms, int* used) {
@@ -115,7 +161,7 @@ __attribute__((noinline)) bool ls(PvtWork& w, int n, Vec3& x, double& b, double 
             const Vec3 s = earth_rotate(w.sat[i], (rho - b) / kC);
             const Vec3 d{s.x - x.x, s.y - x.y, s.z - x.z};
             const double r = norm(d);
-            const double trop = (tropo && have_el) ? trop_m(w.el[i]) : 0.0;
+            const double trop = (tropo && have_el) ? atmo_m(w, i, t_rx) : 0.0;
             const double res = rho + kC * w.clk[i] - trop - r - b;
             const double h[4] = {-d.x / r, -d.y / r, -d.z / r, 1.0};
             for (int p = 0; p < 4; p++) {
@@ -148,7 +194,7 @@ __attribute__((noinline)) bool ls(PvtWork& w, int n, Vec3& x, double& b, double 
         const double rho = kC * (t_rx - w.in[i].dt_tx);
         const Vec3 s = earth_rotate(w.sat[i], (rho - b) / kC);
         const Vec3 d{s.x - x.x, s.y - x.y, s.z - x.z};
-        const double trop = tropo ? trop_m(w.el[i]) : 0.0;
+        const double trop = tropo ? atmo_m(w, i, t_rx) : 0.0;
         w.resid[i] = rho + kC * w.clk[i] - trop - norm(d) - b;
         ss += w.resid[i] * w.resid[i];
         m++;
@@ -191,6 +237,24 @@ bool pvt_solve(PvtWork& w, int n, const Vec3& prior, double dt_rx_guess, PvtSolu
         out.fail = w.cancel ? PVT_CANCEL : PVT_LS;
         return false;
     }
+    /* elevation mask: leave out satellites below it while >= 5 stay above */
+    uint8_t masked = 0;
+    if (w.mask_deg > 0 && norm(x) > 6.0e6) {
+        int above = 0;
+        for (int i = 0; i < n; i++) above += w.use[i] && w.el[i] >= w.mask_deg;
+        if (above >= 5 && above < used) {
+            for (int i = 0; i < n; i++)
+                if (w.use[i] && w.el[i] < w.mask_deg) {
+                    w.use[i] = 0;
+                    masked++;
+                }
+            if (!ls(w, n, x, b, t_rx_guess, true, &rms, &used)) {
+                out.fail = w.cancel ? PVT_CANCEL : PVT_LS;
+                return false;
+            }
+        }
+    }
+    out.masked = masked;
     /* RAIM: drop the worst while the residuals disagree (>= 5 to check) */
     uint8_t dropped = 0;
     while (used >= 5 && rms > max_rms) {
@@ -230,6 +294,19 @@ bool pvt_solve(PvtWork& w, int n, const Vec3& prior, double dt_rx_guess, PvtSolu
     out.used = static_cast<uint8_t>(used);
     out.dropped = dropped;
     out.checked = used >= 5 ? 1 : 0;
+    {   /* corrections applied (mean over the satellites used), for the log */
+        double st = 0, si = 0;
+        int k = 0;
+        for (int i = 0; i < n; i++) {
+            if (!w.use[i]) continue;
+            if (w.tropo == 2) st += tropo_delay_m(w.el[i], w.rx_lat, w.rx_h);
+            if (w.tropo == 1) st += 2.4 / std::sin((w.el[i] < 3 ? 3 : w.el[i]) * kPi / 180.0);
+            if (w.iono_ok) si += iono_delay_m(w.ion_a, w.ion_b, w.rx_lat, w.rx_lon, w.az[i], w.el[i], std::fmod(out.t_rx, 604800.0));
+            k++;
+        }
+        out.trop_m = k ? static_cast<float>(st / k) : 0.0f;
+        out.iono_m = k ? static_cast<float>(si / k) : 0.0f;
+    }
     /* DOP in east / north / up */
     {
         double (*hth)[8] = w.a;
