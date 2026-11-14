@@ -32,7 +32,7 @@ BandDef kBands[BAND_COUNT] = {
     {2398, 2486, 320, 30, BF_PEAK | (SIGDET_FULL ? BF_HOP : 0), "2.4"},
     {5640, 5950, 320, 30, 0, "5.8"},
     {5340, 5640, 320, 30, BF_ALT, "5.3"},
-    {1060, 1380, 320, 30, 0, "1.2"},
+    {1060, 1380, 320, 30, BF_SLICE, "1.2"},
     {902, 928, 320, 25, BF_PEAK | BF_HOP, "915"},
     {860, 872, 160, 15, BF_PEAK | BF_HOP, "868"},
     /* U-NII-1 (GRADE_DOC: no real signal swept yet). DJI aircraft from the
@@ -354,6 +354,16 @@ void RfEngine::finish() {
         return;
     }
     find_segments();
+    if (kBands[band_].flags & BF_SLICE) {
+        for (size_t i = 0; i < nsegs_; i++) {
+            RfSeg& sg = w_->segs[i];
+            if ((sg.cls == RC_ANALOG || sg.cls == RC_DIGITAL || sg.cls == RC_DIGWIFI) && slice_artefact(sg)) {
+                sg.cls = RC_NONE;
+                sg.conf = CONF_NONE;
+                slice_gated_++;
+            }
+        }
+    }
     if (kBands[band_].flags & BF_HOP) {
         hit_stats();
         classify_hits();
@@ -496,6 +506,54 @@ void RfEngine::measure(RfSeg& s) {
  * dwell (~10 looks) with a missed look or two keeps its class. The track
  * accumulates the duty of every such dwell and confirms only at the full
  * threshold over kConfirmLooks looks (track()). */
+bool RfEngine::slice_of(uint32_t f_khz, uint16_t& index, uint32_t& off_khz) const {
+    if (!slice_step_hz_) return false;
+    const int64_t d = static_cast<int64_t>(f_khz) * 1000 - slice_f0_hz_;
+    if (d < 0) return false;
+    const int64_t j = d / slice_step_hz_;
+    index = static_cast<uint16_t>(j > 65535 ? 65535 : j);
+    off_khz = static_cast<uint32_t>((d - j * slice_step_hz_) / 1000);
+    return true;
+}
+
+/* A video verdict that is the receiver's: the sweep puts each tune slice's
+ * piece of spectrum side by side, and a front end response that is not flat
+ * across the slice (seen 2026-11-14 at 1.2 GHz with LNA 40 / VGA 38-52 /
+ * amp on: 5-8 MHz wide "AV / DV" humps ~4.3 MHz above the LO of 2-5 slices
+ * at once, centres 14.6 MHz apart: the tune step) repeats at the same offset
+ * in other slices. The segment's peak offset is looked up in every other
+ * slice of the band: when at least two of them hold half its level there
+ * (+-1 point), it is dropped. A real transmitter repeats at one slice step
+ * only by chance (and then in one other slice, not two). Only in BF_SLICE
+ * bands (1.2 GHz): where Wi-Fi fills many slices (2.4 / 5 GHz) the same
+ * test would drop real video. */
+bool RfEngine::slice_artefact(const RfSeg& s) const {
+    if (!slice_step_hz_ || points_ < 3) return false;
+    const int16_t* mean = reinterpret_cast<const int16_t*>(w_->sum);
+    size_t pk = s.lo;
+    for (size_t x = s.lo; x <= s.hi; x++)
+        if (mean[x] > mean[pk]) pk = x;
+    const int64_t f_pk = static_cast<int64_t>(point_khz(pk)) * 1000;
+    const int64_t step = slice_step_hz_;
+    const int64_t d = f_pk - slice_f0_hz_;
+    if (d < 0) return false;
+    const int64_t own = d / step, off = d - own * step;
+    const int64_t lo = static_cast<int64_t>(point_khz(0)) * 1000, hi = static_cast<int64_t>(point_khz(points_ - 1)) * 1000;
+    size_t echoes = 0;
+    for (int64_t j = 0;; j++) {
+        const int64_t f = slice_f0_hz_ + j * step + off;
+        if (f > hi) break;
+        if (j == own || f < lo) continue;
+        const size_t x = khz_to_point(static_cast<uint32_t>(f / 1000));
+        if (x >= points_) continue;
+        int16_t v = mean[x];
+        if (x > 0 && mean[x - 1] > v) v = mean[x - 1];
+        if (x + 1 < points_ && mean[x + 1] > v) v = mean[x + 1];
+        if (2 * static_cast<int32_t>(v) >= s.snr) echoes++;
+    }
+    return echoes >= 2;
+}
+
 uint8_t RfEngine::duty_need(uint8_t pct) const {
     return static_cast<uint8_t>(pct > kDutySlackPct ? pct - kDutySlackPct : 0);
 }

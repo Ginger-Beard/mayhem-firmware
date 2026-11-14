@@ -80,6 +80,7 @@ enum : uint8_t {
     BF_ODD = 0x08,    // ... or, with BF_ALT, the odd ones (5.3 and 5.1 take turns)
     BF_NOAV = 0x10,   // no analog FPV channels here: a sustained hump is digital video by its width, whatever its shape
     BF_NOCLS = 0x20,  // no drone classifiers (custom bands): floor and per point arrays only, no segments, hits or tracks
+    BF_SLICE = 0x40,  // video verdicts checked against the sweep's tune slices (RfEngine::slice_artefact)
 };
 
 /* Whether a band with these flags is swept in this cycle. */
@@ -277,6 +278,17 @@ class RfEngine {
         drop_tracks(band, 0);
         floor_ok_ &= static_cast<uint16_t>(~(1u << band));
     }
+    /* The sweep's tune slices for the dwell being begun (spec_an::Sweep::plan):
+     * slice j covers [f0 + j x step, f0 + (j + 1) x step). step 0: unknown
+     * (the replay tools), no slice check. */
+    void set_slices(int64_t f0_hz, uint32_t step_hz) {
+        slice_f0_hz_ = f0_hz;
+        slice_step_hz_ = step_hz;
+    }
+    /* Slice index and offset into it of f_khz (logs); false without slices. */
+    bool slice_of(uint32_t f_khz, uint16_t& index, uint32_t& off_khz) const;
+    /* Video verdicts dropped by the slice check since the start. */
+    uint32_t slice_gated() const { return slice_gated_; }
     /* 2.4 GHz hopper / toy verdicts (low confidence: Bluetooth Classic, BLE
      * and Wi-Fi fragments in a home give the same hit statistics; off by
      * default in the app). Hit statistics are measured and dumped either way. */
@@ -340,6 +352,9 @@ class RfEngine {
     bool hop24_{true};
 
     Work* w_{nullptr};
+    int64_t slice_f0_hz_{0};
+    uint32_t slice_step_hz_{0};
+    uint32_t slice_gated_{0};
     /* A band's floors_ are written before floor_ok_ marks them valid. */
     int16_t floors_[BAND_COUNT][tune::kFloorSegs];
     RfHits hits_{};
@@ -362,6 +377,7 @@ class RfEngine {
     uint8_t duty_need(uint8_t pct) const;
     void drop_tracks(uint8_t band, uint8_t min_miss);
     bool excluded(size_t x) const;
+    bool slice_artefact(const RfSeg& s) const;
     uint32_t khz_to_point(uint32_t f_khz) const;
     void emit(Event ev, const RfTrack& t) {
         if (notify_) notify_(notify_ctx_, ev, t);
