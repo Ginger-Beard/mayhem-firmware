@@ -19,6 +19,11 @@
  * Boston, MA 02110-1301, USA.
  */
 
+/* the GPS tracker's per-block tables (build_block_lut, lut_sum) and SIMD
+ * helpers; outside the guard: gps_trk.hpp includes this file again (through
+ * gal_trk.hpp) after its helpers, whichever of the two comes first */
+#include "gps_trk.hpp"
+
 #ifndef __GAL_ACQ_H__
 #define __GAL_ACQ_H__
 
@@ -29,10 +34,15 @@
  * a few chips and its Doppler to tens of Hz (the app predicts both from the
  * orbit, the position and GPS time at a sample of this image's clock). The
  * search then needs only a narrow window: one 4 ms block of samples (one E1
- * code period) is kept, the carrier wiped for each Doppler bin, and the E1B
- * (data) and E1C (pilot) BOC(1,1) replicas correlated at each sample offset
- * of the window: 4 ms coherent per component, |B|^2 + |C|^2, blocks summed
- * non-coherently. Detection: peak / mean of all cells above a threshold
+ * code period) is kept and the E1B (data) and E1C (pilot) BOC(1,1) replicas
+ * are correlated at each half-sample offset of the window for each Doppler
+ * bin: 4 ms coherent per component, |B|^2 + |C|^2, blocks summed
+ * non-coherently. The correlation is the GPS tracker's engine: per 32
+ * samples one table of nibble sums (shared by every offset, component and
+ * bin), a 32-bit replica word per offset and component (sum = S - 2 x 8
+ * look-ups), the carrier of each bin wiped on the block sums at the block
+ * centre (< 0.1 dB at 5 kHz). The replicas follow the centre bin's code rate
+ * (the other bins' differ by 1e-7 chip over 4 ms). Detection: peak / mean of all cells above a threshold
  * calibrated on noise (host test), then the peak's neighbours are compared
  * (the BOC side peaks at +-0.75 chip are only ~3.8 dB down: the higher of
  * the peak and its +-1.5-sample neighbours wins, and how much higher is
@@ -117,7 +127,6 @@ class Searcher {
         blocks_ = blocks < 1 ? 1 : blocks;
         block_ = 0;
         filled_ = 0;
-        bin_ = 0;
         unit_ = 0;
         phase_ = codes ? EXPAND : CAPTURE; /* the streams first (a few units), then the samples */
         std::memset(power_, 0, sizeof(power_));
@@ -125,7 +134,7 @@ class Searcher {
         res_.prn = static_cast<uint8_t>(prn);
     }
     bool busy() const { return phase_ != IDLE; }
-    int phase() const { return phase_; } /* diagnostics (the M4 bench): 1 codes, 2 capture, 3 wipe, 4 replica, 5 correlation */
+    int phase() const { return phase_; } /* diagnostics (the M4 bench): 1 codes, 2 capture, 3 replica, 4 correlation */
     bool wants_samples() const { return phase_ == CAPTURE; }
     const Result& result() const { return res_; }
     void stop() { phase_ = IDLE; }
@@ -148,51 +157,45 @@ class Searcher {
         std::memcpy(raw_ + 2 * filled_, iq, static_cast<size_t>(2 * take));
         filled_ += take;
         if (filled_ == kN) {
-            phase_ = WIPE;
-            bin_ = 0;
+            phase_ = REP;
             unit_ = 0;
         }
     }
 
-    /* one unit of work, each ~40k M4 cycles or less (gcc -O3: ~14 cycles per
-     * sample in the correlation): a quarter of a bin's carrier wipe, a quarter
-     * of one replica, or a quarter of the samples of one component at one
-     * offset. False when done. */
+    /* one unit of work, each ~15k M4 cycles or less (rf_test/gps m4bench_trk
+     * GALSEARCH): an eighth of the codes' streams, one replica, or the
+     * correlation of kBlkUnit 32-sample blocks (every offset, component and
+     * bin). False when done. */
+    static constexpr int kBlkUnit = 1;
     __attribute__((noinline)) bool step() {
         switch (phase_) {
-            case EXPAND: { /* 4 units: E1B, E1C, half of the stream each */
-                const int comp = unit_ >> 1, half = kStreamWords / 2;
-                expand_stream(comp ? codes_->c : codes_->b, hc_[comp], (unit_ & 1) ? half : 0, (unit_ & 1) ? kStreamWords : half);
-                if (++unit_ == 4) {
+            case EXPAND: { /* 8 units: E1B, E1C, a quarter of the stream each */
+                const int comp = unit_ >> 2, q = unit_ & 3, per = (kStreamWords + 3) / 4;
+                const int w1 = (q + 1) * per < kStreamWords ? (q + 1) * per : kStreamWords;
+                expand_stream(comp ? codes_->c : codes_->b, hc_[comp], q * per, w1);
+                if (++unit_ == 8) {
                     unit_ = 0;
                     phase_ = CAPTURE;
                 }
                 return true;
             }
-            case WIPE:
-                wipe_part(unit_);
-                if (++unit_ == 4) {
-                    phase_ = REP;
-                    unit_ = 0;
-                }
-                return true;
-            case REP: /* 4 replicas in 4 parts each */
-                replica((unit_ >> 3) & 1, (unit_ >> 2) & 1, unit_ & 3);
-                if (++unit_ == 16) {
+            case REP: /* the block's carrier and code phases, then 4 replicas (component x half-sample shift) */
+                if (unit_ == 0)
+                    block_setup();
+                else
+                    replica((unit_ - 1) >> 1, (unit_ - 1) & 1);
+                if (++unit_ == 5) {
                     phase_ = CORR;
                     unit_ = 0;
                 }
                 return true;
             case CORR: {
-                /* unit: offset, component, quarter of the samples */
-                const int d2 = unit_ / 8 - 2 * hw_, comp = (unit_ >> 2) & 1, quarter = unit_ & 3;
-                correlate(d2, comp, quarter);
-                if (++unit_ < 8 * (4 * hw_ + 1)) return true;
-                unit_ = 0;
-                if (++bin_ < nb_) {
-                    phase_ = WIPE;
+                if (unit_ < kN / 32) { /* the blocks, then the powers in a unit of their own */
+                    for (int k = 0; k < kBlkUnit && unit_ < kN / 32; k++) corr_block(unit_++);
                     return true;
                 }
+                corr_end();
+                unit_ = 0;
                 if (++block_ < blocks_) {
                     filled_ = 0;
                     phase_ = CAPTURE;
@@ -211,7 +214,6 @@ class Searcher {
     enum Phase : uint8_t { IDLE,
                            EXPAND,
                            CAPTURE,
-                           WIPE,
                            REP,
                            CORR };
     Phase phase_{IDLE};
@@ -220,128 +222,140 @@ class Searcher {
     double cp_at_{0};
     uint64_t at_{0}, s0_{0};
     double fd0_{0};
-    int hw_{0}, nb_{0}, blocks_{0}, block_{0}, bin_{0}, filled_{0}, unit_{0};
+    int hw_{0}, nb_{0}, blocks_{0}, block_{0}, filled_{0}, unit_{0};
     float bin_hz_{0};
     Result res_{};
     uint32_t hc_[2][kStreamWords]{}; /* E1B, E1C half-chip streams */
     int8_t raw_[2 * kN]{};
-    int8_t y_[2 * kN]{}; /* this bin's carrier-wiped samples */
-    int32_t sum_i_{0}, sum_q_{0};
-    int32_t ni_{0}, nq_{0};            /* the sums of the quarters so far */
-    uint32_t rep_hi_{0}, rep_frac_{0}; /* replica phase between its parts */
-    float rot_c_{0}, rot_s_{0};
     /* replica bits (1 = -1) for samples -hw .. kN + hw: [component][half-sample shift] */
     uint32_t rep_[2][2][(kN + 2 * kMaxHalfWin + 31) / 32 + 2]{};
-    float part_[2]{}; /* this offset's |E1B|^2 (the E1C one completes it) */
+    /* this block's correlations: [bin][offset (-2 hw .. 2 hw half samples)][component][I, Q] */
+    int32_t acc_[kMaxBins][4 * kMaxHalfWin + 1][2][2]{};
+    uint32_t lut_[128]{};                                                                   /* one 32-sample block's nibble sums */
+    float rot_c_[kMaxBins]{}, rot_s_[kMaxBins]{}, step_c_[kMaxBins]{}, step_s_[kMaxBins]{}; /* carrier at the block centre per bin */
+    uint32_t rep_m_[2]{}, rep_f_[2]{}, rep_delta_{0};                                       /* replica phase at the window's first sample, rate (1 - delta) */
     /* power per bin and offset in half samples (-2 hw .. 2 hw) */
     float power_[kMaxBins][4 * kMaxHalfWin + 1]{};
 
     double bin_hz_at(int b) const { return fd0_ + (b - nb_ / 2) * bin_hz_; }
 
-    /* the carrier at each 16-sample group's centre (|fd| < 6 kHz: < 0.1 dB),
-     * by a float rotation; samples scaled to stay within int8 */
-    __attribute__((noinline)) void wipe_part(int q) {
-        const float w = static_cast<float>(-2.0 * 3.14159265358979 * bin_hz_at(bin_) / kFs);
-        const int k_begin = q * (kN / 4), k_end = k_begin + kN / 4;
-        /* double cos / sin: the image links them anyway (the carrier table); the
-         * float ones would add ~2.6 KB of argument reduction */
-        if (q == 0) {
-            rot_c_ = static_cast<float>(std::cos(static_cast<double>(w) * 8));
-            rot_s_ = static_cast<float>(std::sin(static_cast<double>(w) * 8));
-            sum_i_ = sum_q_ = 0;
-        }
-        const float dc = static_cast<float>(std::cos(static_cast<double>(w) * 16)), ds = static_cast<float>(std::sin(static_cast<double>(w) * 16));
-        for (int k0 = k_begin; k0 < k_end; k0 += 16) {
-            const int c = static_cast<int>(rot_c_ * 180.0f), s = static_cast<int>(rot_s_ * 180.0f);
-            for (int k = k0; k < k0 + 16; k++) {
-                const int i = raw_[2 * k], qq = raw_[2 * k + 1];
-                const int yi = (i * c - qq * s) >> 8, yq = (i * s + qq * c) >> 8;
-                y_[2 * k] = static_cast<int8_t>(yi);
-                y_[2 * k + 1] = static_cast<int8_t>(yq);
-                sum_i_ += yi;
-                sum_q_ += yq;
-            }
-            const float nc = rot_c_ * dc - rot_s_ * ds, ns = rot_c_ * ds + rot_s_ * dc;
-            rot_c_ = nc;
-            rot_s_ = ns;
-            if ((k0 & 1023) == 0) { /* keep the rotation on the unit circle */
-                const float m = 1.5f - 0.5f * (rot_c_ * rot_c_ + rot_s_ * rot_s_);
-                rot_c_ *= m;
-                rot_s_ *= m;
-            }
-        }
-    }
-
-    /* one replica: the nearest half chip per sample by an integer phase
-     * accumulator (2^-32 half chips), BOC(1,1): + then - within a chip */
-    __attribute__((noinline)) void replica(int comp, int sh, int part) {
-        const double fd = bin_hz_at(bin_);
-        const double rate = 2.0 * kChips / kN * (1.0 + fd / kL1); /* half chips per sample */
-        const uint32_t step_frac = static_cast<uint32_t>((rate - std::floor(rate)) * 4294967296.0);
-        const uint32_t step_int = static_cast<uint32_t>(rate);
-        if (part == 0) { /* the phase at the window's first sample */
-            const double dt = (static_cast<double>(s0_) - static_cast<double>(at_)) / kFs;
+    /* the soft-double part of a block, in one unit: the code phase of the
+     * window's first sample for both half-sample shifts, the replica rate, the
+     * carrier of each bin at the first block centre and per block */
+    GAL_COLD void block_setup() {
+        const double fd = fd0_;
+        const double rate = 2.0 * kChips / kN * (1.0 + fd / kL1); /* half chips per sample, < 1 */
+        rep_delta_ = static_cast<uint32_t>((1.0 - rate) * 4294967296.0);
+        const double dt = (static_cast<double>(s0_) - static_cast<double>(at_)) / kFs;
+        for (int sh = 0; sh < 2; sh++) {
             double h = 2.0 * (cp_at_ + dt * 1.023e6 * (1.0 + fd / kL1)) - hw_ * rate + (sh ? 0.5 * rate : 0.0);
             h = std::fmod(h, static_cast<double>(kHalf));
             if (h < 0) h += kHalf;
-            rep_hi_ = static_cast<uint32_t>(h);
-            rep_frac_ = static_cast<uint32_t>((h - rep_hi_) * 4294967296.0);
+            uint32_t m = static_cast<uint32_t>(h);
+            rep_f_[sh] = static_cast<uint32_t>((h - m) * 4294967296.0);
+            rep_m_[sh] = m >= static_cast<uint32_t>(kHalf) ? 0 : m;
         }
-        uint32_t hi = rep_hi_, frac = rep_frac_;
-        const uint32_t* hc = hc_[comp];
-        uint32_t* r = rep_[comp][sh];
-        const int n_bits = kN + 2 * hw_;
-        const int n_words = (n_bits + 31) / 32;
-        const int w_begin = part * ((n_words + 3) / 4), w_end = part == 3 ? n_words : (part + 1) * ((n_words + 3) / 4);
-        for (int w = w_begin; w < w_end; w++) {
-            uint32_t word = 0;
-            for (int b = 0; b < 32; b++) {
-                const uint32_t hb = hi + kStreamLead;
-                word |= ((hc[hb >> 5] >> (hb & 31u)) & 1u) << b;
-                const uint32_t f2 = frac + step_frac;
-                hi += step_int + (f2 < frac ? 1u : 0u);
-                frac = f2;
-                if (hi >= static_cast<uint32_t>(kHalf)) hi -= kHalf;
-            }
-            r[w] = word;
+        /* half a block of carrier: < 0.3 rad at 6 kHz, so a short series is exact in float */
+        auto cs = [](float x, float* c, float* sn) {
+            const float x2 = x * x;
+            *c = 1.0f - x2 * (0.5f - x2 * (1.0f / 24.0f - x2 * (1.0f / 720.0f)));
+            *sn = x * (1.0f - x2 * (1.0f / 6.0f - x2 * (1.0f / 120.0f - x2 * (1.0f / 5040.0f))));
+        };
+        float c, sn, bc, bs;
+        cs(static_cast<float>(2.0 * 3.14159265358979 * 16 / kFs * bin_hz_at(0)), &c, &sn);
+        cs(static_cast<float>(2.0 * 3.14159265358979 * 16 / kFs) * bin_hz_, &bc, &bs);
+        for (int b = 0; b < nb_; b++) {
+            rot_c_[b] = c;
+            rot_s_[b] = sn;
+            step_c_[b] = c * c - sn * sn; /* 32 samples = twice the half block */
+            step_s_[b] = 2.0f * c * sn;
+            const float nc = c * bc - sn * bs, ns = c * bs + sn * bc;
+            c = nc;
+            sn = ns;
         }
-        rep_hi_ = hi;
-        rep_frac_ = frac;
-        if (part == 3) r[n_words] = 0;
+        for (int b = 0; b < nb_; b++) /* only what is used (newlib's memset goes byte by byte) */
+            for (int i = 0; i < 4 * hw_ + 1; i++) acc_[b][i][0][0] = acc_[b][i][0][1] = acc_[b][i][1][0] = acc_[b][i][1][1] = 0;
     }
 
-    /* one component at one offset (half samples), a quarter of the samples:
-     * the sums over the samples whose replica chip is -1, then sum - 2 x that */
-    __attribute__((noinline)) void correlate(int d2, int comp, int quarter) {
-        const int d = d2 >= 0 ? d2 / 2 : -((-d2 + 1) / 2);
-        const int sh = d2 & 1;
-        const uint32_t* r = rep_[comp][sh];
-        const int base = d + hw_; /* bit index of sample 0 */
-        const int wsh = base & 31;
-        if (!quarter) ni_ = nq_ = 0;
-        int32_t ni = ni_, nq = nq_;
-        const int k_begin = quarter * (kN / 4), k_end = k_begin + kN / 4;
-        const int8_t* y = y_ + 2 * k_begin;
-        for (int k = k_begin; k < k_end; k += 32) {
-            const int wi = (base + k) >> 5;
-            uint32_t w = wsh ? (r[wi] >> wsh) | (r[wi + 1] << (32 - wsh)) : r[wi];
-            for (int b = 0; b < 32; b++) {
-                const int32_t m = -static_cast<int32_t>(w & 1u);
-                ni += y[0] & m;
-                nq += y[1] & m;
-                y += 2;
-                w >>= 1;
+    /* one replica: the nearest half chip per sample, 32 samples per word read
+     * from the half-chip stream (the half-chip phase repeats once per ~1024
+     * samples: that word is split with a mask, as in the tracker) */
+    __attribute__((noinline)) void replica(int comp, int sh) {
+        const uint32_t delta = rep_delta_, d32 = delta * 32u;
+        uint32_t m = rep_m_[sh], f = rep_f_[sh];
+        const uint32_t* hc = hc_[comp];
+        uint32_t* r = rep_[comp][sh];
+        const int n_words = (kN + 2 * hw_ + 31) / 32;
+        for (int w = 0; w < n_words; w++) {
+            const uint32_t b = m + kStreamLead;
+            const uint32_t* d = hc + (b >> 5);
+            const uint32_t s5 = b & 31u;
+            uint32_t word = s5 ? (d[0] >> s5) | (d[1] << (32 - s5)) : d[0];
+            uint32_t adv = 32;
+            if (f < d32) { /* the phase repeats after sample j */
+                const uint32_t j = f / delta;
+                adv = 31;
+                if (j <= 30) {
+                    const uint32_t lo = (2u << j) - 1u;
+                    word = (word & lo) | ((word << 1) & ~lo);
+                }
             }
+            r[w] = word;
+            f -= d32;
+            m += adv;
+            if (m >= static_cast<uint32_t>(kHalf)) m -= kHalf;
         }
-        ni_ = ni;
-        nq_ = nq;
-        if (quarter != 3) return;
-        const float ci = static_cast<float>(sum_i_ - 2 * ni), cq = static_cast<float>(sum_q_ - 2 * nq);
-        const float p = ci * ci + cq * cq;
-        if (comp == 0)
-            part_[0] = p;
-        else
-            power_[bin_][d2 + 2 * hw_] += part_[0] + p;
+        r[n_words] = r[n_words + 1] = 0;
+    }
+
+    /* one 32-sample block: its table, then every offset, component and bin */
+    void corr_block(int k) {
+        const uint32_t s = gps_trk::build_block_lut(raw_ + 64 * k, lut_);
+        uint32_t cs[kMaxBins];
+        for (int b = 0; b < nb_; b++) { /* amplitude 511: 256 blocks of full-scale sums stay inside int32 */
+            const int32_t c = static_cast<int32_t>(rot_c_[b] * 511.0f), sn = static_cast<int32_t>(rot_s_[b] * 511.0f);
+            cs[b] = (static_cast<uint32_t>(c) & 0xFFFFu) | (static_cast<uint32_t>(sn) << 16);
+            const float nc = rot_c_[b] * step_c_[b] - rot_s_[b] * step_s_[b], ns = rot_c_[b] * step_s_[b] + rot_s_[b] * step_c_[b];
+            rot_c_[b] = nc;
+            rot_s_[b] = ns;
+        }
+        if ((k & 63) == 63)
+            for (int b = 0; b < nb_; b++) { /* back onto the unit circle */
+                const float g = 1.5f - 0.5f * (rot_c_[b] * rot_c_[b] + rot_s_[b] * rot_s_[b]);
+                rot_c_[b] *= g;
+                rot_s_[b] *= g;
+            }
+        const int nd = 4 * hw_ + 1;
+        for (int comp = 0; comp < 2; comp++)
+            for (int i = 0; i < nd; i++) {
+                const int d2 = i - 2 * hw_;
+                const int d = d2 >= 0 ? d2 / 2 : -((-d2 + 1) / 2);
+                const uint32_t* r = rep_[comp][d2 & 1];
+                const int bit = d + hw_ + 32 * k; /* the replica bit of the block's first sample */
+                const int wi = bit >> 5, ws = bit & 31;
+                const uint32_t w = ws ? (r[wi] >> ws) | (r[wi + 1] << (32 - ws)) : r[wi];
+                const uint32_t t = gps_trk::lut_sum(lut_, w);
+                const uint32_t cp = gps_trk::ssub16(gps_trk::ssub16(s, t), t);
+                for (int b = 0; b < nb_; b++) {
+                    int32_t* a = acc_[b][i][comp];
+                    a[0] = gps_trk::smlad(cp, cs[b], a[0]);
+                    a[1] = gps_trk::smlsdx(cp, cs[b], a[1]);
+                }
+            }
+    }
+
+    /* the block's powers: |E1B|^2 + |E1C|^2 per bin and offset */
+    GAL_COLD void corr_end() {
+        const int nd = 4 * hw_ + 1;
+        for (int b = 0; b < nb_; b++)
+            for (int i = 0; i < nd; i++) {
+                float p = 0;
+                for (int comp = 0; comp < 2; comp++) {
+                    const float x = static_cast<float>(acc_[b][i][comp][0]), y = static_cast<float>(acc_[b][i][comp][1]);
+                    p += x * x + y * y;
+                }
+                power_[b][i] += p;
+            }
     }
 
     GAL_COLD void finish() {

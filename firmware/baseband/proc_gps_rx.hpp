@@ -112,7 +112,7 @@ class GpsRxProcessor : public BasebandProcessor {
      * Galileo channels): a unit only while the buffer's tracking + Galileo
      * cycles stay under the budget (of 204k per 1 ms buffer): the loops come first */
     static constexpr uint32_t kGalBudget = 180000;
-    static constexpr uint32_t kGalUnit = 45000; /* the largest unit, with margin */
+    static constexpr uint32_t kGalUnit = 20000; /* the largest unit (~17k cycles: rf_test/gps m4bench_trk GALSEARCH), with margin */
     uint32_t gal_cycles_{0};                    /* the app's current search's M4 cycles (diagnostics) */
 #else
     static constexpr uint8_t kSettleBuffers = 20; /* 20 ms skipped before a capture: LO / gain settling after enable */
