@@ -99,6 +99,8 @@ void GpsView::log_header() {
         "#CH,ch,prn,state,mode,flags,cn0_x10,pld_x100,doppler_x10,code_x64,code_err_x1000,lock_ms,bits,words_ok,parity_errs,subframes,tow,reacq,sweeps,half_fixes",
         "#SR,seq,search,k_ms,prn,searched,detected,once,refined,metric_x100,thr_x100,cn0_x10,doppler,code_x1000,verdict,b_metric_x100,b_doppler,b_code_x1000",
         "#HO,handovers,age_ms,prns",
+        "#REL,prn,after_ms,released,refills (channel freed: detection never verified)",
+        "#ADD,prn,el_deg,code_x1000,doppler,clock_hz,windows,fix_age_ms,orbit,aided_starts (aided search: newly risen satellite)",
         "#SF,prn,ch,sfid,page,tow,w1..w10 (24-bit data words hex)",
         "#EPH,event,prn,have,fresh,in_table,toe_age_s,iode",
         "#MEAS,seq,sample,missed,n,prn:flags:tx_ms:tx_frac_hex:doppler:cn0_x10 ...",
@@ -106,6 +108,7 @@ void GpsView::log_header() {
         "#FIX,kind,ok,why,used,dropped,rms_m_x10,hdop_x10,vdop_x10,clock_m,time_corr_ms_or_drift_ppb,lat_e7,lon_e7,alt_m,speed_cm_s",
         "#SCREEN,tab,fix rows 0-10 joined by |",
         "#HEARD,heard rows (status | list)",
+        "#CLK,event (tow / pvt: GPS time in use; set: RTC written by Set clock),gps_minus_rtc_ms,rtc_utc,gps_utc,zone_min",
         "#ERR,what,detail",
     };
     for (const char* h : kHead) log_push(mem_->log, h, std::strlen(h));
@@ -247,6 +250,14 @@ void GpsView::log_second() {
         f.c(',').u(sh.level_x10).c(',').d(sh.dc_i_x10).c(',').d(sh.dc_q_x10).c(',').u(sh.clip_pm);
         log_end(f);
     }
+    /* channels the loops gave back (unconfirmed detections that never verified) */
+    while (log_rel_seen_ != sh.released) {
+        if (static_cast<uint16_t>(sh.released - log_rel_seen_) > 8) log_rel_seen_ = static_cast<uint16_t>(sh.released - 8);
+        const uint16_t k = log_rel_seen_++;
+        Fmt f = log_row("REL");
+        f.c(',').c('G').d2(sh.rel_prn[k & 7u]).c(',').u(sh.rel_ms[k & 7u]).c(',').u(sh.released).c(',').u(sh.refills);
+        log_end(f);
+    }
     const AutoState& a = mem_->autos;
     for (int i = 0; i < gps_trk::kMaxCh; i++) {
         const gps_trk::ChInfo& c = a.ch[i];
@@ -254,6 +265,7 @@ void GpsView::log_second() {
         Fmt f = log_row("CH");
         f.c(',').u(static_cast<uint32_t>(i)).c(',').u(c.prn).c(',').u(c.state).c(',').u(c.mode).c(',');
         f.s(c.flags & gps_trk::F_PLL ? "L" : "-").s(c.flags & gps_trk::F_BIT ? "B" : "-").s(c.flags & gps_trk::F_FRAME ? "T" : "-").s(c.flags & gps_trk::F_VERIFIED ? "V" : "-");
+        f.s(c.flags & gps_trk::F_EVER ? "E" : "-").s(c.flags & gps_trk::F_RELEASED ? "R" : "-").s(c.flags & gps_trk::F_AIDED ? "A" : "-");
         f.c(',').u(c.cn0_x10).c(',').d(c.pld_x100).c(',').d(static_cast<int32_t>(std::lround(c.doppler_hz * 10.0f))).c(',').u(c.code_x64);
         f.c(',').d(static_cast<int32_t>(std::lround(c.code_err * 1000.0f))).c(',').u(c.lock_ms).c(',').u(c.bits).c(',').u(c.words_ok).c(',').u(c.parity_errs);
         f.c(',').u(c.subframes).c(',').u(c.tow_s).c(',').u(c.reacq).c(',').u(c.sweeps).c(',').u(c.half_fixes);
@@ -325,10 +337,40 @@ void GpsView::log_results(const gps_rx::Result* r, uint8_t k_ms) {
         f.c(',').u(static_cast<uint32_t>(x.cn0 * 10.0f + 0.5f)).c(',').d(static_cast<int32_t>(std::lround(x.doppler))).c(',').u(static_cast<uint32_t>(x.code_phase * 1000.0f));
         static const char* const kWhy[4] = {",rejected: not confirmed by the 2nd snapshot", ",rejected: 2nd snapshot did not find it",
                                             ",rejected: 2nd snapshot Doppler moved > 750 Hz", ",rejected: 2nd snapshot code phase off the prediction"};
-        f.s(x.detected ? ",accepted" : (x.once ? kWhy[x.reject < 4 ? x.reject : 0] : ",rejected: below threshold"));
+        f.s(x.detected ? (req_confirm_ ? ",accepted" : ",detected (unconfirmed: the tracker verifies)")
+                       : (x.once ? kWhy[x.reject < 4 ? x.reject : 0] : ",rejected: below threshold"));
         if (x.once) f.c(',').u(static_cast<uint32_t>(x.b_metric * 100.0f + 0.5f)).c(',').d(static_cast<int32_t>(std::lround(x.b_doppler))).c(',').u(static_cast<uint32_t>(x.b_code * 1000.0f));
         log_end(f);
     }
+}
+
+void GpsView::log_clock(const char* src) {
+    if (clock_logged_ && std::fabs(gps_off_s_ - clock_logged_off_) < 0.5) return; /* once, then on changes */
+    clock_logged_ = true;
+    clock_logged_off_ = gps_off_s_;
+    if (!log_active()) return;
+    Fmt f = log_row("CLK");
+    f.c(',').s(src).c(',').d(static_cast<int32_t>(std::lround(gps_off_s_ * 1000.0)));
+    f.c(',').u(static_cast<uint32_t>(now_unix())).c(',').u(static_cast<uint32_t>(now_best())).c(',').d(utc_off_min_);
+    log_end(f);
+}
+
+void GpsView::log_clock_set(double rtc_before, int64_t t) {
+    clock_logged_off_ = gps_off_s_;
+    if (!log_active()) return;
+    Fmt f = log_row("CLK");
+    f.s(",set,").d(static_cast<int32_t>(std::lround((static_cast<double>(t) - rtc_before) * 1000.0)));
+    f.c(',').u(static_cast<uint32_t>(rtc_before)).c(',').u(static_cast<uint32_t>(t)).c(',').d(utc_off_min_);
+    log_end(f);
+}
+
+void GpsView::log_aided(int prn, float el, double code, double dop, double clk, int windows, uint32_t age_ms, bool eph) {
+    if (!log_active()) return;
+    Fmt f = log_row("ADD");
+    f.c(',').c('G').d2(prn).c(',').d(static_cast<int32_t>(std::lround(el))).c(',').u(static_cast<uint32_t>(code * 1000.0));
+    f.c(',').d(static_cast<int32_t>(std::lround(dop))).c(',').d(static_cast<int32_t>(std::lround(clk))).c(',').u(static_cast<uint32_t>(windows));
+    f.c(',').u(age_ms).c(',').s(eph ? "eph" : "alm").c(',').u(trk_sh_ ? trk_sh_->aided_starts : 0u);
+    log_end(f);
 }
 
 void GpsView::log_handover() {

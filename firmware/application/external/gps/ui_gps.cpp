@@ -153,12 +153,15 @@ void TextLines::paint(Painter& painter) {
     for (size_t i = 0; i < rows_; i++) {
         const Point p{r.left(), static_cast<Coord>(r.top() + static_cast<int>(i) * lh)};
         if (p.y() + lh > r.bottom()) break;
+        const bool short_row = static_cast<int>(i) == short_row_;
+        const size_t row_cols = short_row ? short_cols_ : cols;
         size_t n = std::strlen(lines_[i].text);
-        if (n > cols) n = cols;
+        if (n > row_cols) n = row_cols;
         const bool hl = static_cast<int>(i) == hl_; /* the selection: inverted */
         const Color fg = hl ? Color::black() : lines_[i].color, bk = hl ? lines_[i].color : bg;
         const int w = n ? painter.draw_string(p, *font_, fg, bk, std::string_view{lines_[i].text, n}) : 0;
-        painter.fill_rectangle({p.x() + w, p.y(), r.width() - w, lh}, bk);
+        const int row_w = short_row ? static_cast<int>(row_cols) * font_->char_width() : r.width();
+        if (row_w > w) painter.fill_rectangle({p.x() + w, p.y(), row_w - w, lh}, bk);
     }
 }
 
@@ -436,15 +439,16 @@ PassesView::PassesView(GpsView& main, Rect r)
     : View{r},
       main_{main},
       text_head_{{0, 0, UI_POS_WIDTH(24), UI_POS_HEIGHT(kRows)}, head_, kRows, &ui::font::fixed_8x16},
-      button_pos_{{UI_POS_X(24), 0, UI_POS_WIDTH(6), UI_POS_HEIGHT(1)}, "Pos"},
-      button_load_{{UI_POS_X(24), UI_POS_Y(3), UI_POS_WIDTH(6), UI_POS_HEIGHT(1)}, "Load"},
-      labels_zone_{{{UI_POS_X(15), UI_POS_Y(1)}, "Zone", Theme::getInstance()->fg_light->foreground}},
-      field_zone_h_{{UI_POS_X(20), UI_POS_Y(1)}, 3, {-12, 14}, 1, ' '},
-      field_zone_m_{{UI_POS_X(23), UI_POS_Y(1)}, 3, {{":00", 0}, {":30", 30}, {":45", 45}}},
-      sky_{{0, UI_POS_Y(4) + 2, 112, 112}, "GPS now"},
-      text_side_{{116, UI_POS_Y(4) + 2, 124, 112}, side_, kSideRows, &ui::font::fixed_5x8},
-      text_passes_{{0, UI_POS_Y(4) + 116, UI_POS_MAXWIDTH, UI_POS_HEIGHT(kPassRows)}, pass_lines_, kPassRows, &ui::font::fixed_8x16} {
+      button_pos_{{UI_POS_X(24), 0, UI_POS_WIDTH(6), 24}, "Pos"},
+      button_load_{{UI_POS_X(24), UI_POS_Y(3), UI_POS_WIDTH(6), 24}, "Load"},
+      labels_zone_{{{UI_POS_X(14), UI_POS_Y(1)}, "Zone", Theme::getInstance()->fg_light->foreground}},
+      field_zone_h_{{UI_POS_X(18), UI_POS_Y(1)}, 3, {-12, 14}, 1, ' '},
+      field_zone_m_{{UI_POS_X(21), UI_POS_Y(1)}, 3, {{":00", 0}, {":30", 30}, {":45", 45}}},
+      sky_{{0, UI_POS_Y(4) + 10, 112, 112}, "GPS now"},
+      text_side_{{116, UI_POS_Y(4) + 10, 124, 112}, side_, kSideRows, &ui::font::fixed_5x8},
+      text_passes_{{0, UI_POS_Y(4) + 124, UI_POS_MAXWIDTH, UI_POS_HEIGHT(kPassRows)}, pass_lines_, kPassRows, &ui::font::fixed_8x16} {
     add_children({&text_head_, &button_pos_, &button_load_, &labels_zone_, &field_zone_h_, &field_zone_m_, &sky_, &text_side_, &text_passes_});
+    text_head_.set_short_row(1, 14); /* "Local hh:mm:ss"; the Zone fields own the rest of the row */
     /* zone as hours + minutes (e.g. -5 :00, 5 :30); the setting keeps minutes */
     const int32_t z = main_.utc_off_min_;
     const int32_t zh = z / 60, zm = (z < 0 ? -z : z) % 60;
@@ -599,7 +603,7 @@ void PassesView::refresh() {
     }
     {
         Fmt f{b, sizeof(b)};
-        const double t = main_.now_unix();
+        const double t = main_.now_best();
         int32_t y, m, d;
         civil_from_days(static_cast<int32_t>(std::floor(t / 86400.0)), y, m, d);
         f.s("UTC   ");
@@ -695,7 +699,7 @@ void PassesView::restart_passes() {
     if (!p) return;
     p->stop();
     if (main_.pos_valid_ && main_.n_tle_)
-        p->start(main_.mem_->tles, main_.n_tle_, &main_.mem_->search, main_.rx_, main_.now_unix());
+        p->start(main_.mem_->tles, main_.n_tle_, &main_.mem_->search, main_.rx_, main_.now_best());
     else
         p->start(nullptr, 0, nullptr, main_.rx_, 0); /* empty */
     show_passes();
@@ -718,7 +722,7 @@ void PassesView::tick() {
 
 void PassesView::show_passes() {
     char b[TextLines::kCols + 1];
-    const double now = main_.now_unix();
+    const double now = main_.now_best();
     const Color white = Color::white(), yellow = Color::yellow();
     text_passes_.begin();
     const PassList* p = pl();
@@ -773,11 +777,11 @@ HeardView::HeardView(GpsView& main, Rect r)
     : View{r},
       main_{main},
       field_depth_{{UI_POS_X(0), 0}, 10, {{"Quick 10ms", 0}, {"Deep 20ms", 1}}},
-      button_search_{{UI_POS_X(17), 0, UI_POS_WIDTH(7), UI_POS_HEIGHT(1)}, "Search"},
-      button_stop_{{UI_POS_X(24), 0, UI_POS_WIDTH(6), UI_POS_HEIGHT(1)}, "Stop"},
-      text_status_{{0, UI_POS_Y(1), UI_POS_MAXWIDTH, UI_POS_HEIGHT(kStatusRows)}, status_, kStatusRows, &ui::font::fixed_8x16},
-      text_list_{{0, UI_POS_Y(3) + 2, 118, 8 * kListRows}, list_, kListRows, &ui::font::fixed_5x8},
-      sky_{{120, UI_POS_Y(3) + 2, 120, 120}, "Heard"} {
+      button_search_{{UI_POS_X(16), 0, UI_POS_WIDTH(7), 24}, "Search"}, /* one column apart from Stop */
+      button_stop_{{UI_POS_X(24), 0, UI_POS_WIDTH(6), 24}, "Stop"},
+      text_status_{{0, 26, UI_POS_MAXWIDTH, UI_POS_HEIGHT(kStatusRows)}, status_, kStatusRows, &ui::font::fixed_8x16},
+      text_list_{{0, UI_POS_Y(3) + 12, 118, 8 * kListRows}, list_, kListRows, &ui::font::fixed_5x8},
+      sky_{{120, UI_POS_Y(3) + 12, 120, 120}, "Heard"} {
     add_children({&field_depth_, &button_search_, &button_stop_, &text_status_, &text_list_, &sky_});
     button_stop_.on_select = [this](Button&) {
         if (main_.job_ != GpsView::JOB_AUTO) main_.stop_search(); /* Autonomous: stopped on the Fix tab */
@@ -859,14 +863,15 @@ void HeardView::show_tracking() {
         Fmt f{b, sizeof(b)};
         f.c('G').d2(c.prn).c(' ');
         Color col = white;
+        const bool ever = (c.flags & gps_trk::F_EVER) != 0; /* verified since the hand-over */
         if (c.state == gps_trk::TRK_SEARCH) {
-            f.s("lost: searching");
+            f.s(ever ? "lost: searching" : ((c.flags & gps_trk::F_AIDED) ? "rising: searching" : "verifying: search"));
             col = yellow;
         } else if (c.state == gps_trk::TRK_FAILED) {
-            f.s("lost");
+            f.s(c.flags & gps_trk::F_RELEASED ? "not verified: freed" : "lost");
             col = grey;
         } else if (c.state == gps_trk::TRK_PULLIN) {
-            f.s("pull-in");
+            f.s(ever ? "pull-in" : "verifying");
             col = yellow;
         } else {
             f.u((c.cn0_x10 + 5u) / 10u).s("  ");
@@ -1029,7 +1034,9 @@ void HeardView::show() {
     for (size_t k = 0; k < n && k < kListRows; k++) {
         const auto& r = main_.results_[order[k]];
         Fmt f{b, sizeof(b)};
-        f.c('G').d2(r.prn).c(' ');
+        f.c('G').d2(r.prn);
+        if (!main_.req_confirm_) f.c('?'); /* detected once (Autonomous): the tracking list says if verified */
+        f.c(' ');
         int bars = static_cast<int>((r.cn0 - 32.0f) / 1.5f);
         if (bars < 1) bars = 1;
         if (bars > 10) bars = 10;
@@ -1038,7 +1045,7 @@ void HeardView::show() {
         const int32_t dop = static_cast<int32_t>(std::lround(r.doppler / 100.0f));
         if (dop >= 0) f.c('+');
         f.fixed(dop, 1).c('k');
-        text_list_.set(k, b, r.cn0 >= 38 ? Color::green() : white);
+        text_list_.set(k, b, !main_.req_confirm_ ? Color::yellow() : (r.cn0 >= 38 ? Color::green() : white));
         list_prn_[k] = static_cast<uint8_t>(order[k] + 1);
         if (main_.sel_kind_ == GpsView::SEL_GPS && main_.sel_idx_ == order[k]) text_list_.set_highlight(static_cast<int>(k));
     }
@@ -1089,11 +1096,18 @@ FixView::FixView(GpsView& main, Rect r)
     : View{r},
       main_{main},
       field_method_{{UI_POS_X(0), 0}, 10, {{"Snapshot", 0}, {"Autonomous", 1}}},
-      button_fix_{{UI_POS_X(0), UI_POS_Y(1), UI_POS_WIDTH(14), UI_POS_HEIGHT(1)}, "Get fix"},
-      button_save_{{UI_POS_X(16), UI_POS_Y(1), UI_POS_WIDTH(14), UI_POS_HEIGHT(1)}, "Save pos"},
-      text_{{0, UI_POS_Y(2) + 4, UI_POS_MAXWIDTH, UI_POS_HEIGHT(kRows)}, lines_, kRows, &ui::font::fixed_8x16} {
-    add_children({&field_method_, &check_log_, &button_fix_, &button_save_, &text_});
+      button_fix_{{UI_POS_X(0), 26, UI_POS_WIDTH(14), 24}, "Get fix"},
+      button_save_{{UI_POS_X(16), 26, UI_POS_WIDTH(14), 24}, "Save pos"},
+      button_clock_{{UI_POS_X(19), 0, UI_POS_WIDTH(11), 24}, "Set clock"},
+      text_{{0, 54, UI_POS_MAXWIDTH, UI_POS_HEIGHT(kRows)}, lines_, kRows, &ui::font::fixed_8x16} {
+    add_children({&field_method_, &check_log_, &button_clock_, &button_fix_, &button_save_, &text_});
     check_log_.set_value(main_.log_on_ != 0);
+    button_clock_.on_select = [this](Button&) {
+        main_.set_clock_from_gps();
+        save_msg_ = main_.gps_time_ok_ ? "Clock set from GPS time" : "Set clock: no GPS time yet";
+        save_color_ = main_.gps_time_ok_ ? Color::green() : Color::yellow();
+        show();
+    };
     check_log_.on_select = [this](Checkbox&, bool v) {
         main_.log_on_ = v ? 1 : 0; /* the file opens / closes in the frame handler */
     };
@@ -1371,8 +1385,11 @@ void FixView::show_auto() {
         const int64_t t = static_cast<int64_t>(std::floor(u));
         const int32_t sod = static_cast<int32_t>(((t % 86400) + 86400) % 86400);
         Fmt f{b, sizeof(b)};
-        f.s("GPS time ").d2(sod / 3600).c(':').d2(sod / 60 % 60).c(':').d2(sod % 60).s(" UTC");
-        text_.set(6, b, grey);
+        f.s("GPS ").d2(sod / 3600).c(':').d2(sod / 60 % 60).c(':').d2(sod % 60).s(" UTC clock ");
+        const int32_t off = static_cast<int32_t>(std::lround(-main_.gps_off_s_ * 10.0)); /* RTC - GPS, 0.1 s */
+        if (off >= 0) f.c('+');
+        f.fixed(off, 1).c('s');
+        text_.set(6, b, (off > 20 || off < -20) ? yellow : grey);
     }
     if (main_.mem_ && main_.mem_->pvt_fix.ok && main_.mem_->pvt_fix.vel_ok) {
         const PvtSolution& p = main_.mem_->pvt_fix;
@@ -1605,7 +1622,7 @@ void SatView::refresh() {
         return;
     }
     const bool tle = main_.sel_kind_ == GpsView::SEL_TLE;
-    const double t = main_.now_unix();
+    const double t = main_.now_best();
     main_.sel_name(b, sizeof(b));
     text_top_.set(0, b, Color::cyan());
     double az = 0, az30 = 0;
@@ -1785,9 +1802,9 @@ GpsView::GpsView(NavigationView& nav, uint32_t reselect)
           {"Passes", Theme::getInstance()->fg_yellow->foreground, &view_passes_}} {
     baseband::run_image(portapack::spi_flash::image_tag_gps_rx);
 
-    add_children({&labels_, &field_lna_, &field_vga_, &field_amp_, &text_ant_, &text_warn_,
+    add_children({&labels_, &field_lna_, &field_vga_, &field_amp_, &text_ant_,
                   &tab_view_, &view_fix_, &view_heard_, &view_passes_});
-    tab_view_.set_parent_rect({0, UI_POS_Y(2), screen_width, 24});
+    tab_view_.set_parent_rect({0, UI_POS_Y(1), screen_width, 24});
 
     if (!settings_.loaded()) { /* an active antenna gives plenty: moderate gains */
         receiver_model.set_rf_amp(false);
@@ -1863,6 +1880,38 @@ double GpsView::now_unix() const {
     rtc::RTC raw;
     rtcGetTime(&RTCD1, &raw);
     return static_cast<double>(rtc_time::rtcToUnixUTC(raw)) - utc_off_min_ * 60.0;
+}
+
+/* "Set clock": the user asked for the RTC to follow GPS time. It is written
+ * from the frame handler at the next whole second (within ~0.1 s), as local
+ * time = UTC + Zone, which is what now_unix() reads back. */
+void GpsView::set_clock_from_gps() {
+    if (!gps_time_ok_) {
+        clock_msg_ = -1;
+        return;
+    }
+    clock_set_pending_ = true;
+}
+
+void GpsView::clock_step() {
+    if (!clock_set_pending_) return;
+    const double best = now_best();
+    const double frac = best - std::floor(best);
+    if (frac > 0.1) return; /* frames come every ~17 ms: wait for the second boundary */
+    clock_set_pending_ = false;
+    const double rtc_before = now_unix();
+    const int64_t t = static_cast<int64_t>(std::floor(best));
+    const int64_t loc = t + static_cast<int64_t>(utc_off_min_) * 60;
+    int32_t y, mo, d;
+    civil_from_days(static_cast<int32_t>((loc >= 0 ? loc : loc - 86399) / 86400), y, mo, d);
+    const int32_t sod = static_cast<int32_t>(((loc % 86400) + 86400) % 86400);
+    rtc::RTC dt{static_cast<uint32_t>(y), static_cast<uint32_t>(mo), static_cast<uint32_t>(d),
+                static_cast<uint32_t>(sod / 3600), static_cast<uint32_t>(sod / 60 % 60), static_cast<uint32_t>(sod % 60)};
+    rtcSetTime(&RTCD1, &dt);
+    /* the GPS time does not move: the offset now refers to the new clock */
+    gps_off_s_ = (rtc_before + gps_off_s_) - static_cast<double>(t);
+    clock_msg_ = 1;
+    log_clock_set(rtc_before, t);
 }
 
 double GpsView::local_unix() const {
@@ -1961,12 +2010,12 @@ void GpsView::request_search(Job job, uint8_t k_ms) {
 void GpsView::geo_restart() {
     geo_idx_ = 0;
     geo_active_ = mem_ && pos_valid_ && !loading();
-    geo_started_ = static_cast<uint32_t>(now_unix());
+    geo_started_ = static_cast<uint32_t>(now_best());
 }
 
 void GpsView::geo_step() {
     if (!geo_active_ || !mem_) return;
-    const double t = now_unix();
+    const double t = now_best();
     if (geo_idx_ < 32) {
         const Orbit& o = mem_->orbits[geo_idx_];
         SatGeo& g = mem_->geo[geo_idx_];
@@ -2022,8 +2071,13 @@ bool GpsView::start_search(Job job, uint8_t k_ms, bool force_full) {
     /* Autonomous: the fast refine (Doppler only): the hand-over is ~10 s younger on the
      * device, and the coarse fix it also feeds is almanac-limited (~1 km) anyway */
     m.refine = job == JOB_AUTO ? 2 : (job == JOB_FIX ? 1 : 0);
-    m.confirm = 1; /* a PRN is reported only if a second snapshot confirms it */
-    m.track = job == JOB_AUTO; /* the confirmed PRNs go straight to the tracking loops */
+    /* Heard / Fix: a PRN is reported only if a second snapshot confirms it.
+     * Autonomous: no second snapshot (~6 s sooner); the detections go straight to
+     * the tracking loops, which verify them (1 s of phase lock at >= 28 dB-Hz, or
+     * bit sync) and give back within 10 s a channel that never verifies. */
+    m.confirm = job == JOB_AUTO ? 0 : 1;
+    req_confirm_ = m.confirm != 0;
+    m.track = job == JOB_AUTO;
     m.max_ch = 8;              /* M4: ~60 % with 8 channels (notes, gps-autonomous) */
     int nprn = 0;
     if (!force_full && assisted_possible() && geo_ready_) {
@@ -2136,7 +2190,7 @@ void GpsView::on_status(const GpsRxStatusMessage& m) {
         log_results(results_, m.k_ms);
         if (job_ == JOB_FIX || job_ == JOB_AUTO) solve_pending_ = pos_valid_ && (n_alm_ || n_eph_); /* Autonomous: the coarse fix first */
         if (mem_ && results_) {
-            const uint32_t t = static_cast<uint32_t>(now_unix());
+            const uint32_t t = static_cast<uint32_t>(now_best());
             for (int p = 0; p < 32; p++)
                 if (results_[p].detected) {
                     mem_->heard_at[p] = t;
@@ -2274,7 +2328,7 @@ void GpsView::finish_solve() {
 void GpsView::auto_poll_m4() {
     if (!mem_ || !trk_sh_) return;
     AutoState& a = mem_->autos;
-    const int32_t week_hint = static_cast<int32_t>(now_gps() / kWeekS);
+    const int32_t week_hint = nav::week_floor(static_cast<int32_t>(now_gps() / kWeekS)); /* a wrong RTC: see week_floor */
     bool new_eph = false;
     const gps_trk::Shared* sh = trk_sh_;
     bool newmeas;
@@ -2341,9 +2395,11 @@ void GpsView::auto_poll_m4() {
                 const double t = wk * kWeekS + a.meas.ch[i].tx_ms * 1e-3 + 0.075;
                 gps_off_s_ = t - unix_to_gps(now_unix());
                 gps_time_ok_ = true;
+                log_clock("tow");
                 break;
             }
     }
+    if (newmeas) auto_aided_step();
     if (!newmeas || solving() || solve_pending_) return;
     /* a PVT: precise with >= 4 ephemerides, else coarse with almanac orbits */
     const int32_t week = a.week > 0 ? a.week : week_hint;
@@ -2366,6 +2422,7 @@ void GpsView::auto_poll_m4() {
     solve_pvt_trx_ = auto_t_rx_guess(a, n);
     solve_prior_ = (fix_ok_ ? fix_.pos : (pos_valid_ ? rx_ : Vec3{0, 0, 0}));
     solve_kind_ = 1;
+    solve_sample_ = a.meas.sample;
     a.pvt.cancel = 0;
     log_solve_start(eph_only ? 2 : 1);
     solver_done_ = false;
@@ -2374,6 +2431,65 @@ void GpsView::auto_poll_m4() {
         solve_kind_ = 0;
         log_error("solver thread", "no heap: PVT skipped");
     }
+}
+
+/* Newly risen satellites while tracking: every 5 s, if a channel (or the one
+ * extra search slot) is free, the highest satellite above 10 deg that has no
+ * channel gets an aided search: code phase and Doppler predicted from its orbit,
+ * the last fix (position, GPS time at its sample) and the receiver clock's
+ * frequency term (median of measured - predicted Doppler of the tracked ones). */
+void GpsView::auto_aided_step() {
+    if (!mem_ || !trk_sh_ || !fix_have_time_ || !geo_ready_ || !fix_ok_) return;
+    if (++aided_tick_ < kAidedEvery) return;
+    aided_tick_ = 0;
+    for (auto& w : aided_wait_)
+        if (w) w--;
+    const AutoState& a = mem_->autos;
+    const uint64_t age = a.meas.sample > fix_sample_ ? a.meas.sample - fix_sample_ : 0;
+    constexpr uint64_t kFsHz = 2048000;
+    if (age > 12u * kFsHz) return; /* the sample clock drifts ~0.5 us/s against GPS time: a recent fix */
+    bool busy[32]{};
+    float diffs[gps_trk::kMaxCh];
+    int nd = 0, free = 0;
+    for (int i = 0; i < gps_trk::kMaxCh; i++) {
+        const gps_trk::ChInfo& c = a.ch[i];
+        const bool on = c.prn && c.state != gps_trk::TRK_IDLE && c.state != gps_trk::TRK_FAILED;
+        if (on) busy[c.prn - 1] = true;
+        if (!on && i <= 8) free++; /* the 8 channels and the extra search slot */
+        if (on && c.state == gps_trk::TRK_TRACK && (c.flags & gps_trk::F_VERIFIED)) {
+            const SatGeo& g = mem_->geo[c.prn - 1];
+            diffs[nd++] = c.doppler_hz + g.rr * static_cast<float>(1575.42e6 / kC);
+        }
+    }
+    if (!free || !nd) return;
+    for (int x = 1; x < nd; x++)
+        for (int y = x; y > 0 && diffs[y] < diffs[y - 1]; y--) std::swap(diffs[y], diffs[y - 1]);
+    const double clk = diffs[nd / 2];
+    int best = -1;
+    for (int p = 0; p < 32; p++) {
+        const SatGeo& g = mem_->geo[p];
+        const Orbit& o = mem_->orbits[p];
+        if (busy[p] || aided_wait_[p] || !o.valid || o.health || g.el < kAidedMinEl) continue;
+        if (best < 0 || g.el > mem_->geo[best].el) best = p;
+    }
+    if (best < 0) return;
+    const Orbit& o = mem_->orbits[best];
+    double code = 0, dop = 0;
+    auto_predict(o, fix_.pos, fix_trx_, &code, &dop);
+    const bool eph = o.ephemeris != 0;
+    int win = auto_aided_windows(eph, eph ? 0.0 : alm_age_days());
+    if (fix_mode_ != FIX_PRECISE) win += 3; /* a coarse fix: ~1 km */
+    win += static_cast<int>(age / (10u * kFsHz)); /* clock drift since the fix: ~1 window per 10 s */
+    GpsRxConfigMessage m;
+    m.cmd = GpsRxConfigMessage::CMD_ADD;
+    m.add_prn = static_cast<uint8_t>(best + 1);
+    m.add_windows = static_cast<uint8_t>(win);
+    m.add_code = static_cast<float>(code);
+    m.add_doppler = static_cast<float>(dop + clk);
+    m.add_at = fix_sample_;
+    baseband::gps_rx_config(m);
+    aided_wait_[best] = kAidedRetry;
+    log_aided(best + 1, mem_->geo[best].el, code, dop + clk, clk, win, static_cast<uint32_t>(age * 1000u / kFsHz), eph);
 }
 
 void GpsView::auto_finish_pvt() {
@@ -2389,6 +2505,9 @@ void GpsView::auto_finish_pvt() {
     /* a coarse (almanac) PVT never replaces a precise fix */
     if (!solve_pvt_eph_ && fix_ok_ && fix_mode_ == FIX_PRECISE) return;
     mem_->pvt_fix = p;
+    fix_sample_ = solve_sample_;
+    fix_trx_ = p.t_rx;
+    fix_have_time_ = true;
     fix_ok_ = true;
     fix_tried_ = true;
     fix_.pos = p.pos;
@@ -2408,6 +2527,7 @@ void GpsView::auto_finish_pvt() {
     /* GPS time from the solution (the measurement is < ~1 s old: within the RTC's 1 s anyway) */
     gps_off_s_ = p.t_rx - unix_to_gps(now_unix());
     gps_time_ok_ = true;
+    log_clock("pvt");
     view_fix_.show();
 }
 
@@ -2473,6 +2593,7 @@ void GpsView::auto_cache_step() {
 
 void GpsView::on_frame() {
     log_frame(); /* the diagnostics log: rows, card writes (sector-bounded), sync */
+    clock_step(); /* "Set clock" pending: the RTC at the next second boundary */
     /* the selected tab's content is refreshed when it becomes visible */
     const uint32_t sel = tab_view_.selected();
     if (sel != tab_shown_) {
@@ -2550,7 +2671,7 @@ void GpsView::select(uint8_t kind, uint8_t idx) {
     SatSource src;
     if (mem_) mem_->track.clear();
     if (sel_kind_ != SEL_NONE && pos_valid_ && sel_source(src))
-        mem_->track.start(src, obs_, now_unix(), sel_kind_ == SEL_TLE);
+        mem_->track.start(src, obs_, now_best(), sel_kind_ == SEL_TLE);
     view_passes_.update_sky();
     view_heard_.show();
 }
@@ -2582,6 +2703,7 @@ bool GpsView::follow() {
     ctx->tle = t;
     ctx->obs = obs_;
     ctx->utc_off_min = utc_off_min_;
+    ctx->clock_corr_s = gps_time_ok_ ? gps_off_s_ : 0.0;
     for (uint8_t k = 0; k < n_freq_ && ctx->n_dl < FollowCtx::kMaxDl; k++)
         if (satfreq_matches(mem_->freq[k], t.catnr, t.name)) ctx->dl[ctx->n_dl++] = mem_->freq[k];
     /* Pop the satellite page, then replace this view: this view's destructor
@@ -2610,19 +2732,17 @@ void GpsView::show_antenna() {
     const int8_t on = (rx_on_ && portapack::get_antenna_bias()) ? 1 : 0;
     if (on == bias_shown_) return;
     bias_shown_ = on;
-    text_ant_.set(on ? "Ant: ON" : "Ant: off");
-    text_warn_.set(on ? "PORT 3.3V ON: active ant only" : "");
-    text_warn_.set_style(Theme::getInstance()->fg_red);
+    text_ant_.set(on ? "Ant: ON" : "Ant: off"); /* the status bar shows it too */
 }
 
 void GpsView::on_tick_second() {
     show_antenna();
     if (mem_ && sel_kind_ != SEL_NONE && mem_->track.ready() && mem_->track.pass().set != 0 &&
-        now_unix() > mem_->track.pass().set + 60.0)
+        now_best() > mem_->track.pass().set + 60.0)
         select(sel_kind_, sel_idx_); /* that pass is over: the next one */
     refresh_orbits();
     view_passes_.refresh();
-    if (!geo_active_ && !loading() && static_cast<uint32_t>(now_unix()) - geo_started_ >= kGeoPeriodS) geo_restart();
+    if (!geo_active_ && !loading() && static_cast<uint32_t>(now_best()) - geo_started_ >= kGeoPeriodS) geo_restart();
     if (++sky_tick_ % 10 == 0) view_passes_.tick(); /* the "in 1h05" countdowns */
     if (sky_tick_ >= 600) {                         /* passes that ended: search again */
         sky_tick_ = 0;

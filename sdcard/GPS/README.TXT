@@ -95,8 +95,8 @@ changes the antenna-power setting, not on entry, not on exit: you do, with
 Mayhem's antenna-power icon in the status bar (or Settings > Radio). Like the
 other receive apps, the GPS app keeps the receiver on while it is open, so
 your setting is applied to the port (an LNA's LED lights) the whole time.
-Top right shows what is applied ("Ant: ON" / "Ant: off") and a red line
-while it is on. Never turn it on with a passive antenna fitted (some are a
+Top right shows what is applied ("Ant: ON" / "Ant: off"), as does Mayhem's
+status-bar icon. Never turn it on with a passive antenna fitted (some are a
 DC short). Use the antenna outdoors with open sky.
 
 Position and time
@@ -127,12 +127,25 @@ ephemerides" while it tracks (each satellite needs about 30 s of clean signal),
 then "PRECISE" (a few metres; "Err est." is an estimate). Keep it outdoors with
 open sky and the active antenna powered. Stop works at any time.
 While it tracks, the app takes GPS time from the satellites (the clock and Zone
-are not needed). Every decoded ephemeris is appended to /GPS/EPH_AIR.TXT (three
+are not needed): from then on passes, the sky and the search use GPS time, so a
+wrong clock cannot block a fix or the predictions. The Fix tab shows it with
+the clock's error ("clock +0.4s" = the PortaPack clock is 0.4 s ahead).
+"Set clock" (Fix tab, top right) writes the PortaPack clock from GPS time with
+your Zone applied, only when you press it (the app never changes the clock by
+itself); without GPS time yet it says so and changes nothing. Every decoded ephemeris is appended to /GPS/EPH_AIR.TXT (three
 lines each; the file restarts when it passes 48 KB); within about 4 hours the
 next start is precise at once. The app never writes EPHEM.RNX: a file you copy
 there is read as before, and per satellite the record closest to now is used.
-The Heard tab shows the tracked satellites: C/N0, L (phase lock), B (bits),
-T (time decoded), E (orbit decoded).
+Autonomous skips the second confirmation snapshot: each detection goes
+straight to a tracking channel (Heard shows it yellow with "?" until then),
+and the loops verify it: a channel that is not phase locked at 28 dB-Hz for a
+second (or bit-synced) within 10 s is freed ("not verified: freed") and
+given to the next detection. Once there is a fix, satellites rising above
+10 degrees get an aided search (code phase and Doppler predicted from the fix
+and the orbits) in a free channel or one extra search slot ("rising:
+searching" on Heard). The Heard tab shows the tracked satellites:
+C/N0, L (phase lock), B (bits), T (time decoded), E (orbit decoded); yellow
+rows are not verified yet ("verifying").
 
 Diagnostics log (Fix tab, "Log" box; a development aid)
 -------------------------------------------------------
@@ -174,7 +187,9 @@ file starts with a header line and one "#TYPE,..." line per row type. Types:
   CH      every second per channel: channel, PRN, state (1 pull-in, 2 track,
           3 lost: searching, 4 given up), loop (0 FLL, 1 PLL wide, 2 PLL narrow,
           3 search), flags (L phase lock, B bit sync, T subframe time,
-          V verified), C/N0 x10, phase lock indicator x100 (cos 2 phi; ~100 =
+          V verified, E verified since the hand-over, R released: never
+          verified, channel freed, A aided search for a newly risen
+          satellite), C/N0 x10, phase lock indicator x100 (cos 2 phi; ~100 =
           locked), Doppler Hz x10, code phase chips x64, code discriminator
           chips x1000 (code lock: near 0), ms in track, bits, parity-good
           words, parity failures, subframes, last TOW s, losses of lock,
@@ -182,11 +197,24 @@ file starts with a header line and one "#TYPE,..." line per row type. Types:
   SR      each search result (after every search): search number, search
           kind, snapshot ms, PRN, searched, detected, seen once only, refined,
           peak/mean x100, threshold x100, C/N0 x10, Doppler Hz, code phase
-          chips x1000, verdict (accepted / rejected: below threshold /
+          chips x1000, verdict (accepted / detected (unconfirmed: the
+          tracker verifies; Autonomous) / rejected: below threshold /
           rejected: 2nd snapshot did not find it / Doppler moved / code phase
           off the prediction) and, when rejected that way, what the 2nd
           snapshot found (peak/mean x100, Doppler Hz, code phase x1000)
   HO      hand-over to tracking: count, age of the search result ms, PRNs
+  CLK     GPS time: event (tow: from the first decoded time, pvt: from a fix,
+          logged once and again when the offset moves by 0.5 s or more; set:
+          the RTC written by "Set clock"), GPS - RTC ms (set: the step written),
+          RTC UTC s, GPS UTC s (set: the value written), Zone minutes
+  ADD     aided search for a newly risen satellite (every 5 s at most, when
+          a channel or the extra search slot is free): PRN, elevation deg,
+          predicted code phase chips x1000, predicted Doppler Hz (with the
+          clock term), the clock term Hz, windows of 15 half chips either side,
+          age of the fix used ms, orbit used (eph / alm), aided starts so far
+  REL     a channel freed because its detection never verified (Autonomous):
+          PRN, ms from its start, releases so far, spare detections started
+          in freed channels so far
   SF      each parity-good subframe: PRN, channel, subframe 1-5, page,
           TOW of its start s, the ten 24-bit data words (hex)
   EPH     decoded / cached events (PRN, subframes held 1+2+4, not yet saved,

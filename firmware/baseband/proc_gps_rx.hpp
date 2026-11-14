@@ -62,8 +62,12 @@ class GpsRxProcessor : public BasebandProcessor {
         uint8_t confirm{1};
         uint8_t track{0};
         uint8_t max_ch{8};
+        uint8_t add_prn{0}, add_windows{0};
+        float add_code{0}, add_doppler{0};
+        uint64_t add_at{0};
     } req_{};
 
+    static constexpr uint32_t kVerifyTimeoutMs = 10000; /* unconfirmed hand-over: verify within 10 s or release */
     static constexpr uint8_t kSettleBuffers = 20; /* 20 ms skipped before a capture: LO / gain settling after enable */
     uint8_t state_{GpsRxStatusMessage::IDLE};
     uint8_t settle_{0};

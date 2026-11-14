@@ -22,6 +22,7 @@
 #include "gps_auto.hpp"
 #include "gps_nav.hpp"
 
+#include <cmath>
 #include <cstring>
 
 namespace ui::external_app::gps {
@@ -194,6 +195,26 @@ int auto_almanac_decode(const AutoState& a, int32_t week_now, AlmRec* recs) {
         n++;
     }
     return n;
+}
+
+void auto_predict(const Orbit& o, const Vec3& rx, double t_rx, double* code_chips, double* doppler_geo_hz) {
+    double t_tx = 0, clk = 0;
+    geometric_range(o, rx, t_rx, &t_tx);
+    sat_position(o, t_tx, &clk);
+    /* the satellite starts a code period at each whole ms of its own clock */
+    const double sv_ms = (t_tx + clk) * 1000.0;
+    *code_chips = (sv_ms - std::floor(sv_ms)) * 1023.0;
+    const double r1 = geometric_range(o, rx, t_rx + 0.5), r0 = geometric_range(o, rx, t_rx - 0.5);
+    *doppler_geo_hz = -(r1 - r0) * (1575.42e6 / kC);
+}
+
+int auto_aided_windows(bool ephemeris, double age_days) {
+    /* ephemeris: metres; almanac: ~1 km fresh, a few km after weeks, plus the
+     * position fix (metres) and the clock (ns): 1 chip = 293 m */
+    const double err_m = ephemeris ? 300.0 : 1500.0 + 500.0 * (age_days > 0 ? age_days : 0.0);
+    const double halfchips = 2.0 * err_m / 293.0;
+    int w = static_cast<int>(std::ceil(halfchips / 15.0));
+    return w < 1 ? 1 : (w > 20 ? 20 : w);
 }
 
 }  // namespace ui::external_app::gps

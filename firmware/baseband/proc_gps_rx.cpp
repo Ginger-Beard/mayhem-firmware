@@ -48,31 +48,24 @@ GpsRxProcessor::GpsRxProcessor() {
 
 void GpsRxProcessor::start_tracking(uint32_t prn_mask) {
     const gps_acq::Result* res = session.results();
-    /* the PRNs to track, strongest first */
-    int order[32];
     int n = 0;
     for (int i = 0; i < 32; i++)
-        if (((prn_mask >> i) & 1u) && res[i].detected && !res[i].once) order[n++] = i;
-    for (int a = 1; a < n; a++)
-        for (int b = a; b > 0 && res[order[b]].cn0 > res[order[b - 1]].cn0; b--) {
-            const int t = order[b];
-            order[b] = order[b - 1];
-            order[b - 1] = t;
-        }
+        if (((prn_mask >> i) & 1u) && res[i].detected && !res[i].once) n++;
     if (!n) return;
     session.stop();
     if (!trk_) trk_ = new (&snapshot) gps_trk::Tracker(&trk_shared, &carrier_table);
     trk_->set_max_active(max_ch_);
+    /* unconfirmed detections (no second snapshot): the loops verify them, and
+     * one that never verifies gives its channel back (to a spare detection) */
+    trk_->params().verify_timeout_ms = req_.confirm ? 0 : kVerifyTimeoutMs;
     /* code phases refer to the first sample of the result snapshot; samples_
      * is the index of the next buffer's first sample (put() got samples_ / fs
      * after this buffer was counted) */
     const uint64_t now = samples_;
     const uint64_t at = static_cast<uint64_t>(std::llround(session.t_results() * gps_acq::kFs)) - gps_acq::kN;
-    trk_->reset(now);
+    trk_->handover(res, prn_mask, at, now);
     trk_shared.handover_age_ms = static_cast<uint32_t>((now - at) * 1000u / gps_acq::kFs);
     trk_shared.handovers++;
-    for (int k = 0; k < n && k < trk_->max_active(); k++)
-        trk_->start(order[k] + 1, res[order[k]].code_phase, res[order[k]].doppler, at, now);
     trk_->publish();
     trk_cycles_sum_ = trk_cycles_max_ = trk_buffers_ = 0;
     state_ = GpsRxStatusMessage::TRACKING;
@@ -95,6 +88,14 @@ void GpsRxProcessor::apply() {
         session.stop();
         state_ = GpsRxStatusMessage::IDLE;
         send_status();
+        return;
+    }
+    if (req_.cmd == GpsRxConfigMessage::CMD_ADD) { /* the loops keep running */
+        if (trk_ && req_.add_prn >= 1 && req_.add_prn <= 32) {
+            /* apply() runs before this buffer goes to the loops: it starts at samples_ - kN */
+            trk_->start_aided(req_.add_prn, req_.add_code, req_.add_doppler, req_.add_at, samples_ - gps_acq::kN, req_.add_windows);
+            trk_->publish();
+        }
         return;
     }
     max_ch_ = req_.max_ch ? req_.max_ch : 8;
@@ -232,6 +233,16 @@ void GpsRxProcessor::execute(const buffer_c8_t& buffer) {
 void GpsRxProcessor::on_message(const Message* const message) {
     if (message->id == Message::ID::GpsRxConfig) {
         const auto& m = *reinterpret_cast<const GpsRxConfigMessage*>(message);
+        if (m.cmd == GpsRxConfigMessage::CMD_ADD) { /* only the aided-search fields: the search settings stay */
+            req_.cmd = m.cmd;
+            req_.add_prn = m.add_prn;
+            req_.add_windows = m.add_windows;
+            req_.add_code = m.add_code;
+            req_.add_doppler = m.add_doppler;
+            req_.add_at = m.add_at;
+            pending_ = true;
+            return;
+        }
         req_.cmd = m.cmd;
         req_.k_ms = m.k_ms;
         req_.half_bins = m.half_bins;

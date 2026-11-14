@@ -396,6 +396,10 @@ struct LoopParams {
     float fll_assist{3.0f};   /* Hz, FLL assist while wide */
     float dll_bn{0.5f};       /* Hz, steady */
     float dll_bn_wide{2.0f};
+    /* > 0: a channel that has never verified (1 s of PLL lock at >= 28 dB-Hz) nor
+     * found bit sync this long after its start is given up (TRK_FAILED +
+     * F_RELEASED): the hand-over of an unconfirmed detection (Autonomous) */
+    uint32_t verify_timeout_ms{0};
 };
 
 class Channel {
@@ -432,6 +436,8 @@ class Channel {
         prn_ = static_cast<uint8_t>(prn);
         lp_ = lp;
         reacq_ = 0;
+        ever_ok_ = released_ = rel_reported_ = false;
+        aided_ = false;
         double h = code_phase_chips * 2.0;
         h = std::fmod(h, static_cast<double>(kHalfChips));
         if (h < 0) h += kHalfChips;
@@ -490,6 +496,9 @@ class Channel {
         if (bit_edge_ >= 0) f |= F_BIT;
         if (tsync_) f |= F_FRAME;
         if (verified_) f |= F_VERIFIED;
+        if (ever_ok_) f |= F_EVER;
+        if (released_) f |= F_RELEASED;
+        if (aided_) f |= F_AIDED;
         return f;
     }
     float cn0() const { return cn0_; }
@@ -503,6 +512,28 @@ class Channel {
     }
     uint32_t epochs() const { return epochs_; }
     uint32_t track_ms() const { return track_ms_; }
+    bool released() const { return released_; }
+    bool aided() const { return aided_; }
+    /* A newly risen satellite: search windows of 15 half chips around the
+     * predicted code phase (+-wmax windows) and +-500 Hz around the predicted
+     * Doppler; found -> pull-in and tracking as usual, else given up after
+     * kSearchGiveUpMs. Never released by the verification timeout while it
+     * searches (that is for hand-overs of unconfirmed detections). */
+    void start_aided(int prn, double code_phase_chips, float doppler_hz, const LoopParams& lp, int wmax) {
+        start(prn, code_phase_chips, doppler_hz, lp);
+        lp_.verify_timeout_ms = 0;
+        aided_ = true;
+        good_freq_ = doppler_hz;
+        lost();
+        reacq_ = 0;
+        s_wmax_ = static_cast<uint8_t>(wmax < 0 ? 0 : (wmax > 40 ? 40 : wmax));
+    }
+    /* true once per release (the tracker reports it, then may reuse the slot) */
+    bool take_release() {
+        if (!released_ || rel_reported_) return false;
+        rel_reported_ = true;
+        return true;
+    }
     /* test access */
     double code_phase_halfchips() const { return m_ + f_ / 4294967296.0; }
     int bit_edge() const { return bit_edge_; }
@@ -559,6 +590,9 @@ class Channel {
     int cn0_wins_{0};
     uint32_t verify_ms_{0};
     bool verified_{false};
+    bool ever_ok_{false};      /* verified or bit-synced since start() */
+    bool released_{false};     /* given up unverified (LoopParams::verify_timeout_ms) */
+    bool rel_reported_{false};
     float good_freq_{0};
     /* bit sync and bits */
     uint16_t hist_[20]{};
@@ -579,6 +613,10 @@ class Channel {
     float cell_[kSearchCode * kSearchDop * 3]{};
     int s_cell_{0}, s_k_{0};
     int s_off_{0}; /* half chips currently applied */
+    int s_base_{0};      /* centre of the current window, half chips from the start position */
+    uint8_t s_win_{0};   /* aided search: window index (0, +1, -1, +2, -2 ...) */
+    uint8_t s_wmax_{0};  /* aided search: windows either side (0: the local search of a lost channel) */
+    bool aided_{false};  /* started by start_aided(): a newly risen satellite, searched around a prediction */
     float s_f0_{0};
     uint32_t s_ms_{0};
     uint16_t sweeps_{0};  /* diagnostics */
@@ -851,6 +889,15 @@ inline void Channel::epoch_end(Shared* sh, int ch) {
         track_epoch(ip, qp, id, qd, valid, sh, ch);
     }
     epochs_++;
+    if (lp_.verify_timeout_ms && !ever_ok_) {
+        if (verified_ || bit_edge_ >= 0)
+            ever_ok_ = true;
+        else if (epochs_ > lp_.verify_timeout_ms && state_ != TRK_IDLE && state_ != TRK_FAILED) {
+            state_ = TRK_FAILED; /* a false detection must not hold a channel */
+            released_ = true;
+        }
+    } else if (!ever_ok_ && (verified_ || bit_edge_ >= 0))
+        ever_ok_ = true;
 }
 
 inline void Channel::epoch_skipped(Shared* sh, int ch) {
@@ -872,6 +919,8 @@ inline void Channel::lost() {
     s_cell_ = 0;
     s_k_ = 0;
     s_off_ = 0;
+    s_base_ = 0;
+    s_win_ = s_wmax_ = 0;
     s_ms_ = 0;
     for (auto& c : cell_) c = 0;
     /* first cell: code offset -6 half chips, Doppler f0 - 500 */
@@ -895,7 +944,7 @@ inline void Channel::search_epoch(float ie, float qe, float ip, float qp, float 
     const int ncell = kSearchCode * kSearchDop;
     if (++s_cell_ < ncell) {
         const int ci = s_cell_ % kSearchCode, di = s_cell_ / kSearchCode;
-        const int off = (ci - kSearchCode / 2) * 3;
+        const int off = s_base_ + (ci - kSearchCode / 2) * 3;
         shift_code(off - s_off_);
         s_off_ = off;
         freq_ = s_f0_ + (di - kSearchDop / 2) * 250.0f;
@@ -913,7 +962,7 @@ inline void Channel::search_epoch(float ie, float qe, float ip, float qp, float 
     const int bc = best / 3, tap = best % 3;
     if (mean > 0 && cell_[best] / mean > kSearchThr) {
         const int ci = bc % kSearchCode, di = bc / kSearchCode;
-        const int off = (ci - kSearchCode / 2) * 3 + (tap == 0 ? 1 : tap == 2 ? -1 : 0); /* early tap = replica + 1 half chip */
+        const int off = s_base_ + (ci - kSearchCode / 2) * 3 + (tap == 0 ? 1 : tap == 2 ? -1 : 0); /* early tap = replica + 1 half chip */
         shift_code(off - s_off_);
         restart(s_f0_ + (di - kSearchDop / 2) * 250.0f);
         return;
@@ -922,11 +971,17 @@ inline void Channel::search_epoch(float ie, float qe, float ip, float qp, float 
         state_ = TRK_FAILED;
         return;
     }
-    /* again (the code phase keeps running at the last Doppler) */
+    /* again (the code phase keeps running at the last Doppler); an aided search
+     * moves to the next window of 15 half chips: 0, +1, -1, +2, -2 ... +-s_wmax_ */
     if (sweeps_ < 65535) sweeps_++;
     for (auto& c : cell_) c = 0;
     s_cell_ = 0;
-    const int off = (0 - kSearchCode / 2) * 3;
+    if (s_wmax_) {
+        if (++s_win_ > 2 * s_wmax_) s_win_ = 0;
+        const int k = (s_win_ + 1) / 2;
+        s_base_ = (s_win_ & 1u) ? k * kSearchCode * 3 : -k * kSearchCode * 3;
+    }
+    const int off = s_base_ + (0 - kSearchCode / 2) * 3;
     shift_code(off - s_off_);
     s_off_ = off;
     freq_ = s_f0_ - 500.0f;
@@ -1219,6 +1274,66 @@ class Tracker {
         for (auto& c : ch_)
             if (c.prn() == prn) c.stop();
     }
+    /* PGPR's hand-over of a search result: the detected PRNs strongest first
+     * into the channels; the rest wait as spares and take channels that fail
+     * later (released unverified detections, or satellites given up). Code
+     * phases refer to sample `at`; `now` is the next buffer's first sample.
+     * Returns the number of detections. */
+    int handover(const gps_acq::Result* res, uint32_t prn_mask, uint64_t at, uint64_t now) {
+        int order[32];
+        int n = 0;
+        for (int i = 0; i < 32; i++)
+            if (((prn_mask >> i) & 1u) && res[i].detected && !res[i].once) order[n++] = i;
+        for (int a = 1; a < n; a++)
+            for (int b = a; b > 0 && res[order[b]].cn0 > res[order[b - 1]].cn0; b--) {
+                const int t = order[b];
+                order[b] = order[b - 1];
+                order[b - 1] = t;
+            }
+        reset(now);
+        n_spare_ = next_spare_ = 0;
+        spare_at_ = at;
+        for (int k = 0; k < n; k++) {
+            const gps_acq::Result& r = res[order[k]];
+            if (k < max_active_)
+                start(order[k] + 1, r.code_phase, r.doppler, at, now);
+            else {
+                Spare& s = spare_[n_spare_++];
+                s.prn = static_cast<uint8_t>(order[k] + 1);
+                s.code_phase = r.code_phase;
+                s.doppler = r.doppler;
+            }
+        }
+        return n;
+    }
+    int spares_left() const { return n_spare_ - next_spare_; }
+    /* A search for a newly risen satellite (the app predicts code phase at
+     * sample `at` and Doppler from the fix and the orbits): a free channel among
+     * the first max_active, else the one extra search slot (index max_active:
+     * at most one aided search beyond the channel count, ~15k cycles per ms).
+     * Returns the channel or -1 (busy, or the PRN already has a channel). */
+    int start_aided(int prn, double code_phase_chips, double doppler_hz, uint64_t at, uint64_t now, int wmax) {
+        int slot = -1;
+        const int lim = max_active_ < kMaxCh ? max_active_ + 1 : kMaxCh;
+        for (int i = 0; i < lim; i++) {
+            const auto st = ch_[i].state();
+            if (ch_[i].prn() == prn && st != TRK_IDLE && st != TRK_FAILED) return -1;
+            if (slot < 0 && (st == TRK_IDLE || st == TRK_FAILED) && (i < max_active_ || !extra_busy())) slot = i;
+        }
+        if (slot < 0) return -1;
+        const double dt = (static_cast<double>(now) - static_cast<double>(at)) / kFs;
+        const double cp = code_phase_chips + dt * kChip * (1.0 + doppler_hz / kL1);
+        ch_[slot].start_aided(prn, cp, static_cast<float>(doppler_hz), lp_, wmax);
+        if (active_ == 0) next_ = now;
+        sh_->aided_starts = static_cast<uint16_t>(sh_->aided_starts + 1);
+        return slot;
+    }
+    /* the extra slot is taken (by an aided search or the satellite it found) */
+    bool extra_busy() const {
+        if (max_active_ >= kMaxCh) return true;
+        const auto st = ch_[max_active_].state();
+        return st != TRK_IDLE && st != TRK_FAILED;
+    }
     /* One DMA buffer: n == kBufN samples starting at absolute sample `at`.
      * A jump of `at` (missed buffers) is propagated first. */
     void process(const int8_t* iq, uint64_t at) {
@@ -1232,6 +1347,7 @@ class Tracker {
         if (at / kFs != last_meas_s_) {
             last_meas_s_ = at / kFs;
             measure(at);
+            releases_and_refill(at);
         }
         int n_on = 0, n_used = 0;
         nbuf_++;
@@ -1288,6 +1404,45 @@ class Tracker {
     uint64_t next_{0};
     uint64_t last_meas_s_{~0ull};
     uint32_t nbuf_{0};
+    struct Spare {
+        uint8_t prn;
+        float code_phase, doppler;
+    };
+    static constexpr uint64_t kSpareMaxAge = 60ull * kFs;
+    Spare spare_[32]{};
+    uint8_t n_spare_{0}, next_spare_{0};
+    uint64_t spare_at_{0};
+
+    /* once a second: report released channels, then give failed channels to
+     * the spare detections (their code phase propagated from the search) */
+    void releases_and_refill(uint64_t now) {
+        for (int i = 0; i < kMaxCh; i++)
+            if (ch_[i].take_release()) {
+                const uint16_t k = sh_->released;
+                sh_->rel_prn[k & 7u] = ch_[i].prn();
+                const uint32_t ms = ch_[i].epochs();
+                sh_->rel_ms[k & 7u] = static_cast<uint16_t>(ms > 65535u ? 65535u : ms);
+                sh_->released = static_cast<uint16_t>(k + 1);
+            }
+        if (now - spare_at_ > kSpareMaxAge) next_spare_ = n_spare_; /* too old to propagate: a new search finds them */
+        while (next_spare_ < n_spare_) {
+            bool busy = false; /* never two channels on one PRN */
+            const Spare& s = spare_[next_spare_];
+            for (int i = 0; i < kMaxCh; i++)
+                if (ch_[i].prn() == s.prn && ch_[i].state() != TRK_IDLE && ch_[i].state() != TRK_FAILED) busy = true;
+            if (busy) {
+                next_spare_++;
+                continue;
+            }
+            int free = -1;
+            for (int i = 0; i < max_active_ && free < 0; i++)
+                if (ch_[i].state() == TRK_IDLE || ch_[i].state() == TRK_FAILED) free = i;
+            if (free < 0) break;
+            start(s.prn, s.code_phase, s.doppler, spare_at_, now);
+            next_spare_++;
+            sh_->refills = static_cast<uint16_t>(sh_->refills + 1);
+        }
+    }
 
     void measure(uint64_t at) {
         const uint32_t seq = sh_->meas_seq;
