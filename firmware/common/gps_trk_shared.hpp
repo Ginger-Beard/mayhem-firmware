@@ -122,6 +122,11 @@ struct Shared {
      * started, ms, and how many hand-overs so far */
     uint32_t handover_age_ms;
     uint32_t handovers;
+    /* input while tracking, one buffer in 64 (diagnostics): AC rms per
+     * component x10 (LSB), DC x10, samples at full scale per mille */
+    uint16_t level_x10;
+    int16_t dc_i_x10, dc_q_x10;
+    uint16_t clip_pm;
 };
 
 }  // namespace gps_trk

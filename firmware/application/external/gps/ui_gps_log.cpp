@@ -95,9 +95,9 @@ void GpsView::log_header() {
         "ms,utc,type,fields (one row type per line below; README.TXT 'Diagnostics log')",
         "#START,fw,lna,vga,amp,ant_bias,zone_min,pos_valid,pos_src,pos_age_s,pos_acc_m,lat_e7,lon_e7,alt_m,alm_n,alm_age_dx10,eph_n,tle_n,rtc_local,rtc_utc,heap_free,scratch,method,tab,file",
         "#SEC,job,done,tracking,search,pgpr_state,level,confirming,done_prn,total_prn,pct,rms_x10,clip_pm,unit_cyc,units,seq,dt_ab_ms,solving,solve_kind,solve_pending,fix_ok,fix_mode,fix_tried,heard,cand,est_m,ttff_s,ttff_coarse_s,tracked,synced,eph,gps_time,gps_off_ms,heap_free,log_rows,log_dropped,log_errs,cached,cache_errs,n_eph,n_alm,ant",
-        "#M4,cyc_avg,cyc_max,buffers,missed,active,handovers,handover_age_ms,sf_write,meas_seq",
+        "#M4,cyc_avg,cyc_max,buffers,missed,active,handovers,handover_age_ms,sf_write,meas_seq,level_x10,dc_i_x10,dc_q_x10,clip_pm",
         "#CH,ch,prn,state,mode,flags,cn0_x10,pld_x100,doppler_x10,code_x64,code_err_x1000,lock_ms,bits,words_ok,parity_errs,subframes,tow,reacq,sweeps,half_fixes",
-        "#SR,seq,search,k_ms,prn,searched,detected,once,refined,metric_x100,thr_x100,cn0_x10,doppler,code_x1000,verdict",
+        "#SR,seq,search,k_ms,prn,searched,detected,once,refined,metric_x100,thr_x100,cn0_x10,doppler,code_x1000,verdict,b_metric_x100,b_doppler,b_code_x1000",
         "#HO,handovers,age_ms,prns",
         "#SF,prn,ch,sfid,page,tow,w1..w10 (24-bit data words hex)",
         "#EPH,event,prn,have,fresh,in_table,toe_age_s,iode",
@@ -244,6 +244,7 @@ void GpsView::log_second() {
         Fmt f = log_row("M4");
         f.c(',').u(sh.cycles_avg).c(',').u(sh.cycles_max).c(',').u(sh.buffers).c(',').u(sh.missed).c(',').u(sh.active);
         f.c(',').u(sh.handovers).c(',').u(sh.handover_age_ms).c(',').u(sh.sf_write).c(',').u(sh.meas_seq);
+        f.c(',').u(sh.level_x10).c(',').d(sh.dc_i_x10).c(',').d(sh.dc_q_x10).c(',').u(sh.clip_pm);
         log_end(f);
     }
     const AutoState& a = mem_->autos;
@@ -322,7 +323,10 @@ void GpsView::log_results(const gps_rx::Result* r, uint8_t k_ms) {
         f.c(',').u(x.searched).c(',').u(x.detected).c(',').u(x.once).c(',').u(x.refined);
         f.c(',').u(static_cast<uint32_t>(x.metric * 100.0f + 0.5f)).c(',').u(k_ms >= 1 && k_ms <= 20 ? kThr100[k_ms - 1] : 0u);
         f.c(',').u(static_cast<uint32_t>(x.cn0 * 10.0f + 0.5f)).c(',').d(static_cast<int32_t>(std::lround(x.doppler))).c(',').u(static_cast<uint32_t>(x.code_phase * 1000.0f));
-        f.s(x.detected ? ",accepted" : (x.once ? ",rejected: not confirmed by the 2nd snapshot" : ",rejected: below threshold"));
+        static const char* const kWhy[4] = {",rejected: not confirmed by the 2nd snapshot", ",rejected: 2nd snapshot did not find it",
+                                            ",rejected: 2nd snapshot Doppler moved > 750 Hz", ",rejected: 2nd snapshot code phase off the prediction"};
+        f.s(x.detected ? ",accepted" : (x.once ? kWhy[x.reject < 4 ? x.reject : 0] : ",rejected: below threshold"));
+        if (x.once) f.c(',').u(static_cast<uint32_t>(x.b_metric * 100.0f + 0.5f)).c(',').d(static_cast<int32_t>(std::lround(x.b_doppler))).c(',').u(static_cast<uint32_t>(x.b_code * 1000.0f));
         log_end(f);
     }
 }

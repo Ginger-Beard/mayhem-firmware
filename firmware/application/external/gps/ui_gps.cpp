@@ -2278,8 +2278,18 @@ void GpsView::auto_poll_m4() {
     bool new_eph = false;
     const gps_trk::Shared* sh = trk_sh_;
     bool newmeas;
-    if (solving()) { /* channels and measurements only */
+    if (solving()) { /* channels and measurements only (the measurement is logged now, solved after) */
         newmeas = false;
+        const uint32_t ms = sh->meas_seq;
+        if (ms && ms != a.meas_seq) {
+            a.meas = sh->meas[(ms - 1) & 1u];
+            if (sh->meas_seq == ms && a.meas.seq == ms) {
+                a.meas_seq = ms;
+                a.have_meas = 1;
+                meas_waiting_ = true;
+                log_meas();
+            }
+        }
         for (int tries = 0; tries < 3; tries++) {
             const uint32_t s1 = sh->ch_seq;
             if (s1 & 1u) continue;
@@ -2293,6 +2303,10 @@ void GpsView::auto_poll_m4() {
             log_eph_event("decoded", prn);
         });
         if (newmeas) log_meas();
+        if (meas_waiting_) { /* copied while the solver ran: solve it now */
+            newmeas = true;
+            meas_waiting_ = false;
+        }
     }
     if (new_eph) { /* off-air ephemerides now in the orbit table */
         int ne = 0;

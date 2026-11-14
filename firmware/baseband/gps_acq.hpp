@@ -654,7 +654,11 @@ class Session {
                 const bool ok = consistent(a_[i], b, dt);
                 r.detected = ok;
                 r.once = !ok;
-                if (!ok) { /* keep A's numbers for display */
+                if (!ok) { /* keep A's numbers for display, B's and the reason for the log */
+                    r.reject = why_not(a_[i], b, dt);
+                    r.b_metric = b.metric;
+                    r.b_doppler = b.doppler;
+                    r.b_code = b.code_phase;
                     r.metric = a_[i].metric;
                     r.doppler = a_[i].doppler;
                     r.code_phase = a_[i].code_phase;
@@ -666,6 +670,12 @@ class Session {
         }
         phase_ = DONE;
         return false;
+    }
+    /* the first rule of consistent() that fails: 1 B not detected, 2 Doppler, 3 code phase */
+    static uint8_t why_not(const Result& a, const Result& b, double dt) {
+        if (!b.detected || dt < 0) return 1;
+        if (std::fabs(b.doppler - a.doppler) > kConfirmDopplerHz) return 2;
+        return 3;
     }
     static bool consistent(const Result& a, const Result& b, double dt) {
         if (!b.detected || dt < 0) return false;
