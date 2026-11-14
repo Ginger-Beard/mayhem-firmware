@@ -4,9 +4,18 @@
 # The first matching rule wins, so the specific Apple rules come first.
 # Add beep=1 to a rule to beep when it is found (with "Beep on drone").
 #
-# Apple Find My, offline finding (AirTag or Find My accessory away from its
-# owner, or near it with the short form): manufacturer data 004C, TLV 0x12.
-BLE,label=Apple Find My,kind=tracker,cid=004C,mfr=12,valid=doc
+# Apple Find My, offline finding: manufacturer data 004C, TLV 0x12. The
+# length byte tells the two forms apart (seen on several units across
+# sessions): 0x19 = the full key, sent once the device has been away from its
+# owner for a while ("separated": an AirTag or accessory that may be
+# travelling with someone else); 0x02 = the short form sent while the owner's
+# phone is near ("nearby": the everyday state of any Find My device, phones
+# and earbuds included). Nearby is kind=beacon, not tracker: it says a Find
+# My device is close by, not that one is following you. Anything else with
+# TLV 0x12 falls through to the generic line.
+BLE,label=FindMy separated,kind=tracker,cid=004C,mfr=1219,valid=real
+BLE,label=FindMy nearby,kind=beacon,cid=004C,mfr=1202,valid=real
+BLE,label=Apple Find My,kind=tracker,cid=004C,mfr=12,valid=real
 # AirTag that was never set up (or was removed from its account): Apple TLV
 # 0x07 length 0x19 "proximity pairing", but not an audio model (AirPods and
 # Beats have prefix byte 01 or a model code whose second byte is 20).

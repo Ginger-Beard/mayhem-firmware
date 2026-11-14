@@ -1,6 +1,7 @@
 # Signature Detect signature class: general interference scan (SCAN lines).
 # Sweeps 30-6000 MHz in 26 MHz windows (320 points 81.5 kHz apart) and HF,
-# 1.5-30 MHz, at 5 kHz points: about 6 s a pass. Reports combs (regular
+# 1.5-30 MHz, at 5 kHz points: about 12.5 s a pass (measured on the device:
+# 10.7 s of windows plus a ~2 s hum check in most passes). Reports combs (regular
 # lines), always-on emissions whose centre moves (drift), broadband rises
 # of the noise floor, and steady emissions modulated by the mains (Hum50 /
 # Hum60: a ~2 s hum check now and then). Other steady carriers, digital
