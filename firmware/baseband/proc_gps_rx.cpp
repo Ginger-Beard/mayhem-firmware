@@ -46,7 +46,9 @@ static gps_acq::Session session{snapshot, acquirer};
 GpsRxProcessor::GpsRxProcessor() {
     CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
     DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
-    last_status_ = DWT->CYCCNT;
+    /* the first status goes out with the first buffer: the app waits for it
+     * after an image switch (Autonomous: the tracking image's CMD_TRACK) */
+    last_status_ = DWT->CYCCNT - 6 * kStatusCycles;
     missed_seen_ = shared_memory.m4_buffer_missed;
     /* the tracking output starts empty with each image, as it did when it was
      * part of the image's own RAM */
