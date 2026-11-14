@@ -177,7 +177,7 @@ file starts with a header line and one "#TYPE,..." line per row type. Types:
           locked), Doppler Hz x10, code phase chips x64, code discriminator
           chips x1000 (code lock: near 0), ms in track, bits, parity-good
           words, parity failures, subframes, last TOW s, losses of lock,
-          search sweeps since the last loss
+          search sweeps since the last loss, 500 Hz false locks corrected
   SR      each search result (after every search): search number, search
           kind, snapshot ms, PRN, searched, detected, seen once only, refined,
           peak/mean x100, threshold x100, C/N0 x10, Doppler Hz, code phase

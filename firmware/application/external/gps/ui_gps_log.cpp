@@ -96,7 +96,7 @@ void GpsView::log_header() {
         "#START,fw,lna,vga,amp,ant_bias,zone_min,pos_valid,pos_src,pos_age_s,pos_acc_m,lat_e7,lon_e7,alt_m,alm_n,alm_age_dx10,eph_n,tle_n,rtc_local,rtc_utc,heap_free,scratch,method,tab,file",
         "#SEC,job,done,tracking,search,pgpr_state,level,confirming,done_prn,total_prn,pct,rms_x10,clip_pm,unit_cyc,units,seq,dt_ab_ms,solving,solve_kind,solve_pending,fix_ok,fix_mode,fix_tried,heard,cand,est_m,ttff_s,ttff_coarse_s,tracked,synced,eph,gps_time,gps_off_ms,heap_free,log_rows,log_dropped,log_errs,cached,cache_errs,n_eph,n_alm,ant",
         "#M4,cyc_avg,cyc_max,buffers,missed,active,handovers,handover_age_ms,sf_write,meas_seq",
-        "#CH,ch,prn,state,mode,flags,cn0_x10,pld_x100,doppler_x10,code_x64,code_err_x1000,lock_ms,bits,words_ok,parity_errs,subframes,tow,reacq,sweeps",
+        "#CH,ch,prn,state,mode,flags,cn0_x10,pld_x100,doppler_x10,code_x64,code_err_x1000,lock_ms,bits,words_ok,parity_errs,subframes,tow,reacq,sweeps,half_fixes",
         "#SR,seq,search,k_ms,prn,searched,detected,once,refined,metric_x100,thr_x100,cn0_x10,doppler,code_x1000,verdict",
         "#HO,handovers,age_ms,prns",
         "#SF,prn,ch,sfid,page,tow,w1..w10 (24-bit data words hex)",
@@ -255,7 +255,7 @@ void GpsView::log_second() {
         f.s(c.flags & gps_trk::F_PLL ? "L" : "-").s(c.flags & gps_trk::F_BIT ? "B" : "-").s(c.flags & gps_trk::F_FRAME ? "T" : "-").s(c.flags & gps_trk::F_VERIFIED ? "V" : "-");
         f.c(',').u(c.cn0_x10).c(',').d(c.pld_x100).c(',').d(static_cast<int32_t>(std::lround(c.doppler_hz * 10.0f))).c(',').u(c.code_x64);
         f.c(',').d(static_cast<int32_t>(std::lround(c.code_err * 1000.0f))).c(',').u(c.lock_ms).c(',').u(c.bits).c(',').u(c.words_ok).c(',').u(c.parity_errs);
-        f.c(',').u(c.subframes).c(',').u(c.tow_s).c(',').u(c.reacq).c(',').u(c.sweeps);
+        f.c(',').u(c.subframes).c(',').u(c.tow_s).c(',').u(c.reacq).c(',').u(c.sweeps).c(',').u(c.half_fixes);
         log_end(f);
     }
     /* ephemerides held, every 5 s */
