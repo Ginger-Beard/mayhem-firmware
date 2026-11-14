@@ -572,6 +572,7 @@ class Channel {
     const Framer& framer() const { return framer_; }
     uint8_t reacq() const { return reacq_; }
     uint32_t bits_out() const { return bits_out_; }
+    float freq_watch() const { return hf_last_; } /* the last half-epoch frequency error estimate, Hz */
     /* per-bit callback for tests (nullptr in the firmware) */
     void (*on_bit)(void* ctx, int prn, int bit) = nullptr;
     void* on_bit_ctx = nullptr;
@@ -658,8 +659,16 @@ class Channel {
      * carrier 500 Hz off "locks" ~4 dB down with the prompt sign flipping every
      * epoch (seen on the device after re-acquisitions). In true lock the sign
      * changes only at bit edges (<= 5 %) and by noise (~15 % at 30 dB-Hz). */
-    int8_t alt_prev_{0};
-    uint8_t alt_n_{0}, alt_chg_{0}, alt_try_{0};
+    static constexpr int kHfWin = 100;       /* epochs per frequency-error estimate (noise ~25-55 Hz rms at 33 dB-Hz) */
+    static constexpr float kHfThr = 250.0f;  /* Hz: two windows in a row */
+    static constexpr float kHfSure = 350.0f; /* Hz: one window */
+    int32_t half_i_{0}, half_q_{0};          /* the prompt sums when the epoch's first half ended */
+    bool half_taken_{false}, half_ok_{false};
+    float h1i_{0}, h1q_{0};
+    static constexpr float kHfCoh = 0.3f;
+    float hf_dot_{0}, hf_cross_{0}, hf_p1_{0}, hf_p2_{0}, hf_last_{0};
+    int hf_n_{0};
+    uint8_t hf_hits_{0};
     uint16_t half_fixes_{0};
 
     void restart(float doppler_hz) {
@@ -667,8 +676,10 @@ class Channel {
         p2_avg_ = 0;
         dop_sum_ = 0;
         dop_n_ = 0;
-        alt_prev_ = 0;
-        alt_n_ = alt_chg_ = alt_try_ = 0;
+        half_taken_ = half_ok_ = false;
+        hf_dot_ = hf_cross_ = hf_p1_ = hf_p2_ = 0;
+        hf_n_ = 0;
+        hf_hits_ = 0;
         code_corr_ = 0;
         delta_res_ = 0;
         wblk_res_ = 0;
@@ -785,6 +796,11 @@ inline void Channel::run_group(const uint32_t* lut, const uint32_t* sblk, const 
     acc_[0] = ip, acc_[1] = qp, acc_[2] = id, acc_[3] = qd;
     m_ = m, f_ = f, phc_ = phc;
     epoch_samples_ += ns;
+    if (!half_taken_ && epoch_samples_ >= kBufN / 2) { /* the prompt of the epoch's first half (the false-lock watch) */
+        half_i_ = ip;
+        half_q_ = qp;
+        half_taken_ = true;
+    }
 }
 
 /* A block with a half-chip repeat and / or the end of an epoch (within it
@@ -912,6 +928,11 @@ inline void Channel::epoch_end(Shared* sh, int ch) {
     epoch_gap_ = false;
     epoch_samples_ = 0;
     const float ip = acc_[0] * k, qp = -acc_[1] * k, id = acc_[2] * k, qd = -acc_[3] * k;
+    /* the two halves of the epoch's prompt (the first ends at a group boundary near
+     * the middle; their centres are always half an epoch apart) */
+    half_ok_ = half_taken_ && valid;
+    h1i_ = half_i_ * k, h1q_ = -half_q_ * k;
+    half_taken_ = false;
     if (state_ == TRK_SEARCH) {
         const float ie = acc_[4] * k, qe = -acc_[5] * k, il = acc_[6] * k, ql = -acc_[7] * k;
         for (auto& a : acc_) a = 0;
@@ -1098,35 +1119,54 @@ inline void Channel::track_epoch(float ip, float qp, float id, float qd, bool va
             mode_ms_ = 0;
         }
     }
-    /* +-500 Hz false lock: over 100 epochs, more than half of them flip sign */
-    if (state_ == TRK_TRACK) {
-        const int8_t sg = ip >= 0 ? 1 : -1;
-        if (alt_prev_) {
-            alt_n_++;
-            if (sg != alt_prev_) alt_chg_++;
-        }
-        alt_prev_ = sg;
-        if (alt_n_ >= 100) {
-            if (alt_chg_ >= 50) {
-                /* +500 first, then -1000 (500 below the start), and so on */
-                freq_int_ += (alt_try_ & 1) ? -1000.0f : 500.0f;
-                freq_ = freq_int_;
-                alt_try_++;
-                if (half_fixes_ < 65535) half_fixes_++;
-                narrow_ = false;
-                mode_ms_ = 0;
-                lock_good_ = lock_bad_ = 0;
-                pld_s_ = 0;
-                pld_i_ = pld_q_ = 0;
-                pld_n_ = 0;
-                pll_lock_ = false;
-                have_prev_ = false;
-                reset_bits(); /* the bits so far were garbage */
-                set_nco();
+    /* +-500 Hz false lock (and any large residual after a pull-in): the two
+     * half-epoch prompts (0.5 ms apart, four-quadrant: +-1000 Hz) measure the
+     * frequency error directly; summed over kHfWin epochs it reads ~0 in true
+     * lock, ~+-500 Hz in the false lock and the real offset while a weak
+     * channel's PLL wanders. Above kHfSure in one window, or above kHfThr in
+     * two windows in a row: the carrier moves by the measured error (not a
+     * blind 500 Hz step). Watched from the second half of the pull-in on (the
+     * 1 ms FLL is as blind as the PLL), so a false lock is fixed before the
+     * low C/N0 it causes ends the channel. */
+    if ((state_ == TRK_TRACK || (state_ == TRK_PULLIN && mode_ms_ > kPullinEpochs / 2)) && half_ok_) {
+        const float h2i = ip - h1i_, h2q = qp - h1q_;
+        hf_dot_ += h1i_ * h2i + h1q_ * h2q;
+        hf_cross_ += h1i_ * h2q - h1q_ * h2i;
+        hf_p1_ += h1i_ * h1i_ + h1q_ * h1q_;
+        hf_p2_ += h2i * h2i + h2q * h2q;
+        if (++hf_n_ >= kHfWin) {
+            /* coherence of the products: ~0.5 at 33 dB-Hz (true or false lock), ~0.1
+             * on noise (a lost satellite's last windows must not move the carrier) */
+            const float pp = hf_p1_ * hf_p2_;
+            const bool coherent = pp > 0 && (hf_dot_ * hf_dot_ + hf_cross_ * hf_cross_) > kHfCoh * kHfCoh * pp;
+            hf_p1_ = hf_p2_ = 0;
+            float y = hf_cross_, x = hf_dot_;
+            float a = atan_2q(y, x);
+            if (x < 0) a += y >= 0 ? 3.14159265f : -3.14159265f;
+            const float fe = a / (6.2831853f * (kBufN / 2.0f / kFs)); /* the halves are ~half an epoch apart */
+            hf_dot_ = hf_cross_ = 0;
+            hf_n_ = 0;
+            hf_last_ = fe;
+            if (coherent && (fe > kHfThr || fe < -kHfThr)) {
+                if (++hf_hits_ >= 2 || fe > kHfSure || fe < -kHfSure) {
+                    freq_int_ += fe;
+                    freq_ = freq_int_;
+                    hf_hits_ = 0;
+                    if (half_fixes_ < 65535) half_fixes_++;
+                    narrow_ = false;
+                    mode_ms_ = 0;
+                    lock_good_ = lock_bad_ = 0;
+                    pld_s_ = 0;
+                    pld_i_ = pld_q_ = 0;
+                    pld_n_ = 0;
+                    pll_lock_ = false;
+                    have_prev_ = false;
+                    reset_bits(); /* the bits so far were garbage */
+                    set_nco();
+                }
             } else {
-                alt_try_ = 0;
+                hf_hits_ = 0;
             }
-            alt_n_ = alt_chg_ = 0;
         }
     }
     /* C/N0: M2M4 over windows of kCn0Win epochs */
