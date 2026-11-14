@@ -73,7 +73,9 @@ GpsRxProcessor::GpsRxProcessor() {
 #define GPS_RX_COLD __attribute__((optimize("Os")))
 
 GPS_RX_COLD void GpsRxProcessor::start_tracking(uint32_t prn_mask, uint32_t age_ms) {
-    const gps_acq::Result* res = keep.results;
+    gps_acq::Result* res = keep.results;
+    if (req_.neg_dop)
+        for (auto& r : keep.results) r.doppler = -r.doppler;
     int n = 0;
     for (int i = 0; i < 32; i++)
         if (((prn_mask >> i) & 1u) && res[i].detected && !res[i].once) n++;
@@ -229,6 +231,15 @@ void GpsRxProcessor::send_status() {
     last_status_ = DWT->CYCCNT;
 }
 
+/* Q negated in place (complex conjugate): the spectrum mirrored back (-128 -> 127) */
+static void conjugate(const buffer_c8_t& buffer) {
+    int8_t* x = reinterpret_cast<int8_t*>(buffer.p);
+    for (size_t k = 0; k < buffer.count; k++) {
+        const int8_t q = x[2 * k + 1];
+        x[2 * k + 1] = q == -128 ? 127 : static_cast<int8_t>(-q);
+    }
+}
+
 void GpsRxProcessor::execute(const buffer_c8_t& buffer) {
     const uint16_t missed = shared_memory.m4_buffer_missed;
     samples_ += static_cast<uint64_t>(buffer.count) * (1u + static_cast<uint16_t>(missed - missed_seen_));
@@ -241,6 +252,7 @@ void GpsRxProcessor::execute(const buffer_c8_t& buffer) {
     }
     /* the tracking loops: every buffer, ~11.5k cycles per channel + ~23k */
     const uint32_t t0 = DWT->CYCCNT;
+    if (conj_) conjugate(buffer);
     trk_->process(reinterpret_cast<const int8_t*>(buffer.p), samples_ - buffer.count);
     uint32_t dt = DWT->CYCCNT - t0;
     { /* Galileo: the searcher captures, or works in units of <= ~17k cycles while the
@@ -291,6 +303,7 @@ void GpsRxProcessor::execute(const buffer_c8_t& buffer) {
         return;
     }
     if (session.want_samples()) {
+        if (conj_) conjugate(buffer);
         session.put(reinterpret_cast<const int8_t*>(buffer.p), buffer.count, static_cast<double>(samples_) / gps_acq::kFs);
         if (session.phase() == gps_acq::Session::DONE)
             state_ = GpsRxStatusMessage::DONE; /* level too low */
@@ -340,6 +353,8 @@ void GpsRxProcessor::on_message(const Message* const message) {
         req_.track = m.track;
         req_.max_ch = m.max_ch;
         req_.age_ms = m.age_ms;
+        req_.neg_dop = m.neg_dop;
+        conj_ = m.conj;
         pending_ = true;
     }
 }

@@ -671,16 +671,20 @@ class Session {
         phase_ = DONE;
         return false;
     }
-    /* the first rule of consistent() that fails: 1 B not detected, 2 Doppler, 3 code phase */
+    /* the first rule of consistent() that fails: 1 B not detected, 2 Doppler, 3 code
+     * phase; 4 the code phase moved as the OPPOSITE Doppler predicts (a mirrored
+     * spectrum: I/Q orientation; the app corrects it and searches again) */
     static uint8_t why_not(const Result& a, const Result& b, double dt) {
         if (!b.detected || dt < 0) return 1;
         if (std::fabs(b.doppler - a.doppler) > kConfirmDopplerHz) return 2;
+        const double k = dt * (kChipRate / kL1); /* the drift must exceed the tolerance to tell the two apart */
+        if (std::fabs(0.5 * (a.doppler + b.doppler)) * k > 1.5 + 300.0 * k && consistent(a, b, dt, -1.0)) return 4;
         return 3;
     }
-    static bool consistent(const Result& a, const Result& b, double dt) {
+    static bool consistent(const Result& a, const Result& b, double dt, double sign = 1.0) {
         if (!b.detected || dt < 0) return false;
         if (std::fabs(b.doppler - a.doppler) > kConfirmDopplerHz) return false;
-        const double fd = 0.5 * (static_cast<double>(a.doppler) + b.doppler);
+        const double fd = sign * 0.5 * (static_cast<double>(a.doppler) + b.doppler);
         const double pred = a.code_phase + dt * fd * (kChipRate / kL1);
         double err = std::fmod(static_cast<double>(b.code_phase) - pred + 1023.0 * 1000.0 + 511.5, 1023.0) - 511.5;
         if (err < 0) err = -err;

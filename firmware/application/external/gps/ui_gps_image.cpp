@@ -157,16 +157,56 @@ void GpsView::on_image_ready() {
 /* Autonomous: the detections of the acquisition image's search to the
  * tracking loops, with the age of the result snapshot on the app's clock
  * (the tracking image propagates the code phases over it) */
-void GpsView::send_track() {
+void GpsView::send_track(bool neg_dop) {
     GpsRxConfigMessage m;
     m.cmd = GpsRxConfigMessage::CMD_TRACK;
+    m.neg_dop = neg_dop ? 1 : 0;
     m.prn_mask = pending_track_mask_;
     m.confirm = req_confirm_ ? 1 : 0;
     m.max_ch = 8; /* M4: ~62 % with 8 channels on the device */
     const uint32_t now = static_cast<uint32_t>(chTimeNow());
     m.age_ms = results_ms_ok_ ? now - results_ms_ : 0;
+    m.conj = iq_conj_ ^ iq_trk_flip_;
+    track_mask_ = pending_track_mask_;
+    track_t_ = chTimeNow();
     pending_track_mask_ = 0;
     baseband::gps_rx_config(m);
+}
+
+/* the samples arrive mirrored (I/Q orientation; one device run on 14 Nov): the
+ * image negates Q from the next command on. The search's evidence (2nd
+ * snapshot) sets the acquisition image's correction; the tracking image's flip
+ * lasts for that hand-over only (each image start sets the stream up anew, and
+ * the search may have seen it the other way). Logged as an IQ row. */
+void GpsView::iq_flip(bool trk, uint32_t n) {
+    if (trk)
+        iq_trk_flip_ ^= 1u;
+    else
+        iq_conj_ ^= 1u;
+    iq_flips_++;
+    if (!log_active()) return;
+    Fmt f = log_row("IQ");
+    f.s(trk ? ",tracking," : ",search,").u(n).c(',').u(trk ? iq_conj_ ^ iq_trk_flip_ : iq_conj_).c(',').u(iq_flips_);
+    log_end(f);
+}
+
+/* Autonomous: strong satellites handed over, but no channel found the common
+ * code offset (or verified) in kIqTrkWait: the tracking image may see the
+ * spectrum mirrored (each image start sets up the stream anew). Once per
+ * hand-over: flip, and hand the same detections over again, Dopplers negated. */
+void GpsView::iq_trk_check() {
+    if (iq_trk_retried_ || !trk_sh_ || !results_ || !track_mask_ || iq_flips_ >= kIqMaxFlips) return;
+    if (chTimeNow() - track_t_ < kIqTrkWait || trk_sh_->xs_found) return;
+    float best = 0;
+    for (int p = 0; p < 32; p++)
+        if (((track_mask_ >> p) & 1u) && results_[p].cn0 > best) best = results_[p].cn0;
+    if (best < 40.0f) return; /* weak ones may just need longer */
+    for (int i = 0; i < gps_trk::kMaxCh; i++)
+        if (trk_sh_->ch[i].flags & (gps_trk::F_EVER | gps_trk::F_VERIFIED)) return;
+    iq_trk_retried_ = true;
+    iq_flip(true, static_cast<uint32_t>(best + 0.5f));
+    pending_track_mask_ = track_mask_;
+    send_track(true);
 }
 
 #endif /* PRALINE */

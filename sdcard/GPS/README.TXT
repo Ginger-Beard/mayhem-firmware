@@ -138,6 +138,7 @@ Passes, the sky plot and the fix need your rough position and UTC:
 
 Autonomous fix (Fix tab, method "Autonomous")
 ---------------------------------------------
+The Fix tab opens on Autonomous; Snapshot is one step left on the wheel.
 No files needed: the receiver tracks the satellites and decodes their orbits
 (ephemerides) from the signal. Get fix: search ("Searching n/m"), a COARSE fix
 from the almanac at once if one is on the card, then "Upgrading: n of 4
@@ -158,7 +159,12 @@ Autonomous skips the second confirmation snapshot: each detection goes
 straight to a tracking channel (Heard shows it yellow with "?" until then),
 and the loops verify it: a channel that is not phase locked at 28 dB-Hz for a
 second (or bit-synced) within 10 s is freed ("not verified: freed") and
-given to the next detection. Corrections: every fix uses a troposphere model
+given to the next detection. The search runs in GPS_L1A and the loops in
+GPS_L1T: the search result's time crosses that switch only to about 1 ms,
+which leaves every channel's code phase off by the same unknown amount, so
+the channels first search the whole code period for it together (loop 4 in
+the log), a few seconds for strong satellites; the first lock tells the
+others where to go. Corrections: every fix uses a troposphere model
 (standard atmosphere at the fix's height, "T" after HDOP on the Fix tab) and,
 once known, the broadcast ionosphere model ("T+I"): its coefficients come
 from the satellites (subframe 4 page 18, every 12.5 minutes) and are kept in
@@ -188,7 +194,9 @@ file starts with a header line and one "#TYPE,..." line per row type. Types:
           saved position (valid, source, age s, accuracy m, lat/lon 1e-7 deg,
           alt m), almanac count and age (days x10), ephemerides, TLEs, clock
           (yyyymmddhhmmss as shown), clock UTC (unix s), free heap, lent RAM
-          bytes, Fix method (0 snapshot, 1 autonomous), tab, file name
+          bytes, Fix method (0 snapshot, 1 autonomous), tab, file name, E1 box
+          (0/1), System wheel (0 All L1, 1 GPS, 2 Galileo, 3 BeiDou,
+          4 GLONASS, 5 SBAS), I/Q correction (0/1)
   SEC     every second: job (0 none, 1 Heard, 2 Fix, 3 Autonomous), done,
           tracking, search (1 assisted, 2 full, 3 full after assisted), baseband
           state (0 idle, 1 capturing, 2 searching, 3 refining, 4 done,
@@ -201,7 +209,9 @@ file starts with a header line and one "#TYPE,..." line per row type. Types:
           time to first fix s, tracked, with TOW, with ephemeris, GPS time
           known, GPS minus clock ms, free heap, log rows, rows dropped (RAM
           full), log errors, ephemerides cached, cache write errors,
-          ephemerides held, almanac entries, antenna power as read
+          ephemerides held, almanac entries, antenna power as read, I/Q
+          correction (0/1), hand-over offset found (0/1) and ms after the
+          hand-over
   M4      every second while tracking: M4 cycles per 1 ms buffer (mean, max;
           200000 = 100 %), buffers handled, buffers missed, channels in use,
           hand-overs, age of the search result at the hand-over (ms),
@@ -209,7 +219,7 @@ file starts with a header line and one "#TYPE,..." line per row type. Types:
           while tracking (AC rms LSB x10, DC I and Q x10, clipping per mille)
   CH      every second per channel: channel, PRN, state (1 pull-in, 2 track,
           3 lost: searching, 4 given up), loop (0 FLL, 1 PLL wide, 2 PLL narrow,
-          3 search), flags (L phase lock, B bit sync, T subframe time,
+          3 search, 4 hand-over offset search), flags (L phase lock, B bit sync, T subframe time,
           V verified, E verified since the hand-over, R released: never
           verified, channel freed, A aided search for a newly risen
           satellite), C/N0 x10, phase lock indicator x100 (cos 2 phi; ~100 =
@@ -224,7 +234,8 @@ file starts with a header line and one "#TYPE,..." line per row type. Types:
           chips x1000, verdict (accepted / detected (unconfirmed: the
           tracker verifies; Autonomous) / rejected: below threshold /
           rejected: 2nd snapshot did not find it / Doppler moved / code phase
-          off the prediction) and, when rejected that way, what the 2nd
+          off the prediction / code moved as the opposite Doppler predicts
+          (mirrored spectrum)) and, when rejected that way, what the 2nd
           snapshot found (peak/mean x100, Doppler Hz, code phase x1000)
   HO      hand-over to tracking: count, age of the search result ms, PRNs
   CLK     GPS time: event (tow: from the first decoded time, pvt: from a fix,
@@ -348,6 +359,12 @@ file starts with a header line and one "#TYPE,..." line per row type. Types:
           result (ok / missing / read error / not an image / wrong image /
           other firmware version / too large / damaged), bytes, load time ms
           (card read and start), loads so far
+  IQ      the samples arrived with the spectrum mirrored (seen once on the
+          device, cause not known yet): source (search: the 2nd snapshot saw
+          the code move against the Doppler; tracking: strong satellites
+          handed over but no lock in 20 s), evidence (search: candidates;
+          tracking: best C/N0), correction now (1: the images negate Q),
+          corrections so far (4 at most per app start)
 The log holds your position: keep it to yourself.
 
 System wheel (Heard and Passes)
