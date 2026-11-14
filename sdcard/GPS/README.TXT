@@ -169,7 +169,8 @@ file starts with a header line and one "#TYPE,..." line per row type. Types:
   M4      every second while tracking: M4 cycles per 1 ms buffer (mean, max;
           200000 = 100 %), buffers handled, buffers missed, channels in use,
           hand-overs, age of the search result at the hand-over (ms),
-          subframes published, measurement sets published
+          subframes published, measurement sets published, input level
+          while tracking (AC rms LSB x10, DC I and Q x10, clipping per mille)
   CH      every second per channel: channel, PRN, state (1 pull-in, 2 track,
           3 lost: searching, 4 given up), loop (0 FLL, 1 PLL wide, 2 PLL narrow,
           3 search), flags (L phase lock, B bit sync, T subframe time,
@@ -177,12 +178,14 @@ file starts with a header line and one "#TYPE,..." line per row type. Types:
           locked), Doppler Hz x10, code phase chips x64, code discriminator
           chips x1000 (code lock: near 0), ms in track, bits, parity-good
           words, parity failures, subframes, last TOW s, losses of lock,
-          search sweeps since the last loss
+          search sweeps since the last loss, 500 Hz false locks corrected
   SR      each search result (after every search): search number, search
           kind, snapshot ms, PRN, searched, detected, seen once only, refined,
           peak/mean x100, threshold x100, C/N0 x10, Doppler Hz, code phase
           chips x1000, verdict (accepted / rejected: below threshold /
-          rejected: not confirmed by the 2nd snapshot)
+          rejected: 2nd snapshot did not find it / Doppler moved / code phase
+          off the prediction) and, when rejected that way, what the 2nd
+          snapshot found (peak/mean x100, Doppler Hz, code phase x1000)
   HO      hand-over to tracking: count, age of the search result ms, PRNs
   SF      each parity-good subframe: PRN, channel, subframe 1-5, page,
           TOW of its start s, the ten 24-bit data words (hex)

@@ -2600,7 +2600,7 @@ struct GpsRxConfigMessage : public Message {
     uint8_t cmd{CMD_STOP};
     uint8_t k_ms{20};      /* snapshot length, 1..20 ms */
     uint8_t half_bins{12}; /* Doppler bins of 500 Hz either side of each centre */
-    uint8_t refine{1};     /* refine detected PRNs (snapshot fix) */
+    uint8_t refine{1};     /* refine detected PRNs: 1 Doppler + code (snapshot fix), 2 Doppler only (fast, tracking hand-over) */
     uint32_t prn_mask{0};  /* bit p-1: search PRN p */
     int16_t center[32]{};  /* Doppler window centre per PRN, Hz */
     uint8_t confirm{1};    /* report a PRN only if a second snapshot confirms it */

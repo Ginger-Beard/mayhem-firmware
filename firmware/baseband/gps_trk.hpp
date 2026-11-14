@@ -482,6 +482,7 @@ class Channel {
         o.code_x64 = static_cast<uint16_t>((m_ + f_ / 4294967296.0) * 32.0);
         o.sweeps = sweeps_;
         o.code_err = code_err_;
+        o.half_fixes = half_fixes_;
     }
     uint8_t flags() const {
         uint8_t f = 0;
@@ -582,12 +583,22 @@ class Channel {
     uint32_t s_ms_{0};
     uint16_t sweeps_{0};  /* diagnostics */
     float code_err_{0};
+    /* +-500 Hz false-lock detector: with 1 ms correlations both the FLL
+     * (cross/dot) and the Costas PLL are blind to half a cycle per ms, so a
+     * carrier 500 Hz off "locks" ~4 dB down with the prompt sign flipping every
+     * epoch (seen on the device after re-acquisitions). In true lock the sign
+     * changes only at bit edges (<= 5 %) and by noise (~15 % at 30 dB-Hz). */
+    int8_t alt_prev_{0};
+    uint8_t alt_n_{0}, alt_chg_{0}, alt_try_{0};
+    uint16_t half_fixes_{0};
 
     void restart(float doppler_hz) {
         freq_ = freq_int_ = good_freq_ = doppler_hz;
         p2_avg_ = 0;
         dop_sum_ = 0;
         dop_n_ = 0;
+        alt_prev_ = 0;
+        alt_n_ = alt_chg_ = alt_try_ = 0;
         code_corr_ = 0;
         delta_res_ = 0;
         wblk_res_ = 0;
@@ -997,6 +1008,37 @@ inline void Channel::track_epoch(float ip, float qp, float id, float qd, bool va
         } else if (narrow_ && lock_bad_ >= (bit_edge_ >= 0 ? 40 : 160)) { /* ~0.8 s of poor phase lock: widen again */
             narrow_ = false;
             mode_ms_ = 0;
+        }
+    }
+    /* +-500 Hz false lock: over 100 epochs, more than half of them flip sign */
+    if (state_ == TRK_TRACK) {
+        const int8_t sg = ip >= 0 ? 1 : -1;
+        if (alt_prev_) {
+            alt_n_++;
+            if (sg != alt_prev_) alt_chg_++;
+        }
+        alt_prev_ = sg;
+        if (alt_n_ >= 100) {
+            if (alt_chg_ >= 50) {
+                /* +500 first, then -1000 (500 below the start), and so on */
+                freq_int_ += (alt_try_ & 1) ? -1000.0f : 500.0f;
+                freq_ = freq_int_;
+                alt_try_++;
+                if (half_fixes_ < 65535) half_fixes_++;
+                narrow_ = false;
+                mode_ms_ = 0;
+                lock_good_ = lock_bad_ = 0;
+                pld_s_ = 0;
+                pld_i_ = pld_q_ = 0;
+                pld_n_ = 0;
+                pll_lock_ = false;
+                have_prev_ = false;
+                reset_bits(); /* the bits so far were garbage */
+                set_nco();
+            } else {
+                alt_try_ = 0;
+            }
+            alt_n_ = alt_chg_ = 0;
         }
     }
     /* C/N0: M2M4 over windows of kCn0Win epochs */

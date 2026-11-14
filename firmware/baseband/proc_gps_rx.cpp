@@ -156,6 +156,25 @@ void GpsRxProcessor::execute(const buffer_c8_t& buffer) {
         const uint32_t t0 = DWT->CYCCNT;
         trk_->process(reinterpret_cast<const int8_t*>(buffer.p), samples_ - buffer.count);
         const uint32_t dt = DWT->CYCCNT - t0;
+        if ((trk_buffers_ & 63u) == 0) { /* the input level, one buffer in 64 (~12k cycles) */
+            const int8_t* x = reinterpret_cast<const int8_t*>(buffer.p);
+            int32_t si = 0, sq = 0;
+            uint32_t ss = 0, clip = 0;
+            for (size_t k = 0; k < buffer.count; k++) {
+                const int32_t i = x[2 * k], q = x[2 * k + 1];
+                si += i;
+                sq += q;
+                ss += static_cast<uint32_t>(i * i + q * q);
+                clip += (i >= 127 || i <= -127 || q >= 127 || q <= -127) ? 1u : 0u;
+            }
+            const float n = static_cast<float>(buffer.count);
+            const float mi = si / n, mq = sq / n;
+            const float ac = ss / (2.0f * n) - 0.5f * (mi * mi + mq * mq);
+            trk_shared.level_x10 = static_cast<uint16_t>(ac > 0 ? std::sqrt(ac) * 10.0f : 0.0f);
+            trk_shared.dc_i_x10 = static_cast<int16_t>(mi * 10.0f);
+            trk_shared.dc_q_x10 = static_cast<int16_t>(mq * 10.0f);
+            trk_shared.clip_pm = static_cast<uint16_t>(clip * 1000u / buffer.count);
+        }
         trk_cycles_sum_ += dt;
         if (dt > trk_cycles_max_) trk_cycles_max_ = dt;
         trk_buffers_++;

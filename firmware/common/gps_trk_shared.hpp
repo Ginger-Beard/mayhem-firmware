@@ -73,6 +73,8 @@ struct ChInfo {
     uint16_t code_x64;     /* prompt code phase, chips x 64 (0..65471) */
     uint16_t sweeps;       /* search sweeps since the last loss of lock */
     float code_err;        /* last DLL discriminator, chips (code lock: near 0) */
+    uint16_t half_fixes;   /* +-500 Hz false locks corrected (the carrier turning half a cycle per ms) */
+    uint16_t pad2;
 };
 
 struct SubframeSlot {
@@ -120,6 +122,11 @@ struct Shared {
      * started, ms, and how many hand-overs so far */
     uint32_t handover_age_ms;
     uint32_t handovers;
+    /* input while tracking, one buffer in 64 (diagnostics): AC rms per
+     * component x10 (LSB), DC x10, samples at full scale per mille */
+    uint16_t level_x10;
+    int16_t dc_i_x10, dc_q_x10;
+    uint16_t clip_pm;
 };
 
 }  // namespace gps_trk

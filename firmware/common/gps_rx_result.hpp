@@ -38,6 +38,11 @@ struct Result {
     uint8_t detected{0};
     uint8_t refined{0};
     uint8_t once{0}; /* detected in the first snapshot but not confirmed in the second */
+    /* why a first-snapshot detection was not confirmed (diagnostics log), and
+     * what the second snapshot found: 1 not detected there, 2 Doppler moved
+     * more than allowed, 3 code phase off the prediction */
+    uint8_t reject{0};
+    float b_metric{0}, b_doppler{0}, b_code{0};
 };
 
 }  // namespace gps_rx

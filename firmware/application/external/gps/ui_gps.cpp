@@ -2019,7 +2019,9 @@ bool GpsView::start_search(Job job, uint8_t k_ms, bool force_full) {
     GpsRxConfigMessage m;
     m.cmd = GpsRxConfigMessage::CMD_SEARCH;
     m.k_ms = k_ms;
-    m.refine = job == JOB_FIX || job == JOB_AUTO;
+    /* Autonomous: the fast refine (Doppler only): the hand-over is ~10 s younger on the
+     * device, and the coarse fix it also feeds is almanac-limited (~1 km) anyway */
+    m.refine = job == JOB_AUTO ? 2 : (job == JOB_FIX ? 1 : 0);
     m.confirm = 1; /* a PRN is reported only if a second snapshot confirms it */
     m.track = job == JOB_AUTO; /* the confirmed PRNs go straight to the tracking loops */
     m.max_ch = 8;              /* M4: ~60 % with 8 channels (notes, gps-autonomous) */
@@ -2276,8 +2278,18 @@ void GpsView::auto_poll_m4() {
     bool new_eph = false;
     const gps_trk::Shared* sh = trk_sh_;
     bool newmeas;
-    if (solving()) { /* channels and measurements only */
+    if (solving()) { /* channels and measurements only (the measurement is logged now, solved after) */
         newmeas = false;
+        const uint32_t ms = sh->meas_seq;
+        if (ms && ms != a.meas_seq) {
+            a.meas = sh->meas[(ms - 1) & 1u];
+            if (sh->meas_seq == ms && a.meas.seq == ms) {
+                a.meas_seq = ms;
+                a.have_meas = 1;
+                meas_waiting_ = true;
+                log_meas();
+            }
+        }
         for (int tries = 0; tries < 3; tries++) {
             const uint32_t s1 = sh->ch_seq;
             if (s1 & 1u) continue;
@@ -2291,6 +2303,10 @@ void GpsView::auto_poll_m4() {
             log_eph_event("decoded", prn);
         });
         if (newmeas) log_meas();
+        if (meas_waiting_) { /* copied while the solver ran: solve it now */
+            newmeas = true;
+            meas_waiting_ = false;
+        }
     }
     if (new_eph) { /* off-air ephemerides now in the orbit table */
         int ne = 0;
