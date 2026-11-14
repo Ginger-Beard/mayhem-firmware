@@ -46,7 +46,7 @@
  *              on the same field as mfr= / sd=
  *     minlen=  that field holds at least this many bytes
  *     addr=    public or random (TxAdd)
- *     beep=    1: beep when found (with "Beep on drone")
+ *     beep=    1: beep when found (with Setup's "Beep on detection")
  *   A pattern is up to 8 bytes in hex, '?' a wildcard nibble, optionally
  *   &MASK in hex (40&FE matches 40 and 41). At least one of cid, uuid,
  *   sdata, name. The first matching rule of the file wins.

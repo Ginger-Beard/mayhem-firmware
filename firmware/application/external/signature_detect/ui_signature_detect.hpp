@@ -139,6 +139,7 @@ struct SigMemory {
 
 class DetailView;
 class SettingsView;
+class DronesSetupView;
 class TrackView;
 class TargetView;
 class SigdetCaptureView;
@@ -176,6 +177,7 @@ class SignatureDetectView : public View {
    private:
     friend class DetailView;
     friend class SettingsView;
+    friend class DronesSetupView;
     friend class DebugView;
     friend class TrackView;
     friend class TargetView;
@@ -441,6 +443,9 @@ class SignatureDetectView : public View {
     bool gps_nofix() const; /* a GPS is talking but has no fix (and no fix since) */
     bool map_fits();        /* a map view (SigdetMapView) can open now (else the status line says so) */
     void apply_options();
+    /* A Setup checkbox shows and sets one bit of the option bytes (opt_.alert
+     * onwards; invert: ticked means the bit is clear). */
+    void bind_option(Checkbox& box, uint8_t byte, uint8_t mask, bool invert);
     void configure(uint8_t extra_flags = 0);
     bool sweeps_on() const;
     bool scan_on() const;
@@ -938,6 +943,10 @@ class SigdetCaptureView : public View {
     uint32_t bb_filter_hz_{0};
 };
 
+/* Setup: what applies to every signature class (beeps, USB JSON, the manual
+ * position); the built-in Drones class's receivers and bands are on their
+ * own page (DronesSetupView). Each checkbox is a bit of the saved option
+ * bytes (SigdetOptions), the same bits as before the split. */
 class SettingsView : public View {
    public:
     SettingsView(NavigationView& nav, SignatureDetectView& main);
@@ -958,19 +967,26 @@ class SettingsView : public View {
     Labels labels_{
         {{UI_POS_X(0), UI_POS_Y(0)}, "Log: LOGS/SIGDET_<time>.CSV", Theme::getInstance()->fg_light->foreground},
         {{UI_POS_X(0), UI_POS_Y(8)}, "Manual pos:", Theme::getInstance()->fg_light->foreground},
-        {{UI_POS_X(0), UI_POS_Y(14)}, "RF bands:", Theme::getInstance()->fg_light->foreground}};
+        {{UI_POS_X(0), UI_POS_Y(17)}, "Other classes: receivers and", Theme::getInstance()->fg_light->foreground},
+        {{UI_POS_X(0), UI_POS_Y(18)}, "bands come from the class file", Theme::getInstance()->fg_light->foreground}};
+    /* Every class: a beep when a detection is confirmed (Remote ID, a rule
+     * with beep=1, a pattern, a confident RF class, ...). */
     Checkbox check_alert_{
         {UI_POS_X(0), UI_POS_Y(2)},
-        14,
-        "Beep on drone"};
-    Checkbox check_json_{
+        17,
+        "Beep on detection"};
+#if SIGDET_FULL
+    /* Also the low confidence finds: RF classes below MED, DJI BLE adverts
+     * without a name, DroneID, and a class file's FSK / Z-Wave frames. */
+    Checkbox check_beep_low_{
         {UI_POS_X(0), UI_POS_Y(4)},
+        23,
+        "Beep low confidence too"};
+#endif
+    Checkbox check_json_{
+        {UI_POS_X(0), UI_POS_Y(SIGDET_FULL ? 6 : 4)},
         14,
         "USB JSON lines"};
-    Checkbox check_esp_{
-        {UI_POS_X(0), UI_POS_Y(6)},
-        10,
-        "ESP32 feed"};
     /* Source and age of the manual position ("Map 2h", "HackRF GPS 3d"). */
     Text text_src_{
         {UI_POS_X(12), UI_POS_Y(8), UI_POS_WIDTH(18), UI_POS_HEIGHT(1)},
@@ -995,42 +1011,64 @@ class SettingsView : public View {
     Text text_msg_{
         {UI_POS_X(0), UI_POS_Y(12), UI_POS_MAXWIDTH, UI_POS_HEIGHT(1)},
         ""};
-    Checkbox check_rid_{{UI_POS_X(0), UI_POS_Y(13)}, 7, "BLE RID", true};
-    Checkbox check_rf_{{UI_POS_X(10), UI_POS_Y(13)}, 8, "RF sweep", true};
-    Checkbox check_eu_{{UI_POS_X(21), UI_POS_Y(13)}, 6, "EU 868", true};
-    /* Pattern scan (sigdet_pattern.hpp): built-in RC toy + /SIGDET/PATTERNS.TXT. */
-    Checkbox check_pat_{{UI_POS_X(0), UI_POS_Y(18)}, 12, "Pattern scan", true};
+    Button button_drones_{
+        {UI_POS_X(0), UI_POS_Y(14), UI_POS_MAXWIDTH, UI_POS_HEIGHT(2)},
+        "Drones class..."};
+};
+
+/* Setup of the built-in Drones class: its receivers, sweep bands, the 900 MHz
+ * region and the ESP32 add-on's Remote ID list. A class file runs what its
+ * own lines ask for instead (sigdet_sig.hpp), except the ESP32 feed (used by
+ * a class with RX,rid) and the 2.4 GHz hopper verdicts (RX,rfcls). */
+class DronesSetupView : public View {
+   public:
+    DronesSetupView(NavigationView& nav, SignatureDetectView& main);
+
+    void focus() override;
+    std::string title() const override { return "Drones class"; };
+
+   private:
+    SignatureDetectView& main_;
+
+    Labels labels_{
+        {{UI_POS_X(0), UI_POS_Y(0)}, "Receivers:", Theme::getInstance()->fg_light->foreground},
+        {{UI_POS_X(0), UI_POS_Y(5)}, "RF bands:", Theme::getInstance()->fg_light->foreground},
+        {{UI_POS_X(0), UI_POS_Y(12)}, "Class files choose their own.", Theme::getInstance()->fg_light->foreground},
+        {{UI_POS_X(0), UI_POS_Y(13)}, "Also used there: ESP32 feed", Theme::getInstance()->fg_light->foreground},
+#if SIGDET_FULL
+        {{UI_POS_X(0), UI_POS_Y(14)}, "(RX,rid), 2.4G hop (RX,rfcls)", Theme::getInstance()->fg_light->foreground}};
+#else
+        {{UI_POS_X(0), UI_POS_Y(14)}, "(with RX,rid)", Theme::getInstance()->fg_light->foreground}};
+#endif
+    Checkbox check_rid_{{UI_POS_X(0), UI_POS_Y(1)}, 7, "BLE RID", true};
     /* Wi-Fi Remote ID on the HackRF itself: 802.11b 1 Mb/s beacons / NAN. */
-    Checkbox check_wifi_{{UI_POS_X(0), UI_POS_Y(17)}, 14, "Wi-Fi RID (1M)", true};
+    Checkbox check_wifi_{{UI_POS_X(12), UI_POS_Y(1)}, 14, "Wi-Fi RID (1M)", true};
     /* DJI DroneID burst detector dwells (presence only; checked on recordings only). */
-    Checkbox check_did_{{UI_POS_X(17), UI_POS_Y(18)}, 7, "DroneID", true};
-    /* In frequency order, three after the "RF bands:" label and three below
-     * (a small checkbox with 3 characters is 42 px wide: six do not fit in
-     * one row). */
-    Checkbox check_b4_{{UI_POS_X(10), UI_POS_Y(14)}, 3, "900", true};
+    Checkbox check_did_{{UI_POS_X(0), UI_POS_Y(2)}, 7, "DroneID", true};
+    /* Pattern scan (sigdet_pattern.hpp): built-in RC toy + /SIGDET/PATTERNS.TXT. */
+    Checkbox check_pat_{{UI_POS_X(12), UI_POS_Y(2)}, 12, "Pattern scan", true};
+    Checkbox check_rf_{{UI_POS_X(0), UI_POS_Y(3)}, 8, "RF sweep", true};
 #if SIGDET_FULL
-    Checkbox check_b3_{{UI_POS_X(16), UI_POS_Y(14)}, 3, "1.2", true};
-#endif
-    Checkbox check_b0_{{UI_POS_X(22), UI_POS_Y(14)}, 3, "2.4", true};
-    Checkbox check_b5_{{UI_POS_X(0), UI_POS_Y(15)}, 3, "5.1", true};
-#if SIGDET_FULL
-    Checkbox check_b2_{{UI_POS_X(6), UI_POS_Y(15)}, 3, "5.3", true};
-#endif
-    Checkbox check_b1_{{UI_POS_X(12), UI_POS_Y(15)}, 3, "5.8", true};
-#if SIGDET_FULL
-    Checkbox check_beep_low_{
-        {UI_POS_X(0), UI_POS_Y(16)},
-        13,
-        "Beep low conf",
-        true};
     /* 2.4 GHz hopper / toy verdicts: off by default (household Bluetooth and
      * Wi-Fi look the same to an energy sweep). */
-    Checkbox check_hop24_{
-        {UI_POS_X(17), UI_POS_Y(16)},
-        8,
-        "2.4G hop",
-        true};
+    Checkbox check_hop24_{{UI_POS_X(12), UI_POS_Y(3)}, 8, "2.4G hop", true};
 #endif
+    /* In frequency order, three a row (a small checkbox with 3 characters is
+     * 40 px wide). */
+    Checkbox check_b4_{{UI_POS_X(0), UI_POS_Y(6)}, 3, "900", true};
+#if SIGDET_FULL
+    Checkbox check_b3_{{UI_POS_X(6), UI_POS_Y(6)}, 3, "1.2", true};
+#endif
+    Checkbox check_b0_{{UI_POS_X(12), UI_POS_Y(6)}, 3, "2.4", true};
+    Checkbox check_b5_{{UI_POS_X(0), UI_POS_Y(7)}, 3, "5.1", true};
+#if SIGDET_FULL
+    Checkbox check_b2_{{UI_POS_X(6), UI_POS_Y(7)}, 3, "5.3", true};
+#endif
+    Checkbox check_b1_{{UI_POS_X(12), UI_POS_Y(7)}, 3, "5.8", true};
+    /* The 900 MHz band: EU 860-872 instead of US 902-928. */
+    Checkbox check_eu_{{UI_POS_X(0), UI_POS_Y(8)}, 18, "EU 868, not US 915", true};
+    /* The ESP32 add-on's Remote ID list (Wi-Fi / BLE, its drone app). */
+    Checkbox check_esp_{{UI_POS_X(0), UI_POS_Y(10)}, 22, "ESP32 feed (Remote ID)", true};
 };
 
 /* Bring-up tools: demo drones, raw advert console, demodulator switches. */

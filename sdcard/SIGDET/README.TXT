@@ -18,16 +18,20 @@ bar fits 14 characters at most.)
 SIGNATURE CLASSES (/SIGDET/SIGS)
 ----------------------------------
 The "Sig" field on the main view (turn the wheel) picks the class:
-"Drones" is built in (every drone detector, as set in Setup; works without an
-SD card), then one entry per .TXT file in /SIGDET/SIGS, named after the file
-(up to 15 characters, up to 12 files; DRONES.TXT only documents the built-in
-class and is not listed). The choice is saved by name.
+"Drones" is built in (every drone detector, as set in Setup > "Drones
+class..."; works without an SD card), then one entry per .TXT file in
+/SIGDET/SIGS, named after the file (up to 15 characters, up to 12 files;
+DRONES.TXT only documents the built-in class and is not listed). The choice is
+saved by name.
 
 A class file decides which receivers run: BLE dwells when it has BLE rules,
 pattern dwells with PAT rules, energy sweeps of the bands its BAND and NB rules
 need, Wi-Fi Remote ID / DJI DroneID dwells only with an RX line. Setup's
-receiver and band boxes apply to the Drones class only. Remote ID is still
-decoded in every BLE dwell.
+"Drones class..." page (receivers, bands, EU 868) applies to the Drones class
+only; its ESP32 feed lists drones in a class with RX,rid, its "2.4G hop" box
+counts in a class with RX,rfcls. The rest of Setup (beeps, USB JSON, manual
+position) applies to every class. Remote ID is still decoded in every BLE
+dwell.
 
 One rule per line: a type word, then comma separated key=value fields. '#'
 starts a comment line. Lines up to 200 characters, 300 lines. A bad line is
@@ -50,7 +54,7 @@ BLE  Bluetooth LE advert rule (up to 20 per class). The first matching rule wins
               (same field as mfr= / sd=)
      minlen=  that field has at least this many bytes
      addr=    public | random
-     beep=    1 = beep when found (with "Beep on drone" in Setup)
+     beep=    1 = beep when found (with "Beep on detection" in Setup)
      Pattern: up to 8 bytes as hex, '?' = any nibble, optional &MASK
      (sd=40&FE matches 40 and 41). At least one of cid / uuid / sdata / name.
      Example: BLE,label=Samsung SmartTag,kind=tracker,sdata=FD5A,valid=real
@@ -113,7 +117,7 @@ RX   receivers and built-in drone detectors a class asks for:
      ble     BLE dwells without BLE rules
      wifi    Wi-Fi Remote ID dwells (channel 6, 1 Mb/s)
      droneid DJI DroneID dwells (every ~40 s)
-     rid     Remote ID (BLE and Wi-Fi) as detections
+     rid     Remote ID (BLE, Wi-Fi and the ESP32 feed) as detections
      dji     DJI BLE adverts (presence) as detections
      rfcls   the sweep's drone classifiers (analog / digital video, ELRS,
              Crossfire, R9, FHSS, 2.4 GHz hoppers / toys) as detections
