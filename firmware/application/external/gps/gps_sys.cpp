@@ -24,11 +24,11 @@
 namespace ui::external_app::gps {
 
 bool gnssalm_line(const char* s, size_t n, Orbit& o, uint8_t& sys) {
-    /* fields: sys prn health sqrtA e i0 Omega0 OmegaDot omega M0 week toa [k] */
-    const char* tok[13];
-    size_t len[13];
+    /* fields: sys prn health sqrtA e i0 Omega0 OmegaDot omega M0 week toa af0 af1 [k] */
+    const char* tok[15];
+    size_t len[15];
     size_t nt = 0;
-    for (size_t i = 0; i < n && nt < 13;) {
+    for (size_t i = 0; i < n && nt < 15;) {
         while (i < n && (s[i] == ' ' || s[i] == '\t' || s[i] == '\r' || s[i] == '\n')) i++;
         if (i >= n) break;
         tok[nt] = s + i;
@@ -71,6 +71,10 @@ bool gnssalm_line(const char* s, size_t n, Orbit& o, uint8_t& sys) {
     o.m0 = v[8];
     o.toe = static_cast<double>(static_cast<int32_t>(v[9])) * kWeekS + v[10];
     o.toc = o.toe;
+    if (nt >= 14) { /* the satellite clock at toa (the system's own time) */
+        o.af0 = static_cast<float>(parse_double(tok[12], len[12]));
+        o.af1 = static_cast<float>(parse_double(tok[13], len[13]));
+    }
     o.ephemeris = 0;
     o.valid = 1;
     return true;

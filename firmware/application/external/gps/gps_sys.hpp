@@ -27,7 +27,7 @@
  * /GPS/GNSSALM.TXT for Galileo, BeiDou, GLONASS and SBAS. That file holds one
  * satellite per line in the GPS almanac model (made on a PC from a public
  * broadcast navigation file, mayhem-build tools/gnss_alm.py):
- *   sys prn health sqrtA e i0 Omega0 OmegaDot omega M0 week toa [k]
+ *   sys prn health sqrtA e i0 Omega0 OmegaDot omega M0 week toa af0 af1 [k]
  * It gives positions for the sky plot and the satellites up, not for a fix.
  * The file is not kept in RAM: the app reads it again every 30 s and keeps
  * only each satellite's elevation and azimuth (SysSky, ~5 bytes each). */
@@ -104,7 +104,7 @@ struct SysSky {
     double toa_newest;  /* GPS s: the file's newest record (its age) */
     uint16_t bad_lines; /* lines that did not parse */
     uint16_t line_len;
-    char line[132]; /* the line being read */
+    char line[168]; /* the line being read (a satellite line is ~140 characters) */
 };
 
 }  // namespace ui::external_app::gps
