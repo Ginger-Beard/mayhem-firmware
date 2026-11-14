@@ -140,6 +140,11 @@ void GpsRxProcessor::send_status() {
     status_.unit_cycles = units_ ? static_cast<uint32_t>(unit_cycles_sum_ / units_) : 0;
     status_.track = &trk_shared;
     status_.dt_ms = static_cast<int32_t>(session.dt() * 1000.0);
+    status_.sample_now = samples_;
+    {
+        const int64_t at = static_cast<int64_t>(std::llround(session.t_results() * gps_acq::kFs)) - static_cast<int64_t>(gps_acq::kN);
+        status_.results_sample = at > 0 ? static_cast<uint64_t>(at) : 0;
+    }
     status_.results = session.results();
     status_.scratch = m0_scratch;
     status_.scratch_size = sizeof(m0_scratch);

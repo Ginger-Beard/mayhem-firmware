@@ -46,10 +46,10 @@ namespace ui::external_app::gps {
 constexpr int kAutoSlots = gps_trk::kMaxCh;
 
 struct EphCollect {
-    uint8_t prn;   /* 0: free */
-    uint8_t have;  /* bit k: subframe k + 1 stored (same issue) */
-    uint8_t fresh; /* a complete set not yet written to the SD cache */
-    uint8_t pad;
+    uint8_t prn;        /* 0: free */
+    uint8_t have;       /* bit k: subframe k + 1 stored (same issue) */
+    uint8_t fresh;      /* a complete set not yet written to the SD cache */
+    uint8_t pending;    /* a complete set taken while the orbit table was in use: auto_flush() decodes it */
     uint32_t tow1;      /* TOW of the stored subframe 1's start, s */
     uint32_t sf[3][10]; /* subframes 1-3, 24 data bits per word */
 };
@@ -76,8 +76,8 @@ struct AutoState {
     uint32_t sf_read;  /* subframe ring: slots read */
     uint32_t meas_seq; /* last measurement set copied */
     uint32_t sf_total, sf_eph;
-    int32_t week;       /* full GPS week from subframe 1, 0 unknown */
-    uint32_t tow_s;     /* latest subframe start TOW */
+    int32_t week;           /* full GPS week from subframe 1, 0 unknown */
+    uint32_t tow_s;         /* latest subframe start TOW */
     uint64_t tow_at_sample; /* not used by the solver: display only */
     /* broadcast ionosphere (SF4 page 18) decoded off the air */
     nav::Iono ion;
@@ -85,7 +85,7 @@ struct AutoState {
     uint8_t ion_fresh; /* not yet written to EPH_AIR.TXT */
     uint8_t ion_prn;
     uint8_t pad2;
-    uint32_t ion_tow;  /* start of the subframe that carried it */
+    uint32_t ion_tow; /* start of the subframe that carried it */
     uint32_t ion_sf[10];
     PvtWork pvt;
 };
@@ -95,13 +95,28 @@ void auto_reset(AutoState& a); /* also the PVT's correction defaults (tropospher
 /* One parity-checked subframe. Updates week / TOW / almanac pages; when it
  * completes a satellite's subframes 1-3 the ephemeris replaces table[prn-1]
  * unless that already holds an ephemeris with the same or a later toe.
- * Returns the PRN of a new ephemeris, else 0. */
+ * Returns the PRN of a new ephemeris, else 0. table == nullptr (the solver
+ * reads the orbit table): the subframe is kept and a completed set waits for
+ * auto_flush(), so nothing is lost while a solve runs. */
 int auto_take_subframe(AutoState& a, const gps_trk::SubframeSlot& s, int32_t week_hint, Orbit* table);
+
+int auto_finish_set(AutoState& a, EphCollect& c, int32_t week_hint, Orbit* table);
+
+/* Decode the sets completed while the orbit table was in use (see above);
+ * the PRN of each new ephemeris goes to on_eph. */
+template <typename F>
+void auto_flush(AutoState& a, int32_t week_hint, Orbit* table, F&& on_eph) {
+    for (auto& c : a.col)
+        if (c.prn && c.pending) {
+            const int prn = auto_finish_set(a, c, week_hint, table);
+            if (prn) on_eph(prn);
+        }
+}
 
 /* Copy what the M4 published (seqlock / ring rules of gps_trk_shared.hpp).
  * Returns true when a new measurement set was copied into a.meas. Subframes
- * are handed to auto_take_subframe() through `take` (prn of a new ephemeris
- * reported through `on_eph`). */
+ * are handed to auto_take_subframe() (prn of a new ephemeris reported through
+ * `on_eph`); table == nullptr while the solver reads the orbit table. */
 template <typename F>
 bool auto_poll(AutoState& a, const gps_trk::Shared* sh, int32_t week_hint, Orbit* table, F&& on_eph) {
     if (!sh) return false;
@@ -122,6 +137,7 @@ bool auto_poll(AutoState& a, const gps_trk::Shared* sh, int32_t week_hint, Orbit
         const int prn = auto_take_subframe(a, slot, week_hint, table);
         if (prn) on_eph(prn);
     }
+    if (table) auto_flush(a, week_hint, table, on_eph);
     /* measurements */
     const uint32_t ms = sh->meas_seq;
     if (ms == a.meas_seq || ms == 0) return false;

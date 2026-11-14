@@ -209,8 +209,10 @@ file starts with a header line and one "#TYPE,..." line per row type. Types:
           snapshot found (peak/mean x100, Doppler Hz, code phase x1000)
   HO      hand-over to tracking: count, age of the search result ms, PRNs
   CLK     GPS time: event (tow: from the first decoded time, pvt: from a fix,
-          logged once and again when the offset moves by 0.5 s or more; set:
-          the RTC written by "Set clock"), GPS - RTC ms (set: the step written),
+          logged once and again when the offset moves by 0.1 s or more; set:
+          the RTC written by "Set clock"), GPS - RTC ms, both taken at the same
+          instant to ~10 ms (the RTC's second from its 1 Hz tick; set: the
+          step written),
           RTC UTC s, GPS UTC s (set: the value written), Zone minutes
   ADD     aided search for a newly risen satellite (every 5 s at most, when
           a channel or the extra search slot is free): PRN, elevation deg,
@@ -230,9 +232,10 @@ file starts with a header line and one "#TYPE,..." line per row type. Types:
           Doppler Hz:C/N0 x10
   SOLVE   a solve starts: kind (snapshot_coarse / snapshot_precise /
           pvt_coarse / pvt_precise), satellites, PRNs (with code phase for a
-          snapshot), time (s of day for a snapshot, receive-time guess ms for
-          a PVT), prior lat / lon 1e-7 deg, residual limit m, clock limit s,
-          almanac age days x10
+          snapshot), time (s of day for a snapshot: when its samples were
+          taken, receive-time guess ms for a PVT), prior lat / lon 1e-7 deg,
+          residual limit m, clock limit s, almanac age days x10; snapshot: how
+          long ago its samples were taken, ms (the search's duration)
   FIX     its result: kind, ok, why (ok / not tried: ... / rejected: ...),
           satellites used, dropped by RAIM, residual m x10, HDOP x10, VDOP x10,
           clock m, time correction ms (snapshot) or TCXO ppb (PVT), lat / lon
@@ -244,6 +247,8 @@ file starts with a header line and one "#TYPE,..." line per row type. Types:
   SCREEN  the Fix tab's rows (joined by |) whenever they change, with the
           tab shown; HEARD the Heard tab's rows likewise
   ERR     card, ring or solver problems (what, detail)
+  LOG     the log file reopened because the Log box was ticked again (event,
+          errors so far); after a card error the reopen is an ERR row
 The log holds your position: keep it to yourself.
 
 Heard tab (what the receiver hears)

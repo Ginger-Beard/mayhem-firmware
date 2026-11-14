@@ -63,6 +63,7 @@
 #include "gps_pvt.hpp"
 #include "gps_log.hpp"
 #include "gps_fmt.hpp"
+#include "gps_clock.hpp"
 #endif
 
 namespace ui::external_app::gps {
@@ -209,8 +210,8 @@ struct GpsScratch {
     /* "Autonomous": subframes / ephemerides / almanac pages / measurements
      * from the tracking loops, the PVT work space and its last solution */
     AutoState autos;
-    PvtSolution pvt;     /* the solver thread's output */
-    PvtSolution pvt_fix; /* the last accepted one (shown, saved) */
+    PvtSolution pvt;          /* the solver thread's output */
+    PvtSolution pvt_fix;      /* the last accepted one (shown, saved) */
     uint32_t cache_sf[3][10]; /* the loader assembles an EPH_AIR.TXT record here */
     nav::Iono iono_cache;     /* ionosphere from EPH_AIR.TXT (an "S prn week 4 ..." line) */
     double iono_cache_t{0};   /* GPS s of the subframe that carried it, 0 none */
@@ -356,7 +357,7 @@ class FixView : public View {
     Checkbox check_log_{{UI_POS_X(12), 0}, 3, "Log", true};
     Button button_fix_;
     Button button_save_;
-    Button button_clock_; /* "Set clock": the PortaPack RTC from GPS time, only when pressed */
+    Button button_clock_;           /* "Set clock": the PortaPack RTC from GPS time, only when pressed */
     bool fix_running_shown_{false}; /* button_fix_ shows "Stop" */
     const char* save_msg_{nullptr}; /* bottom row after "Save pos" */
     Color save_color_{Color::white()};
@@ -608,8 +609,8 @@ class GpsView : public View {
      * with it off, the clock shows whatever it was set to and this must be
      * the offset in force (e.g. -240 in US summer). */
     int32_t utc_off_min_{0};
-    uint32_t tab_{2};   /* last tab (saved) */
-    uint32_t depth_{1}; /* Heard snapshot: 0 = 10 ms, 1 = 20 ms (saved) */
+    uint32_t tab_{2};    /* last tab (saved) */
+    uint32_t depth_{1};  /* Heard snapshot: 0 = 10 ms, 1 = 20 ms (saved) */
     uint32_t log_on_{0}; /* diagnostics log (Log box on the Fix tab, saved) */
     app_settings::SettingsManager settings_;
     int8_t bias_shown_{-1};  /* last antenna-power state shown (read only) */
@@ -729,30 +730,38 @@ class GpsView : public View {
      * corrected by GPS time once the satellites gave it, so a wrong clock cannot
      * block a fix or the predictions. The RTC itself is written only by "Set clock". */
     double now_best() const { return now_unix() + (gps_time_ok_ ? gps_off_s_ : 0.0); }
-    void set_clock_from_gps();  /* "Set clock" (Fix tab): the RTC from GPS time, Zone applied */
-    void clock_step();          /* frame handler: writes the RTC at the next second boundary */
+    void set_clock_from_gps(); /* "Set clock" (Fix tab): the RTC from GPS time, Zone applied */
+    void clock_step();         /* frame handler: writes the RTC at the next second boundary */
     bool clock_set_pending_{false};
-    int8_t clock_msg_{0};       /* Fix tab: 1 clock set, -1 no GPS time yet */
-    bool clock_logged_{false};  /* the GPS - RTC offset logged once (then on changes > 1 s) */
+    int8_t clock_msg_{0};      /* Fix tab: 1 clock set, -1 no GPS time yet */
+    bool clock_logged_{false}; /* the GPS - RTC offset logged once (then on changes over 0.1 s) */
     double clock_logged_off_{0};
-    double gps_off_s_{0};   /* GPS time from the satellites - RTC-based GPS time */
+    double gps_off_s_{0}; /* GPS time from the satellites - RTC-based GPS time (both at the same instant) */
     bool gps_time_ok_{false};
+    /* sub-second clocks (gps_clock.hpp): the RTC's second from its 1 Hz tick,
+     * the image's sample count from its status messages */
+    RtcPhase rtc_phase_{};
+    SampleClock sample_clock_{};
+    uint64_t results_sample_{0}; /* first sample of the snapshot the search results refer to */
+    double results_age_s() const;
+    /* GPS time now from the GPS time at a sample of the image's clock */
+    double gps_now_at_sample(double gps_at_sample, uint64_t sample) const;
 
     /* "Autonomous": tracking loops (M4) -> subframes, ephemerides, PVT (M0) */
     const gps_trk::Shared* trk_sh_{nullptr};
-    bool tracking_{false};    /* PGPR reports TRACKING */
-    systime_t auto_t0_{0};    /* Get fix pressed */
-    uint32_t ttff_s_{0};      /* first precise fix, s after Get fix (0 none yet) */
+    bool tracking_{false}; /* PGPR reports TRACKING */
+    systime_t auto_t0_{0}; /* Get fix pressed */
+    uint32_t ttff_s_{0};   /* first precise fix, s after Get fix (0 none yet) */
     uint32_t ttff_coarse_s_{0};
-    uint8_t auto_eph_{0};     /* tracked satellites with an ephemeris (off air or file) */
-    uint8_t auto_synced_{0};  /* tracked with TOW */
+    uint8_t auto_eph_{0};    /* tracked satellites with an ephemeris (off air or file) */
+    uint8_t auto_synced_{0}; /* tracked with TOW */
     uint8_t auto_tracked_{0};
     uint8_t cache_cursor_{0}; /* next EphCollect slot to look at for the SD cache */
     uint8_t cache_line_{0};   /* line of the record being written (0..2) */
     uint16_t cache_written_{0};
-    void auto_poll_m4();      /* channels, subframes, measurements; starts a PVT */
+    void auto_poll_m4(); /* channels, subframes, measurements; starts a PVT */
     void auto_finish_pvt();
-    void auto_cache_step();   /* one EPH_AIR.TXT line per call, from the frame handler */
+    void auto_cache_step(); /* one EPH_AIR.TXT line per call, from the frame handler */
     uint16_t cache_errs_{0};
     bool meas_waiting_{false}; /* a measurement set copied while the solver ran */
     bool req_confirm_{true};   /* the last search asked for a 2nd-snapshot confirmation */
@@ -774,7 +783,7 @@ class GpsView : public View {
     void apply_iono();
     void log_aided(int prn, float el, double code, double dop, double clk, int windows, uint32_t age_ms, bool eph);
     uint16_t log_rel_seen_{0}; /* tracker releases already logged */
-    int32_t status_dt_ms_{0}; /* the last search's snapshot A -> B interval */
+    int32_t status_dt_ms_{0};  /* the last search's snapshot A -> B interval */
 
     /* Diagnostics log (ui_gps_log.cpp): rows built in GpsScratch::log, written
      * from the display frame handler only, sector-bounded, synced every 3 s. */
@@ -801,7 +810,7 @@ class GpsView : public View {
     void log_screen();
     void log_results(const gps_rx::Result* r, uint8_t k_ms);
     void log_handover();
-    void log_iono(); /* the ionosphere source in use changed (IONO row) */
+    void log_iono();                                  /* the ionosphere source in use changed (IONO row) */
     void log_clock(const char* src);                  /* GPS time known / its offset to the RTC moved */
     void log_clock_set(double rtc_before, int64_t t); /* "Set clock" wrote the RTC */
     void log_subframes();
@@ -828,8 +837,8 @@ class GpsView : public View {
     bool start_search(Job job, uint8_t k_ms, bool force_full = false);
     /* What the running / last search covered (Heard says it plainly). */
     enum SearchKind : uint8_t { SK_NONE,
-                                SK_ASSISTED,    /* predicted PRNs and Doppler (almanac, position, time) */
-                                SK_FULL,        /* all 32 PRNs, +-7 kHz (no orbits or position) */
+                                SK_ASSISTED,     /* predicted PRNs and Doppler (almanac, position, time) */
+                                SK_FULL,         /* all 32 PRNs, +-7 kHz (no orbits or position) */
                                 SK_FULL_AFTER }; /* all 32 after an assisted search found none */
     SearchKind search_kind_{SK_NONE};
     /* Stop a running search (the M4 drops it at its next work unit). */

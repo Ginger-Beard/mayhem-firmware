@@ -127,22 +127,52 @@ static inline uint32_t pk_hi_hi(uint32_t hi, uint32_t lo) { /* hi[31:16] << 16 |
     __asm__("pkhtb %0, %1, %2, asr #16" : "=r"(r) : "r"(hi), "r"(lo));
     return r;
 }
-static inline void mem_barrier() { __asm__ volatile("dmb" ::: "memory"); }
+static inline void mem_barrier() {
+    __asm__ volatile("dmb" ::: "memory");
+}
 #else
-static inline int16_t lo16(uint32_t a) { return static_cast<int16_t>(a & 0xFFFFu); }
-static inline int16_t hi16(uint32_t a) { return static_cast<int16_t>(a >> 16); }
-static inline uint32_t pack16(int32_t lo, int32_t hi) { return (static_cast<uint32_t>(lo) & 0xFFFFu) | (static_cast<uint32_t>(hi) << 16); }
-static inline uint32_t sadd16(uint32_t a, uint32_t b) { return pack16(lo16(a) + lo16(b), hi16(a) + hi16(b)); }
-static inline uint32_t ssub16(uint32_t a, uint32_t b) { return pack16(lo16(a) - lo16(b), hi16(a) - hi16(b)); }
-static inline int32_t smuad(uint32_t a, uint32_t b) { return lo16(a) * lo16(b) + hi16(a) * hi16(b); }
-static inline int32_t smusdx(uint32_t a, uint32_t b) { return lo16(a) * hi16(b) - hi16(a) * lo16(b); }
-static inline int32_t smlad(uint32_t a, uint32_t b, int32_t acc) { return acc + smuad(a, b); }
-static inline int32_t smlsdx(uint32_t a, uint32_t b, int32_t acc) { return acc + smusdx(a, b); }
-static inline uint32_t sxtb16(uint32_t a) { return pack16(static_cast<int8_t>(a & 0xFF), static_cast<int8_t>((a >> 16) & 0xFF)); }
-static inline uint32_t sxtb16_ror8(uint32_t a) { return pack16(static_cast<int8_t>((a >> 8) & 0xFF), static_cast<int8_t>((a >> 24) & 0xFF)); }
-static inline uint32_t pk_lo_lo(uint32_t lo, uint32_t hi) { return (lo & 0xFFFFu) | (hi << 16); }
-static inline uint32_t pk_hi_hi(uint32_t hi, uint32_t lo) { return (hi & 0xFFFF0000u) | (lo >> 16); }
-static inline void mem_barrier() { __asm__ volatile("" ::: "memory"); }
+static inline int16_t lo16(uint32_t a) {
+    return static_cast<int16_t>(a & 0xFFFFu);
+}
+static inline int16_t hi16(uint32_t a) {
+    return static_cast<int16_t>(a >> 16);
+}
+static inline uint32_t pack16(int32_t lo, int32_t hi) {
+    return (static_cast<uint32_t>(lo) & 0xFFFFu) | (static_cast<uint32_t>(hi) << 16);
+}
+static inline uint32_t sadd16(uint32_t a, uint32_t b) {
+    return pack16(lo16(a) + lo16(b), hi16(a) + hi16(b));
+}
+static inline uint32_t ssub16(uint32_t a, uint32_t b) {
+    return pack16(lo16(a) - lo16(b), hi16(a) - hi16(b));
+}
+static inline int32_t smuad(uint32_t a, uint32_t b) {
+    return lo16(a) * lo16(b) + hi16(a) * hi16(b);
+}
+static inline int32_t smusdx(uint32_t a, uint32_t b) {
+    return lo16(a) * hi16(b) - hi16(a) * lo16(b);
+}
+static inline int32_t smlad(uint32_t a, uint32_t b, int32_t acc) {
+    return acc + smuad(a, b);
+}
+static inline int32_t smlsdx(uint32_t a, uint32_t b, int32_t acc) {
+    return acc + smusdx(a, b);
+}
+static inline uint32_t sxtb16(uint32_t a) {
+    return pack16(static_cast<int8_t>(a & 0xFF), static_cast<int8_t>((a >> 16) & 0xFF));
+}
+static inline uint32_t sxtb16_ror8(uint32_t a) {
+    return pack16(static_cast<int8_t>((a >> 8) & 0xFF), static_cast<int8_t>((a >> 24) & 0xFF));
+}
+static inline uint32_t pk_lo_lo(uint32_t lo, uint32_t hi) {
+    return (lo & 0xFFFFu) | (hi << 16);
+}
+static inline uint32_t pk_hi_hi(uint32_t hi, uint32_t lo) {
+    return (hi & 0xFFFF0000u) | (lo >> 16);
+}
+static inline void mem_barrier() {
+    __asm__ volatile("" ::: "memory");
+}
 #endif
 
 /* Nibble tables of one block (32 samples): lut[16*k + p] = sum of the
@@ -353,8 +383,8 @@ class Framer {
             const uint32_t a = w1 ^ m, h = w2 ^ m, p = pv ^ (inv ? 3u : 0u);
             uint32_t d1, d2;
             if (!word_ok(a, p, &d1) || ((d1 >> 16) & 0xFFu) != 0x8Bu || !word_ok(h, a, &d2)) continue;
-            const uint32_t t = d2 >> 7;               /* 17-bit TOW count of the next subframe */
-            const uint32_t id = (d2 >> 2) & 7u;       /* subframe ID */
+            const uint32_t t = d2 >> 7;         /* 17-bit TOW count of the next subframe */
+            const uint32_t id = (d2 >> 2) & 7u; /* subframe ID */
             if (t >= 100800u || id < 1 || id > 5) continue;
             inverted_ = inv;
             words_[0] = d1;
@@ -404,17 +434,17 @@ struct LoopParams {
 
 class Channel {
    public:
-    static constexpr int kPullinEpochs = 200;     /* FLL only */
-    static constexpr int kWideEpochs = 800;       /* PLL wide + FLL assist, at least */
-    static constexpr int kCn0Win = 100;           /* M2M4 window, epochs */
-    static constexpr float kLossCn0 = 25.0f;      /* dB-Hz: two windows below -> lost */
+    static constexpr int kPullinEpochs = 200; /* FLL only */
+    static constexpr int kWideEpochs = 800;   /* PLL wide + FLL assist, at least */
+    static constexpr int kCn0Win = 100;       /* M2M4 window, epochs */
+    static constexpr float kLossCn0 = 25.0f;  /* dB-Hz: two windows below -> lost */
     static constexpr float kVerifyCn0 = 28.0f;
-    static constexpr int kSearchK = 20;           /* epochs per search cell */
-    static constexpr int kSearchCode = 5;         /* code centres, 3 half chips apart (taps E/P/L) */
-    static constexpr int kSearchDop = 5;          /* Doppler bins, 250 Hz apart */
-    static constexpr uint32_t kPullinMaxMs = 1500;  /* not locked by then -> search */
+    static constexpr int kSearchK = 20;            /* epochs per search cell */
+    static constexpr int kSearchCode = 5;          /* code centres, 3 half chips apart (taps E/P/L) */
+    static constexpr int kSearchDop = 5;           /* Doppler bins, 250 Hz apart */
+    static constexpr uint32_t kPullinMaxMs = 1500; /* not locked by then -> search */
     static constexpr uint32_t kSearchGiveUpMs = 30000;
-    static constexpr float kSearchThr = 2.75f;    /* max / mean cell power, K = 20 (as acquisition) */
+    static constexpr float kSearchThr = 2.75f; /* max / mean cell power, K = 20 (as acquisition) */
 
     void stop() {
         state_ = TRK_IDLE;
@@ -429,9 +459,11 @@ class Channel {
         int8_t chips[1023];
         gps_acq::ca_code(prn, chips);
         std::memset(dd_, 0, sizeof(dd_));
-        for (int b = 0; b < kDdWords * 32; b++) {
-            const int i = ((b - 1) % kHalfChips + kHalfChips) % kHalfChips; /* DD[b] = D[b - 1] */
+        /* DD[b] = D[b - 1], wrapping (no division: a start runs inside one
+         * buffer's time, next to the other channels) */
+        for (int b = 0, i = kHalfChips - 1; b < kDdWords * 32; b++) {
             if (chips[i >> 1] < 0) dd_[b >> 5] |= 1u << (b & 31);
+            if (++i == kHalfChips) i = 0;
         }
         prn_ = static_cast<uint8_t>(prn);
         lp_ = lp;
@@ -547,13 +579,13 @@ class Channel {
    private:
     uint32_t dd_[kDdWords]{};
     /* replica state at the next sample */
-    uint32_t m_{0};         /* half-chip index of the prompt, 0..2045 */
-    uint32_t f_{0};         /* its fraction, 2^-32 */
-    uint32_t delta_{0};     /* 1 - half chips per sample, 2^-32 */
-    float delta_res_{0};    /* rounding carried to the next epoch */
-    uint32_t phc_{0};       /* carrier phase at the centre of the next block, 2^-32 cycles */
-    uint32_t wblk_{0};      /* carrier advance per block (32 samples), 2^-32 cycles: 1.5e-5 Hz steps */
-    float wblk_res_{0};     /* its rounding, carried to the next epoch */
+    uint32_t m_{0};      /* half-chip index of the prompt, 0..2045 */
+    uint32_t f_{0};      /* its fraction, 2^-32 */
+    uint32_t delta_{0};  /* 1 - half chips per sample, 2^-32 */
+    float delta_res_{0}; /* rounding carried to the next epoch */
+    uint32_t phc_{0};    /* carrier phase at the centre of the next block, 2^-32 cycles */
+    uint32_t wblk_{0};   /* carrier advance per block (32 samples), 2^-32 cycles: 1.5e-5 Hz steps */
+    float wblk_res_{0};  /* its rounding, carried to the next epoch */
     /* epoch in progress (Q negated: SMLSDX): IP -QP, ID -QD with D = (E - L) / 2 (fast
      * blocks: every other one), IE -QE IL -QL (search only, every block) */
     int32_t acc_[8]{};
@@ -569,10 +601,10 @@ class Channel {
     uint8_t prn_{0};
     uint8_t state_{TRK_IDLE};
     uint8_t reacq_{0};
-    float freq_{0};      /* carrier NCO, Hz (float: 0.5 mHz steps at 7 kHz) */
-    float freq_int_{0};  /* loop integrator, Hz */
-    float code_corr_{0}; /* DLL correction, chips/s */
-    uint32_t mode_ms_{0};  /* epochs in the current state */
+    float freq_{0};       /* carrier NCO, Hz (float: 0.5 mHz steps at 7 kHz) */
+    float freq_int_{0};   /* loop integrator, Hz */
+    float code_corr_{0};  /* DLL correction, chips/s */
+    uint32_t mode_ms_{0}; /* epochs in the current state */
     uint32_t track_ms_{0};
     float prev_i_{0}, prev_q_{0};
     bool have_prev_{false};
@@ -590,8 +622,8 @@ class Channel {
     int cn0_wins_{0};
     uint32_t verify_ms_{0};
     bool verified_{false};
-    bool ever_ok_{false};      /* verified or bit-synced since start() */
-    bool released_{false};     /* given up unverified (LoopParams::verify_timeout_ms) */
+    bool ever_ok_{false};  /* verified or bit-synced since start() */
+    bool released_{false}; /* given up unverified (LoopParams::verify_timeout_ms) */
     bool rel_reported_{false};
     float good_freq_{0};
     /* bit sync and bits */
@@ -612,14 +644,14 @@ class Channel {
     /* search */
     float cell_[kSearchCode * kSearchDop * 3]{};
     int s_cell_{0}, s_k_{0};
-    int s_off_{0}; /* half chips currently applied */
-    int s_base_{0};      /* centre of the current window, half chips from the start position */
-    uint8_t s_win_{0};   /* aided search: window index (0, +1, -1, +2, -2 ...) */
-    uint8_t s_wmax_{0};  /* aided search: windows either side (0: the local search of a lost channel) */
-    bool aided_{false};  /* started by start_aided(): a newly risen satellite, searched around a prediction */
+    int s_off_{0};      /* half chips currently applied */
+    int s_base_{0};     /* centre of the current window, half chips from the start position */
+    uint8_t s_win_{0};  /* aided search: window index (0, +1, -1, +2, -2 ...) */
+    uint8_t s_wmax_{0}; /* aided search: windows either side (0: the local search of a lost channel) */
+    bool aided_{false}; /* started by start_aided(): a newly risen satellite, searched around a prediction */
     float s_f0_{0};
     uint32_t s_ms_{0};
-    uint16_t sweeps_{0};  /* diagnostics */
+    uint16_t sweeps_{0}; /* diagnostics */
     float code_err_{0};
     /* +-500 Hz false-lock detector: with 1 ms correlations both the FLL
      * (cross/dot) and the Costas PLL are blind to half a cycle per ms, so a
@@ -962,7 +994,8 @@ inline void Channel::search_epoch(float ie, float qe, float ip, float qp, float 
     const int bc = best / 3, tap = best % 3;
     if (mean > 0 && cell_[best] / mean > kSearchThr) {
         const int ci = bc % kSearchCode, di = bc / kSearchCode;
-        const int off = s_base_ + (ci - kSearchCode / 2) * 3 + (tap == 0 ? 1 : tap == 2 ? -1 : 0); /* early tap = replica + 1 half chip */
+        const int off = s_base_ + (ci - kSearchCode / 2) * 3 + (tap == 0 ? 1 : tap == 2 ? -1
+                                                                                        : 0); /* early tap = replica + 1 half chip */
         shift_code(off - s_off_);
         restart(s_f0_ + (di - kSearchDop / 2) * 250.0f);
         return;
@@ -1176,8 +1209,10 @@ inline void Channel::bit_epoch(float ip, bool valid, Shared* sh, int ch) {
         return;
     }
     if (e20 == bit_edge_) {
-        if (bit_cnt_ >= 10) got_bit(bit_acc_ < 0 ? 1 : 0, sh, ch);
-        else if (bit_cnt_ >= 0) got_bit(0, sh, ch); /* mostly lost to gaps: a guess (parity will tell) */
+        if (bit_cnt_ >= 10)
+            got_bit(bit_acc_ < 0 ? 1 : 0, sh, ch);
+        else if (bit_cnt_ >= 0)
+            got_bit(0, sh, ch); /* mostly lost to gaps: a guess (parity will tell) */
         bit_acc_ = 0;
         bit_cnt_ = 0;
     }

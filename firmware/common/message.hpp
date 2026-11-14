@@ -2596,8 +2596,8 @@ struct GpsRxConfigMessage : public Message {
         : Message{ID::GpsRxConfig} {}
     enum Cmd : uint8_t { CMD_STOP = 0, /* stops a search and the tracking */
                          CMD_SEARCH = 1,
-                         CMD_TRACK = 2,   /* track the PRNs in prn_mask from the last search's results */
-                         CMD_ADD = 3 };   /* while tracking: aided search for one newly risen satellite (add_*) */
+                         CMD_TRACK = 2, /* track the PRNs in prn_mask from the last search's results */
+                         CMD_ADD = 3 }; /* while tracking: aided search for one newly risen satellite (add_*) */
     uint8_t cmd{CMD_STOP};
     uint8_t k_ms{20};      /* snapshot length, 1..20 ms */
     uint8_t half_bins{12}; /* Doppler bins of 500 Hz either side of each centre */
@@ -2651,6 +2651,11 @@ struct GpsRxStatusMessage : public Message {
     uint16_t scratch_size{0};
     const void* track{nullptr}; /* gps_trk::Shared (channels, subframes, measurements), valid while the image runs */
     int32_t dt_ms{0};           /* the confirmation interval: snapshot B - snapshot A, ms (diagnostics) */
+    /* the image's sample clock (2.048 Msps since it started): the next sample
+     * when this status was sent, and the first sample of the snapshot the
+     * results refer to (their age; the app maps samples to its own clock) */
+    uint64_t sample_now{0};
+    uint64_t results_sample{0};
 };
 
 #endif /*__MESSAGE_H__*/
