@@ -180,6 +180,14 @@ void auto_predict(const Orbit& o, const Vec3& rx, double t_rx, double* code_chip
 /* half-width of the aided code search (windows of 15 half chips either side):
  * the orbit's position error over the light time, from the almanac's age */
 int auto_aided_windows(bool ephemeris, double age_days);
+/* Before the first fix (aided search with GPS time from a tracked satellite):
+ * the GPS time at which a tracked satellite's signal arrives, from its
+ * transmit time tx_sv (its clock, s on the GPS-week timeline) and an
+ * approximate receiver position (error: the position error along the line of
+ * sight / c); and the search half-width widened for that position error. */
+double auto_rx_time(const Orbit& o, const Vec3& rx, double tx_sv);
+int auto_aided_windows_pos(bool ephemeris, double age_days, double pos_err_m);
+#define GPS_AUTO_RX_TIME 1
 int auto_almanac_decode(const AutoState& a, int32_t week_now, AlmRec* recs);
 
 }  // namespace ui::external_app::gps

@@ -20,6 +20,7 @@
  */
 
 #include "ui_gps.hpp"
+#include "gps_mirror.hpp"
 #include "gps_cache.hpp"
 #include "gps_nav.hpp"
 
@@ -2530,6 +2531,34 @@ bool GpsView::start_search(Job job, uint8_t k_ms, bool force_full) {
     return true;
 }
 
+/* Autonomous takes no 2nd snapshot, so a mirrored spectrum (reason 4) cannot
+ * show in the search; the detections' Dopplers against the predicted ones
+ * tell it (gps_mirror.hpp). Mirrored: this hand-over goes to a tracking image
+ * that negates Q, with the Dopplers negated. */
+void GpsView::mirror_check(uint32_t mask) {
+    iq_skip_logged_ = false;
+    if (!mem_ || !results_ || !geo_ready_ || !pos_valid_) {
+        log_iq_skip("skipped_search", "no 2nd snapshot; no prediction (sky / position)", 0);
+        return;
+    }
+    float meas[16], pred[16];
+    int n = 0;
+    for (int p = 0; p < 32 && n < 16; p++) {
+        if (!((mask >> p) & 1u) || !mem_->orbits[p].valid || mem_->geo[p].el < -5.0f) continue;
+        meas[n] = results_[p].doppler;
+        pred[n] = static_cast<float>(-mem_->geo[p].rr / kL1Lambda);
+        n++;
+    }
+    const MirrorResult r = mirror_classify(meas, pred, n, 0);
+    if (r.verdict == MIRROR_YES && iq_flips_ < kIqMaxFlips) {
+        iq_flip(true, r.mirrored, ",doppler,");
+        pending_neg_dop_ = true;
+        return;
+    }
+    log_iq_skip("skipped_search", r.verdict == MIRROR_DIRECT ? "no 2nd snapshot; Dopplers agree as received" : (r.verdict == MIRROR_YES ? "mirrored by the Dopplers; all corrections used" : "no 2nd snapshot; Dopplers do not tell"),
+                r.verdict == MIRROR_YES ? r.mirrored : r.direct);
+}
+
 void GpsView::stop_auto() {
     want_job_ = JOB_NONE;
     gal_pending_ = false; /* the tracking image drops its Galileo search with the loops */
@@ -2653,12 +2682,6 @@ void GpsView::on_status(const GpsRxStatusMessage& m) {
             results_ms_ok_ = m.results_sample != 0;
         }
         log_results(results_, m.k_ms);
-        if (!req_confirm_ && results_) { /* Autonomous: no 2nd snapshot, so the search cannot see a mirrored spectrum (reason 4) */
-            iq_skip_logged_ = false;
-            uint32_t det = 0;
-            for (int p = 0; p < 32; p++) det += results_[p].detected;
-            log_iq_skip("skipped_search", "no 2nd snapshot in Autonomous (detections)", det);
-        }
         if (job_ == JOB_FIX || job_ == JOB_AUTO) solve_pending_ = pos_valid_ && (n_alm_ || n_eph_); /* Autonomous: the coarse fix first */
         if (mem_ && results_) {
             const uint32_t t = static_cast<uint32_t>(now_best());
@@ -2675,6 +2698,8 @@ void GpsView::on_status(const GpsRxStatusMessage& m) {
             if (mask) {
                 pending_track_mask_ = mask;
                 iq_trk_flip_ = 0; /* a new hand-over: the search's orientation */
+                pending_neg_dop_ = false;
+                mirror_check(mask); /* no 2nd snapshot: the Dopplers against the predictions */
                 want_image(gps_image::ID_L1T);
             }
         }
@@ -2950,14 +2975,35 @@ void GpsView::auto_poll_m4() {
  * the last fix (position, GPS time at its sample) and the receiver clock's
  * frequency term (median of measured - predicted Doppler of the tracked ones). */
 void GpsView::auto_aided_step() {
-    if (!mem_ || !trk_sh_ || !fix_have_time_ || !geo_ready_ || !fix_ok_) return;
+    /* with a fix: its position and the GPS time at its sample; before one (fewer
+     * than 4 tracked can never give one): the saved position and the GPS time at
+     * the measurement sample from a tracked satellite's time of week */
+    const bool have_fix = fix_have_time_ && fix_ok_;
+    if (!mem_ || !trk_sh_ || !geo_ready_ || (!have_fix && !(gps_time_ok_ && pos_valid_))) return;
     if (++aided_tick_ < kAidedEvery) return;
     aided_tick_ = 0;
     for (auto& w : aided_wait_)
         if (w) w--;
     const AutoState& a = mem_->autos;
-    const uint64_t age = a.meas.sample > fix_sample_ ? a.meas.sample - fix_sample_ : 0;
     constexpr uint64_t kFsHz = 2048000;
+    Vec3 pos = fix_.pos;
+    double t_rx = fix_trx_;
+    uint64_t at = fix_sample_;
+    if (!have_fix) { /* the first channel with a time of week and an orbit gives the time */
+        int r = -1;
+        for (int i = 0; i < a.meas.n && r < 0; i++) {
+            const gps_trk::MeasCh& c = a.meas.ch[i];
+            if ((c.flags & gps_trk::F_FRAME) && c.prn >= 1 && c.prn <= 32 && mem_->orbits[c.prn - 1].valid) r = i;
+        }
+        if (r < 0 || !a.have_meas) return;
+        const gps_trk::MeasCh& c = a.meas.ch[r];
+        const int32_t wk = a.week > 0 ? a.week : nav::week_floor(static_cast<int32_t>(now_gps() / kWeekS));
+        const double tx = wk * kWeekS + c.tx_ms * 1e-3 + c.tx_frac / 4294967296.0 * 1e-3;
+        pos = rx_;
+        t_rx = auto_rx_time(mem_->orbits[c.prn - 1], rx_, tx);
+        at = a.meas.sample;
+    }
+    const uint64_t age = a.meas.sample > at ? a.meas.sample - at : 0;
     if (age > 12u * kFsHz) return; /* the sample clock drifts ~0.5 us/s against GPS time: a recent fix */
     bool busy[32]{};
     float diffs[gps_trk::kMaxCh];
@@ -2986,18 +3032,25 @@ void GpsView::auto_aided_step() {
     if (best < 0) return;
     const Orbit& o = mem_->orbits[best];
     double code = 0, dop = 0;
-    auto_predict(o, fix_.pos, fix_trx_, &code, &dop);
+    auto_predict(o, pos, t_rx, &code, &dop);
     const bool eph = o.ephemeris != 0;
-    int win = auto_aided_windows(eph, eph ? 0.0 : alm_age_days());
-    if (fix_mode_ != FIX_PRECISE) win += 3;       /* a coarse fix: ~1 km */
+    int win;
+    if (have_fix) {
+        win = auto_aided_windows(eph, eph ? 0.0 : alm_age_days());
+        if (fix_mode_ != FIX_PRECISE) win += 3; /* a coarse fix: ~1 km */
+    } else {                                    /* the saved position's error, both ways (kAidedPosErrM unless it says it is better) */
+        const double err = pos_.acc_m > 0 && pos_.acc_m < kAidedPosErrM ? pos_.acc_m : kAidedPosErrM;
+        win = auto_aided_windows_pos(eph, eph ? 0.0 : alm_age_days(), err);
+    }
     win += static_cast<int>(age / (10u * kFsHz)); /* clock drift since the fix: ~1 window per 10 s */
+    if (win > 40) win = 40;
     GpsRxConfigMessage m;
     m.cmd = GpsRxConfigMessage::CMD_ADD;
     m.add_prn = static_cast<uint8_t>(best + 1);
     m.add_windows = static_cast<uint8_t>(win);
     m.add_code = static_cast<float>(code);
     m.add_doppler = static_cast<float>(dop + clk);
-    m.add_at = fix_sample_;
+    m.add_at = at;
     baseband::gps_rx_config(m);
     aided_wait_[best] = kAidedRetry;
     log_aided(best + 1, mem_->geo[best].el, code, dop + clk, clk, win, static_cast<uint32_t>(age * 1000u / kFsHz), eph);

@@ -150,7 +150,11 @@ With fewer than 6 heard there is no coarse fix: the tab then says "Heard 3,
 and shows per tracked satellite which of subframes 1-3 it has so far
 ("05:1.3": 1 and 3 held, 2 missing; "05:eph": decoded). Get fix again keeps
 what was collected (subframes, almanac pages, ionosphere) for 2 hours, so a
-restart does not start the 30 s per satellite over.
+restart does not start the 30 s per satellite over. Before the first fix,
+once a tracked satellite gave GPS time, the app searches for more satellites
+(one every 5 s while a channel is free) from the saved position, assumed up to
+10 km off (or its accuracy, if the position file gives a better one): 3 heard
+cannot give a fix, a fourth found this way can (ADD rows).
 A fade (C/N0 under 25 dB-Hz: a roof, trees, a bridge) is first coasted for
 0.8 s ("faded: holding" on Heard); a satellite found again within 5 s keeps
 its bit and subframe timing, so its subframes continue at the next one.
@@ -387,10 +391,15 @@ file starts with a header line and one "#TYPE,..." line per row type. Types:
           the code move against the Doppler; tracking: strong satellites
           handed over but no lock in 20 s), evidence (search: candidates;
           tracking: best C/N0), correction now (1: the images negate Q),
-          corrections so far (4 at most per app start). Source
+          corrections so far (4 at most per app start). Source doppler:
+          Autonomous (no 2nd snapshot) compared each detection's Doppler with
+          the predicted one, as received and mirrored: the mirrored reading
+          agreed (evidence: detections agreeing), so that hand-over went to a
+          tracking image that negates Q, Dopplers negated. Source
           skipped_search / skipped_tracking: the check could not run, once
-          per search or hand-over: the value it lacked (detections without a
-          2nd snapshot in Autonomous; best C/N0 x10 below 40; the PRN of a
+          per search or hand-over: a value (Autonomous search: detections whose
+          Dopplers agree as received; best C/N0 x10 below 35 among those with
+          a Doppler of 400 Hz or more; the PRN of a
           verified channel; corrections used), why, corrections so far
 The log holds your position: keep it to yourself.
 

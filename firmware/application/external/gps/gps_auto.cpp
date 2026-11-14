@@ -263,6 +263,24 @@ void auto_predict(const Orbit& o, const Vec3& rx, double t_rx, double* code_chip
     *doppler_geo_hz = -(r1 - r0) * (1575.42e6 / kC);
 }
 
+double auto_rx_time(const Orbit& o, const Vec3& rx, double tx_sv) {
+    double clk = 0;
+    sat_position(o, tx_sv, &clk);
+    const double t_tx = tx_sv - clk; /* GPS time of transmission */
+    const Vec3 s = sat_position(o, t_tx);
+    const Vec3 d{s.x - rx.x, s.y - rx.y, s.z - rx.z};
+    const double sagnac = kOmegaE * (s.x * rx.y - s.y * rx.x) / kC; /* earth rotation during the light time, m */
+    return t_tx + (norm(d) + sagnac) / kC;
+}
+
+int auto_aided_windows_pos(bool ephemeris, double age_days, double pos_err_m) {
+    /* the receive time comes from another satellite seen from the same wrong
+     * position: the code error is at most twice the position error */
+    const double halfchips = 2.0 * (2.0 * pos_err_m) / 293.0;
+    const int w = auto_aided_windows(ephemeris, age_days) + static_cast<int>(std::ceil(halfchips / 15.0));
+    return w > 40 ? 40 : w;
+}
+
 int auto_aided_windows(bool ephemeris, double age_days) {
     /* ephemeris: metres; almanac: ~1 km fresh, a few km after weeks, plus the
      * position fix (metres) and the clock (ns): 1 chip = 293 m */

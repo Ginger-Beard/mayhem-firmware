@@ -35,6 +35,7 @@
 #include "portapack.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <new>
 
@@ -151,7 +152,10 @@ void GpsView::on_image_ready() {
         view_fix_.show();
     }
     if (image_ == gps_image::ID_L1T) gal_reset(); /* a new tracking run: the Galileo search starts over */
-    if (pending_track_mask_ && image_ == gps_image::ID_L1T) send_track();
+    if (pending_track_mask_ && image_ == gps_image::ID_L1T) {
+        send_track(pending_neg_dop_); /* mirrored by the Dopplers (mirror_check): negated */
+        pending_neg_dop_ = false;
+    }
 }
 
 /* Autonomous: the detections of the acquisition image's search to the
@@ -179,7 +183,7 @@ void GpsView::send_track(bool neg_dop) {
  * snapshot) sets the acquisition image's correction; the tracking image's flip
  * lasts for that hand-over only (each image start sets the stream up anew, and
  * the search may have seen it the other way). Logged as an IQ row. */
-void GpsView::iq_flip(bool trk, uint32_t n) {
+void GpsView::iq_flip(bool trk, uint32_t n, const char* src) {
     if (trk)
         iq_trk_flip_ ^= 1u;
     else
@@ -187,7 +191,7 @@ void GpsView::iq_flip(bool trk, uint32_t n) {
     iq_flips_++;
     if (!log_active()) return;
     Fmt f = log_row("IQ");
-    f.s(trk ? ",tracking," : ",search,").u(n).c(',').u(trk ? iq_conj_ ^ iq_trk_flip_ : iq_conj_).c(',').u(iq_flips_);
+    f.s(src ? src : (trk ? ",tracking," : ",search,")).u(n).c(',').u(trk ? iq_conj_ ^ iq_trk_flip_ : iq_conj_).c(',').u(iq_flips_);
     log_end(f);
 }
 
@@ -197,23 +201,28 @@ void GpsView::iq_flip(bool trk, uint32_t n) {
  * hand-over: flip, and hand the same detections over again, Dopplers negated. */
 void GpsView::iq_trk_check() {
     if (iq_trk_retried_ || !trk_sh_ || !results_ || !track_mask_) return;
-    if (chTimeNow() - track_t_ < kIqTrkWait || trk_sh_->xs_found) return;
+    if (chTimeNow() - track_t_ < kIqTrkWait) return;
     if (iq_flips_ >= kIqMaxFlips) {
         log_iq_skip("skipped_tracking", "all corrections of this session used", iq_flips_);
         return;
     }
+    /* only satellites whose Doppler tells the two orientations apart: one near
+     * 0 Hz (incl. the clock term) tracks either way, so it neither proves the
+     * orientation right nor vetoes the others' re-hand-over */
     float best = 0;
     for (int p = 0; p < 32; p++)
-        if (((track_mask_ >> p) & 1u) && results_[p].cn0 > best) best = results_[p].cn0;
-    if (best < 40.0f) { /* weak ones may just need longer */
-        log_iq_skip("skipped_tracking", "best C/N0 below 40 (x10)", static_cast<uint32_t>(best * 10.0f + 0.5f));
+        if (((track_mask_ >> p) & 1u) && std::fabs(results_[p].doppler) >= kIqMinDop && results_[p].cn0 > best) best = results_[p].cn0;
+    if (best < kIqTrkCn0) { /* weak ones may just need longer */
+        log_iq_skip("skipped_tracking", "best C/N0 (Doppler over 400 Hz) below 35 (x10)", static_cast<uint32_t>(best * 10.0f + 0.5f));
         return;
     }
-    for (int i = 0; i < gps_trk::kMaxCh; i++)
-        if (trk_sh_->ch[i].flags & (gps_trk::F_EVER | gps_trk::F_VERIFIED)) {
-            log_iq_skip("skipped_tracking", "a channel verified (prn)", trk_sh_->ch[i].prn);
-            return;
-        }
+    for (int i = 0; i < gps_trk::kMaxCh; i++) {
+        const gps_trk::ChInfo& c = trk_sh_->ch[i];
+        if (!(c.flags & (gps_trk::F_EVER | gps_trk::F_VERIFIED)) || c.prn < 1 || c.prn > 32) continue;
+        if (std::fabs(results_[c.prn - 1].doppler) < kIqMinDop) continue;
+        log_iq_skip("skipped_tracking", "a channel verified (prn)", c.prn);
+        return;
+    }
     iq_trk_retried_ = true;
     iq_flip(true, static_cast<uint32_t>(best + 0.5f));
     pending_track_mask_ = track_mask_;

@@ -826,8 +826,11 @@ class GpsView : public View {
     static constexpr float kAidedMinEl = 10.0f; /* deg */
     static constexpr uint8_t kAidedEvery = 5;   /* s between attempts */
     static constexpr uint8_t kAidedRetry = 24;  /* attempts (x 5 s) before the same PRN again: 2 min */
-    uint64_t solve_sample_{0}, fix_sample_{0};  /* sample of the solved measurement set */
-    double fix_trx_{0};                         /* its GPS time (from the fix) */
+    /* before the first fix the aided search uses the saved position: assumed this
+     * far off unless its file says better ("your town is close enough") */
+    static constexpr double kAidedPosErrM = 10000.0;
+    uint64_t solve_sample_{0}, fix_sample_{0}; /* sample of the solved measurement set */
+    double fix_trx_{0};                        /* its GPS time (from the fix) */
     bool fix_have_time_{false};
     uint8_t aided_tick_{0};
     uint8_t aided_wait_[32]{};
@@ -928,9 +931,13 @@ class GpsView : public View {
     bool iq_trk_retried_{false};
     uint32_t track_mask_{0}; /* the last hand-over's PRNs */
     systime_t track_t_{0};   /* ... and when it was sent */
-    void iq_flip(bool trk, uint32_t n);
+    void iq_flip(bool trk, uint32_t n, const char* src = nullptr);
     void iq_trk_check();
-    uint32_t results_ms_{0}; /* the app's ms clock at the result snapshot's first sample */
+    void mirror_check(uint32_t mask);          /* Autonomous: mirrored by the Dopplers (gps_mirror.hpp)? */
+    bool pending_neg_dop_{false};              /* the next hand-over: Dopplers negated (and Q, iq_trk_flip_) */
+    static constexpr float kIqMinDop = 400.0f; /* Hz: a satellite nearer 0 tracks either way */
+    static constexpr float kIqTrkCn0 = 35.0f;  /* dB-Hz: the tracking-side check's gate */
+    uint32_t results_ms_{0};                   /* the app's ms clock at the result snapshot's first sample */
     bool results_ms_ok_{false};
     /* the last loads, for the log (IMG rows) */
     uint16_t img_loads_{0}, img_logged_{0};
