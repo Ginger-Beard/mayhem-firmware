@@ -303,6 +303,13 @@ file starts with a header line and one "#TYPE,..." line per row type. Types:
           false_lock (125 Hz false lock corrected: count, Doppler), lost (ms in
           lock, re-acquisitions), found (re-acquired: code chips x16, Doppler),
           released (1 lost for 60 s, 2 freed for GPS, 3 E1 box off)
+  GNAV    an I/NAV page of a tracked Galileo satellite (every 2 s once the
+          page boundary is found, a few seconds after "CS"): PRN, word type
+          (1-4 orbit and clock, 5 health and GST time, 6 UTC, 7-10 almanac,
+          0 GST time, 16-20 reduced orbit / RS parity, 63 dummy), CRC good
+          (1) or not (0), alert page, pages good / bad on that channel so far,
+          GST week and time of week s (word types 0, 5, 6), the 128-bit word
+          in hex
   IMG     a baseband image loaded from /APPS: image (GPS_L1A / GPS_L1T),
           result (ok / missing / read error / not an image / wrong image /
           other firmware version / too large / damaged), bytes, load time ms
@@ -353,7 +360,9 @@ well under a minute for all). System wheel on Galileo: "E31 38 dB-Hz
 heard", "E23 not found", "searching".
 A satellite heard goes on to a Galileo tracking channel when the M4 has
 time for it: "E31 el62 40 dB trk CS" (E1C C/N0; CS = its pilot's secondary
-code found: a verified Galileo signal), "lost: search" while a lost channel
+code found: a verified Galileo signal; " N" once its navigation pages
+decode with a good CRC: they go to the log, not yet into the fix), "lost:
+search" while a lost channel
 is searched again (given up after 60 s). GPS comes first: the channels
 share the M4 time (a Galileo channel costs about 1.6 GPS channels), so with
 8 GPS satellites tracked one Galileo channel fits, with 6 three, at most 4;

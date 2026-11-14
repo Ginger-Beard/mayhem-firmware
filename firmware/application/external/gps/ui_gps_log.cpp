@@ -120,6 +120,7 @@ void GpsView::log_header() {
         "#GTRK,max_ch,active,handovers,refused,preempted,reacq_searches,pool_x10,pool_budget_x10,last_ho_prn,last_ho (Galileo channels, 1/s)",
         "#GCH,ch,prn,state,mode,flags,cn0c_x10,cn0b_x10,pld_x100,doppler_x10,code_x16,code_err_x1000,lock_ms,side_e_x100,side_l_x100,side_jumps,cs_phase,cs_errs,cs_syncs,fl_fixes,reacq,epochs",
         "#GEV,prn,event (start / cs / cs_lost / side / lost / found / released),a,b (Galileo channel events; see README)",
+        "#GNAV,prn,word_type,crc_ok,alert,pages_ok,pages_bad,gst_week,gst_tow,word (128 bits hex; an I/NAV page of a tracked Galileo satellite)",
     };
     for (const char* h : kHead) log_push(mem_->log, h, std::strlen(h));
 }
@@ -289,6 +290,24 @@ void GpsView::log_gal_second() {
         f.c(',').u(c.cs_phase).c(',').u(c.cs_errs).c(',').u(c.cs_syncs).c(',').u(c.fl_fixes).c(',').u(c.reacq).c(',').u(c.epochs);
         log_end(f);
     }
+}
+
+void GpsView::log_gal_page(const gal_inav::Page& p) {
+    if (!log_active() || !gal_nav_) return;
+    const gal_inav::Work& w = *static_cast<const gal_inav::Work*>(gal_nav_);
+    uint16_t ok = 0, bad = 0;
+    for (const auto& c : w.ch)
+        if (c.prn == p.prn) ok = c.pages_ok, bad = c.pages_bad;
+    uint32_t wn = 0, tow = 0;
+    const bool t = p.crc_ok && gal_inav::word_gst(p, &wn, &tow);
+    Fmt f = log_row("GNAV");
+    f.c(',').c('E').d2(p.prn).c(',').u(p.word_type).c(',').u(p.crc_ok).c(',').u(p.alert).c(',').u(ok).c(',').u(bad).c(',');
+    if (t && wn != 0xFFFF) f.u(wn);
+    f.c(',');
+    if (t) f.u(tow);
+    f.c(',');
+    for (uint8_t b : p.word) put_hex(f, b, 2);
+    log_end(f);
 }
 
 void GpsView::log_gal_event(const gal_acq::TrkInfo& c, const char* event, int32_t a, int32_t b) {

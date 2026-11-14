@@ -68,6 +68,7 @@
 #include "gps_keep.hpp"
 #include "gps_sys.hpp"
 #include "gal_e1.hpp"
+#include "gal_inav.hpp"
 #endif
 
 namespace ui::external_app::gps {
@@ -943,6 +944,13 @@ class GpsView : public View {
     bool gal_channel(int i, gal_acq::TrkInfo& c) const;    /* copy one Galileo channel (seqlock) */
     void log_gal_second();
     void log_gal_event(const gal_acq::TrkInfo& c, const char* event, int32_t a, int32_t b);
+    /* I/NAV pages of the Galileo channels (gal_inav.hpp), decoded in the RAM the
+     * tracking image lends (gal_nav_); logged, not used in the fix yet */
+    void* gal_nav_{nullptr};
+    uint8_t gal_nav_rr_{0};
+    void gal_nav_step();                   /* frame handler: at most one page part */
+    uint16_t gal_nav_pages(int prn) const; /* pages with a good CRC on that PRN's channel */
+    void log_gal_page(const gal_inav::Page& p);
     uint8_t gal_heard() const; /* satellites heard in this round */
     void log_gal(const gal_acq::Result& r);
     void image_fallback_ram(); /* no image: use the kept block as plain RAM */

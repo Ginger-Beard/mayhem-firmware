@@ -56,6 +56,7 @@ gps_image::Check GpsView::load_image(gps_image::Id id) {
     gal_codes_ = nullptr; /* they lived in the old image's RAM */
     gal_result_ = nullptr;
     gal_trk_sh_ = nullptr;
+    gal_nav_ = nullptr;
     gps_image::Check c = gps_image::OK;
     uint32_t size = 0;
     void* const m = chHeapAlloc(nullptr, sizeof(File)); /* not operator new: it halts on a short heap */

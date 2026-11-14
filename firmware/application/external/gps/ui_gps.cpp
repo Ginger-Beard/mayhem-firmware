@@ -1082,6 +1082,7 @@ void HeardView::show_other() {
                 } else if (tc) { /* a Galileo channel: E1C C/N0, CS = secondary code in sync (verified) */
                     g.c(' ').u(static_cast<uint32_t>((tc->cn0c_x10 + 5u) / 10u)).s(" dB trk");
                     if (tc->flags & gal_acq::TF_CS) g.s(" CS");
+                    if (main_.gal_nav_pages(t.prn)) g.s(" N"); /* I/NAV pages decoded */
                     c = (tc->flags & gal_acq::TF_CS) ? Color::green() : yellow;
                 } else if (st == 2) {
                     g.c(' ').u(main_.mem_->gal_cn0[t.prn]).s(" dB-Hz heard");
@@ -2475,11 +2476,13 @@ void GpsView::on_status(const GpsRxStatusMessage& m) {
         gal_status_busy_ = m.gal_busy;
         gal_status_cycles_ = m.unit_cycles;
         gal_trk_sh_ = static_cast<const gal_acq::TrkShared*>(m.gal_track);
+        gal_nav_ = m.gal_nav;
         if (gal_on_) gal_poll();
     } else {
         gal_codes_ = nullptr;
         gal_result_ = nullptr;
         gal_trk_sh_ = nullptr;
+        gal_nav_ = nullptr;
     }
     if (!mem_ && m.scratch && m.scratch_size >= sizeof(GpsScratch)) {
         mem_ = reinterpret_cast<GpsScratch*>(m.scratch); /* kept across the images: cleared once */
@@ -3019,7 +3022,8 @@ void GpsView::on_frame() {
      * device a coarse fix took 62 s while the first pass search ran, and the
      * tracking PVT and the subframe intake waited behind it. */
     if (solving()) return;
-    gal_step(); /* the aided Galileo E1 search (Heard "E1" box): collect, or the next satellite */
+    gal_step();     /* the aided Galileo E1 search (Heard "E1" box): collect, or the next satellite */
+    gal_nav_step(); /* the tracked Galileo satellites' I/NAV pages */
     if (geo_active_) {
         geo_step();
         return;

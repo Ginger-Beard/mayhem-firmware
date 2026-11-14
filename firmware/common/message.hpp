@@ -2674,8 +2674,10 @@ struct GpsRxStatusMessage : public Message {
     const void* gal_result{nullptr};
     uint16_t gal_seq{0};
     uint8_t gal_busy{0};
-    /* tracking image: the Galileo E1 channels (gal_acq::TrkShared, its RAM) */
+    /* tracking image: the Galileo E1 channels (gal_acq::TrkShared, its RAM) and
+     * RAM it lends the app's I/NAV decoder (gal_acq::kNavWorkBytes) */
     const void* gal_track{nullptr};
+    void* gal_nav{nullptr};
 };
 
 #endif /*__MESSAGE_H__*/
