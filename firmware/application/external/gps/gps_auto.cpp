@@ -27,10 +27,9 @@
 namespace ui::external_app::gps {
 
 void auto_reset(AutoState& a) {
-    const uint32_t sf_read = a.sf_read, meas_seq = a.meas_seq; /* the ring counters keep running */
+    /* everything, the ring counters too: each Get fix starts new tracking loops,
+     * whose shared block starts counting from 0 again */
     std::memset(static_cast<void*>(&a), 0, sizeof(a));
-    a.sf_read = sf_read;
-    a.meas_seq = meas_seq;
 }
 
 namespace {

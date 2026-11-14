@@ -69,6 +69,8 @@ void GpsRxProcessor::start_tracking(uint32_t prn_mask) {
     const uint64_t now = samples_;
     const uint64_t at = static_cast<uint64_t>(std::llround(session.t_results() * gps_acq::kFs)) - gps_acq::kN;
     trk_->reset(now);
+    trk_shared.handover_age_ms = static_cast<uint32_t>((now - at) * 1000u / gps_acq::kFs);
+    trk_shared.handovers++;
     for (int k = 0; k < n && k < trk_->max_active(); k++)
         trk_->start(order[k] + 1, res[order[k]].code_phase, res[order[k]].doppler, at, now);
     trk_->publish();
@@ -136,6 +138,7 @@ void GpsRxProcessor::send_status() {
     status_.units = units_;
     status_.unit_cycles = units_ ? static_cast<uint32_t>(unit_cycles_sum_ / units_) : 0;
     status_.track = &trk_shared;
+    status_.dt_ms = static_cast<int32_t>(session.dt() * 1000.0);
     status_.results = session.results();
     status_.scratch = m0_scratch;
     status_.scratch_size = sizeof(m0_scratch);

@@ -61,12 +61,18 @@ struct ChInfo {
     uint8_t flags; /* ChFlags */
     uint8_t reacq; /* re-acquisitions so far */
     uint16_t cn0_x10;
-    uint16_t pad;
+    uint8_t mode;  /* loop mode: 0 FLL pull-in, 1 PLL wide + FLL assist, 2 PLL narrow, 3 search */
+    int8_t pld_x100; /* PLL lock indicator cos(2 phi), x100 (smoothed) */
     float doppler_hz;
     uint32_t lock_ms;      /* time in TRK_TRACK since the last (re)start */
     uint32_t subframes;    /* parity-good subframes */
     uint32_t parity_errs;  /* words that failed parity while in a frame */
     uint32_t tow_s;        /* last decoded TOW (start of a subframe), s of week; valid with F_FRAME */
+    uint32_t bits;         /* data bits decided since bit sync */
+    uint32_t words_ok;     /* words that passed parity */
+    uint16_t code_x64;     /* prompt code phase, chips x 64 (0..65471) */
+    uint16_t sweeps;       /* search sweeps since the last loss of lock */
+    float code_err;        /* last DLL discriminator, chips (code lock: near 0) */
 };
 
 struct SubframeSlot {
@@ -110,6 +116,10 @@ struct Shared {
     uint32_t buffers;
     uint32_t missed;
     uint8_t active; /* channels in use */
+    /* the last hand-over (diagnostics): age of the search result when the loops
+     * started, ms, and how many hand-overs so far */
+    uint32_t handover_age_ms;
+    uint32_t handovers;
 };
 
 }  // namespace gps_trk

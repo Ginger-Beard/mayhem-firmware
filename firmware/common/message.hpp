@@ -2624,7 +2624,7 @@ struct GpsRxStatusMessage : public Message {
                            LEVEL_HIGH /* clipping: results still reported */ };
     /* The M4 RAM PGPR lends the app: orbit tables and solver work space
      * (never touched by the M4). */
-    static constexpr uint16_t kScratchSize = 18432; /* +5 KiB: Autonomous (AutoState, PVT work, cache record) */
+    static constexpr uint16_t kScratchSize = 23552; /* Autonomous (AutoState, PVT work, cache record) + the diagnostics log ring */
     uint8_t state{IDLE};
     uint8_t level{LEVEL_OK};
     uint8_t confirming{0}; /* second (confirmation) snapshot under way */
@@ -2640,6 +2640,7 @@ struct GpsRxStatusMessage : public Message {
     uint8_t* scratch{nullptr};
     uint16_t scratch_size{0};
     const void* track{nullptr}; /* gps_trk::Shared (channels, subframes, measurements), valid while the image runs */
+    int32_t dt_ms{0};           /* the confirmation interval: snapshot B - snapshot A, ms (diagnostics) */
 };
 
 #endif /*__MESSAGE_H__*/

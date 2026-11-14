@@ -61,6 +61,8 @@
 #include "gps_follow.hpp"
 #include "gps_auto.hpp"
 #include "gps_pvt.hpp"
+#include "gps_log.hpp"
+#include "gps_fmt.hpp"
 #endif
 
 namespace ui::external_app::gps {
@@ -203,6 +205,7 @@ struct GpsScratch {
     PvtSolution pvt_fix; /* the last accepted one (shown, saved) */
     uint32_t cache_sf[3][10]; /* the loader assembles an EPH_AIR.TXT record here */
     uint8_t cache_have;
+    LogRing log; /* diagnostics log rows waiting for the card (ui_gps_log.cpp) */
 };
 
 class GpsView;
@@ -300,6 +303,11 @@ class HeardView : public View {
     HeardView(GpsView& main, Rect r);
     void focus() override;
     void show(); /* status / results changed */
+    /* what the rows say (diagnostics log) */
+    const TextLines::Line* status_lines() const { return status_; }
+    size_t status_rows() const { return kStatusRows; }
+    const TextLines::Line* list_lines() const { return list_; }
+    size_t list_rows() const { return kListRows; }
 
    private:
     void show_tracking();
@@ -326,10 +334,16 @@ class FixView : public View {
     FixView& operator=(const FixView&) = delete;
     void focus() override;
     void show();
+    const TextLines::Line* lines() const { return lines_; }
+    size_t rows() const { return kRows; }
+    uint32_t method() const { return static_cast<uint32_t>(field_method_.selected_index_value()); }
+    void set_log(bool on) { check_log_.set_value(on); }
 
    private:
     GpsView& main_;
     OptionsField field_method_;
+    /* diagnostics log (stock convention: a Log box on the main view; saved) */
+    Checkbox check_log_{{UI_POS_X(12), 0}, 3, "Log", true};
     Button button_fix_;
     Button button_save_;
     bool fix_running_shown_{false}; /* button_fix_ shows "Stop" */
@@ -337,6 +351,7 @@ class FixView : public View {
     Color save_color_{Color::white()};
     void show_blocker(size_t row);
     void show_auto();
+    void show_log_error();
     static constexpr size_t kRows = 11;
     TextLines::Line lines_[kRows]{};
     TextLines text_;
@@ -583,6 +598,7 @@ class GpsView : public View {
     int32_t utc_off_min_{0};
     uint32_t tab_{2};   /* last tab (saved) */
     uint32_t depth_{1}; /* Heard snapshot: 0 = 10 ms, 1 = 20 ms (saved) */
+    uint32_t log_on_{0}; /* diagnostics log (Log box on the Fix tab, saved) */
     app_settings::SettingsManager settings_;
     int8_t bias_shown_{-1};  /* last antenna-power state shown (read only) */
     uint32_t tab_shown_{99}; /* tab whose content was last refreshed */
@@ -715,6 +731,40 @@ class GpsView : public View {
     void auto_poll_m4();      /* channels, subframes, measurements; starts a PVT */
     void auto_finish_pvt();
     void auto_cache_step();   /* one EPH_AIR.TXT line per call, from the frame handler */
+    uint16_t cache_errs_{0};
+    int32_t status_dt_ms_{0}; /* the last search's snapshot A -> B interval */
+
+    /* Diagnostics log (ui_gps_log.cpp): rows built in GpsScratch::log, written
+     * from the display frame handler only, sector-bounded, synced every 3 s. */
+    File* log_file_{nullptr};
+    uint32_t log_pos_{0};
+    systime_t log_sync_t_{0}, log_sec_t_{0}, log_retry_t_{0};
+    bool log_dirty_{false};
+    bool log_started_{false}; /* header and START row queued */
+    uint16_t log_errs_{0};
+    uint8_t log_eph_tick_{0};
+    const char* log_err_{nullptr};
+    uint32_t log_fix_hash_{0}, log_heard_hash_{0};
+    char log_name_[32]{};
+    bool log_active() const;
+    Fmt log_row(const char* type);
+    void log_end(const Fmt& f);
+    void log_header();
+    void log_start_row();
+    void log_frame();
+    void log_open();
+    void log_close();
+    void log_fail(const char* what);
+    void log_second();
+    void log_screen();
+    void log_results(const gps_rx::Result* r, uint8_t k_ms);
+    void log_handover();
+    void log_subframes();
+    void log_meas();
+    void log_eph_event(const char* what, int prn);
+    void log_solve_start(uint8_t kind);
+    void log_fix(uint8_t kind, bool ok, const char* why);
+    void log_error(const char* what, const char* detail);
     void stop_auto();
     void load_position();
     void start_load();

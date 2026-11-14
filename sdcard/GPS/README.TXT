@@ -134,6 +134,78 @@ there is read as before, and per satellite the record closest to now is used.
 The Heard tab shows the tracked satellites: C/N0, L (phase lock), B (bits),
 T (time decoded), E (orbit decoded).
 
+Diagnostics log (Fix tab, "Log" box; a development aid)
+-------------------------------------------------------
+With "Log" ticked (saved; off by default) the app writes /LOGS/GPS_<yyyymmdd>_
+<hhmmss>.CSV (clock time at app start), a new file each time the app opens.
+Rows are queued in RAM and written a little at a time; the file is flushed
+every 3 s, so pulling the battery loses at most a few seconds. A card error
+shows "LOG ERROR: ..." in red on the Fix tab's bottom row; the app keeps
+running and tries again every 10 s. Expect roughly 1-2 KB per second while
+tracking. The once-a-second SEC row also goes to the USB serial shell after
+the shell command "asyncmsg enable".
+
+Every row starts with ms (since power-on), utc (unix seconds: from the
+satellites once the app has GPS time, else clock minus Zone) and a type. The
+file starts with a header line and one "#TYPE,..." line per row type. Types:
+  START   fw build, LNA, VGA, amp, antenna power as read (0/1), Zone minutes,
+          saved position (valid, source, age s, accuracy m, lat/lon 1e-7 deg,
+          alt m), almanac count and age (days x10), ephemerides, TLEs, clock
+          (yyyymmddhhmmss as shown), clock UTC (unix s), free heap, lent RAM
+          bytes, Fix method (0 snapshot, 1 autonomous), tab, file name
+  SEC     every second: job (0 none, 1 Heard, 2 Fix, 3 Autonomous), done,
+          tracking, search (1 assisted, 2 full, 3 full after assisted), baseband
+          state (0 idle, 1 capturing, 2 searching, 3 refining, 4 done,
+          5 tracking), level (0 ok, 1 too low, 2 clipping), confirming, PRNs
+          done / requested, progress %, input level (LSB x10), clipping
+          (per mille), M4 cycles per search step, steps, search number,
+          snapshot A->B interval ms, solving, solve kind (0 snapshot, 1 PVT),
+          solve pending, fix ok, fix mode (1 precise, 2 coarse), fix tried,
+          heard, heard with an orbit, error estimate m, time to precise fix s,
+          time to first fix s, tracked, with TOW, with ephemeris, GPS time
+          known, GPS minus clock ms, free heap, log rows, rows dropped (RAM
+          full), log errors, ephemerides cached, cache write errors,
+          ephemerides held, almanac entries, antenna power as read
+  M4      every second while tracking: M4 cycles per 1 ms buffer (mean, max;
+          200000 = 100 %), buffers handled, buffers missed, channels in use,
+          hand-overs, age of the search result at the hand-over (ms),
+          subframes published, measurement sets published
+  CH      every second per channel: channel, PRN, state (1 pull-in, 2 track,
+          3 lost: searching, 4 given up), loop (0 FLL, 1 PLL wide, 2 PLL narrow,
+          3 search), flags (L phase lock, B bit sync, T subframe time,
+          V verified), C/N0 x10, phase lock indicator x100 (cos 2 phi; ~100 =
+          locked), Doppler Hz x10, code phase chips x64, code discriminator
+          chips x1000 (code lock: near 0), ms in track, bits, parity-good
+          words, parity failures, subframes, last TOW s, losses of lock,
+          search sweeps since the last loss
+  SR      each search result (after every search): search number, search
+          kind, snapshot ms, PRN, searched, detected, seen once only, refined,
+          peak/mean x100, threshold x100, C/N0 x10, Doppler Hz, code phase
+          chips x1000, verdict (accepted / rejected: below threshold /
+          rejected: not confirmed by the 2nd snapshot)
+  HO      hand-over to tracking: count, age of the search result ms, PRNs
+  SF      each parity-good subframe: PRN, channel, subframe 1-5, page,
+          TOW of its start s, the ten 24-bit data words (hex)
+  EPH     decoded / cached events (PRN, subframes held 1+2+4, not yet saved,
+          in the orbit table, now - toe s) and every 5 s the list held
+          ("Gnn:subframes:unsaved:in table")
+  MEAS    each measurement set (1/s): number, sample (x2048), missed, count,
+          per channel prn:flags:transmit ms of week:fraction (hex, 2^-32 ms):
+          Doppler Hz:C/N0 x10
+  SOLVE   a solve starts: kind (snapshot_coarse / snapshot_precise /
+          pvt_coarse / pvt_precise), satellites, PRNs (with code phase for a
+          snapshot), time (s of day for a snapshot, receive-time guess ms for
+          a PVT), prior lat / lon 1e-7 deg, residual limit m, clock limit s,
+          almanac age days x10
+  FIX     its result: kind, ok, why (ok / not tried: ... / rejected: ...),
+          satellites used, dropped by RAIM, residual m x10, HDOP x10, VDOP x10,
+          clock m, time correction ms (snapshot) or TCXO ppb (PVT), lat / lon
+          1e-7 deg, alt m, speed cm/s
+  SCREEN  the Fix tab's rows (joined by |) whenever they change, with the
+          tab shown; HEARD the Heard tab's rows likewise
+  ERR     card, ring or solver problems (what, detail)
+The log holds your position: keep it to yourself.
+
 Heard tab (what the receiver hears)
 -----------------------------------
 "Search" records a snapshot (Quick 10 ms or Deep 20 ms) and searches it for
