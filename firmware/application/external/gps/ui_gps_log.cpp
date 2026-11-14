@@ -64,7 +64,9 @@ uint32_t text_hash(uint32_t h, const char* s) {
     for (; *s; s++) h = (h ^ static_cast<uint8_t>(*s)) * 16777619u;
     return h * 16777619u;
 }
-int32_t e7(double deg) { return static_cast<int32_t>(std::lround(deg * 1e7)); }
+int32_t e7(double deg) {
+    return static_cast<int32_t>(std::lround(deg * 1e7));
+}
 }  // namespace
 
 /* the size of the File the open log holds on the heap (read from the ELF for the notes) */
@@ -104,13 +106,14 @@ void GpsView::log_header() {
         "#SF,prn,ch,sfid,page,tow,w1..w10 (24-bit data words hex)",
         "#EPH,event,prn,have,fresh,in_table,toe_age_s,iode",
         "#MEAS,seq,sample,missed,n,prn:flags:tx_ms:tx_frac_hex:doppler:cn0_x10 ...",
-        "#SOLVE,kind,n,prns,t_offset_s,prior_lat_e7,prior_lon_e7,max_rms_m,max_dt_s,alm_age_dx10",
+        "#SOLVE,kind,n,prns,t_offset_s,prior_lat_e7,prior_lon_e7,max_rms_m,max_dt_s,alm_age_dx10,snapshot_age_ms",
         "#FIX,kind,ok,why,used,dropped,rms_m_x10,hdop_x10,vdop_x10,clock_m,time_corr_ms_or_drift_ppb,lat_e7,lon_e7,alt_m,speed_cm_s,masked,trop_m_x10,iono_m_x10,iono_src",
         "#IONO,source (none / air / cache),age_h,a0..a3 (x1e9 s ...),b0..b3",
         "#SCREEN,tab,fix rows 0-10 joined by |",
         "#HEARD,heard rows (status | list)",
         "#CLK,event (tow / pvt: GPS time in use; set: RTC written by Set clock),gps_minus_rtc_ms,rtc_utc,gps_utc,zone_min",
         "#ERR,what,detail",
+        "#LOG,event,errors (the log file reopened after the Log box was ticked again)",
     };
     for (const char* h : kHead) log_push(mem_->log, h, std::strlen(h));
 }
@@ -177,6 +180,7 @@ void GpsView::log_frame() {
  * file is reopened (appended) after an error */
 void GpsView::log_open() {
     log_retry_t_ = chTimeNow();
+    const char* const prev_err = log_err_;              /* set when the file was closed by an error */
     void* const m = chHeapAlloc(nullptr, sizeof(File)); /* not operator new: it halts on a short heap */
     if (!m) {
         log_err_ = "no heap";
@@ -201,8 +205,12 @@ void GpsView::log_open() {
         log_started_ = true;
         log_header();
         log_start_row();
-    } else {
+    } else if (prev_err) { /* after a card error */
         Fmt f = log_row("ERR");
+        f.s(",reopened after ").s(prev_err).s(",errors ").u(log_errs_);
+        log_end(f);
+    } else { /* the Log box was unticked and ticked again: not an error */
+        Fmt f = log_row("LOG");
         f.s(",reopened,errors ").u(log_errs_);
         log_end(f);
     }
@@ -346,7 +354,7 @@ void GpsView::log_results(const gps_rx::Result* r, uint8_t k_ms) {
 }
 
 void GpsView::log_clock(const char* src) {
-    if (clock_logged_ && std::fabs(gps_off_s_ - clock_logged_off_) < 0.5) return; /* once, then on changes */
+    if (clock_logged_ && std::fabs(gps_off_s_ - clock_logged_off_) < 0.1) return; /* once, then on changes over 0.1 s */
     clock_logged_ = true;
     clock_logged_off_ = gps_off_s_;
     if (!log_active()) return;
@@ -460,6 +468,7 @@ void GpsView::log_solve_start(uint8_t kind) {
         f.c(',').d(e7(lat)).c(',').d(e7(lon)).c(',').u(solve_pvt_eph_ ? 25u : 0u).c(',');
     }
     f.c(',').d(static_cast<int32_t>(std::lround(alm_age_days() * 10)));
+    if (kind == 0) f.c(',').u(static_cast<uint32_t>(std::lround(results_age_s() * 1000.0)));
     log_end(f);
 }
 

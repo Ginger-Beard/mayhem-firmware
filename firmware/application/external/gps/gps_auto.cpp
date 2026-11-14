@@ -48,9 +48,9 @@ EphCollect* slot_for(AutoState& a, uint8_t prn) {
         free_slot->prn = prn;
         return free_slot;
     }
-    /* all taken: reuse a slot whose set was already saved */
+    /* all taken: reuse a slot whose set was already saved (and decoded) */
     for (auto& c : a.col)
-        if (!c.fresh) {
+        if (!c.fresh && !c.pending) {
             std::memset(static_cast<void*>(&c), 0, sizeof(c));
             c.prn = prn;
             return &c;
@@ -66,6 +66,26 @@ int sf4_page_sv(int page) {
 
 }  // namespace
 
+/* A complete subframe 1-3 set of one issue: decode it into table[prn - 1]
+ * unless that holds the same or a later ephemeris. Returns the PRN of a new
+ * ephemeris, else 0. */
+int auto_finish_set(AutoState& a, EphCollect& cs, int32_t week_hint, Orbit* table) {
+    EphCollect* c = &cs;
+    c->pending = 0;
+    const int32_t wk = a.week > 0 ? a.week : week_hint;
+    Orbit o;
+    if (!nav::decode_ephemeris(c->sf[0], c->sf[1], c->sf[2], c->prn, wk, o)) return 0;
+    Orbit& t = table[c->prn - 1];
+    const bool newer = !t.valid || !t.ephemeris || o.toe > t.toe ||
+                       (o.toe == t.toe && (o.af0 != t.af0 || o.m0 != t.m0)); /* same toe, new upload */
+    if (!c->fresh && t.valid && t.ephemeris && !newer) return 0;
+    c->fresh = 1;
+    a.sf_eph++;
+    if (!newer) return 0;
+    t = o;
+    return c->prn;
+}
+
 int auto_take_subframe(AutoState& a, const gps_trk::SubframeSlot& s, int32_t week_hint, Orbit* table) {
     a.sf_total++;
     const uint32_t* w = s.words;
@@ -79,6 +99,7 @@ int auto_take_subframe(AutoState& a, const gps_trk::SubframeSlot& s, int32_t wee
         const int k = id - 1;
         std::memcpy(c->sf[k], w, sizeof(c->sf[k]));
         c->have |= static_cast<uint8_t>(1u << k);
+        c->pending = 0;
         if (id == 1) c->tow1 = a.tow_s;
         if (c->have != 7) return 0;
         const int iodc = nav::sf1_iodc(c->sf[0]), i2 = nav::sf2_iode(c->sf[1]), i3 = nav::sf3_iode(c->sf[2]);
@@ -86,18 +107,11 @@ int auto_take_subframe(AutoState& a, const gps_trk::SubframeSlot& s, int32_t wee
             c->have = static_cast<uint8_t>(1u << k);
             return 0;
         }
-        const int32_t wk = a.week > 0 ? a.week : week_hint;
-        Orbit o;
-        if (!nav::decode_ephemeris(c->sf[0], c->sf[1], c->sf[2], s.prn, wk, o)) return 0;
-        Orbit& t = table[s.prn - 1];
-        const bool newer = !t.valid || !t.ephemeris || o.toe > t.toe ||
-                           (o.toe == t.toe && (o.af0 != t.af0 || o.m0 != t.m0)); /* same toe, new upload */
-        if (!c->fresh && t.valid && t.ephemeris && !newer) return 0;
-        c->fresh = 1;
-        a.sf_eph++;
-        if (!newer) return 0;
-        t = o;
-        return s.prn;
+        if (!table) { /* the orbit table is in use (the solver): decoded later by auto_flush() */
+            c->pending = 1;
+            return 0;
+        }
+        return auto_finish_set(a, *c, week_hint, table);
     }
     /* SF4 / SF5: almanac pages */
     const int page = static_cast<int>((a.tow_s / 30u) % 25u) + 1;

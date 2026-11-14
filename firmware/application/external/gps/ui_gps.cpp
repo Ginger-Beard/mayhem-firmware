@@ -810,7 +810,7 @@ HeardView::HeardView(GpsView& main, Rect r)
             main_.select(GpsView::SEL_GPS, idx);
     };
     button_search_.on_select = [this](Button&) {
-        if (main_.solving()) return; /* the fix's solver still uses the orbits */
+        if (main_.solving()) return;                 /* the fix's solver still uses the orbits */
         if (main_.job_ == GpsView::JOB_AUTO) return; /* the tracking loops run: Stop on the Fix tab first */
         main_.request_search(GpsView::JOB_HEARD, main_.depth_ ? 20 : 10);
         show();
@@ -1889,7 +1889,21 @@ void GpsView::focus() {
 double GpsView::now_unix() const {
     rtc::RTC raw;
     rtcGetTime(&RTCD1, &raw);
-    return static_cast<double>(rtc_time::rtcToUnixUTC(raw)) - utc_off_min_ * 60.0;
+    const uint32_t s = static_cast<uint32_t>(rtc_time::rtcToUnixUTC(raw));
+    /* plus the part of the second since the RTC's tick (~10 ms): a whole-second
+     * reading compared with a GPS time made the offset jump by a second */
+    return static_cast<double>(s) + rtc_phase_.frac(s, chTimeNow()) - utc_off_min_ * 60.0;
+}
+
+double GpsView::results_age_s() const {
+    if (!sample_clock_.ok || !results_sample_) return 0.0;
+    const double a = -sample_clock_.ms_before_now(results_sample_, chTimeNow()) / 1000.0;
+    return a < 0 ? 0.0 : (a > 120.0 ? 120.0 : a);
+}
+
+double GpsView::gps_now_at_sample(double gps_at_sample, uint64_t sample) const {
+    if (!sample_clock_.ok) return gps_at_sample;
+    return gps_now_from_sample(gps_at_sample, sample_clock_.ms_before_now(sample, chTimeNow()));
 }
 
 /* "Set clock": the user asked for the RTC to follow GPS time. It is written
@@ -1918,8 +1932,10 @@ void GpsView::clock_step() {
     rtc::RTC dt{static_cast<uint32_t>(y), static_cast<uint32_t>(mo), static_cast<uint32_t>(d),
                 static_cast<uint32_t>(sod / 3600), static_cast<uint32_t>(sod / 60 % 60), static_cast<uint32_t>(sod % 60)};
     rtcSetTime(&RTCD1, &dt);
-    /* the GPS time does not move: the offset now refers to the new clock */
-    gps_off_s_ = (rtc_before + gps_off_s_) - static_cast<double>(t);
+    /* the write restarts the RTC's second (its divider is held in reset while
+     * set): it reads t from now on, and GPS time is `best` at this moment */
+    rtc_phase_.on_tick(static_cast<uint32_t>(loc), chTimeNow());
+    gps_off_s_ = best - static_cast<double>(t);
     clock_msg_ = 1;
     log_clock_set(rtc_before, t);
 }
@@ -2088,7 +2104,7 @@ bool GpsView::start_search(Job job, uint8_t k_ms, bool force_full) {
     m.confirm = job == JOB_AUTO ? 0 : 1;
     req_confirm_ = m.confirm != 0;
     m.track = job == JOB_AUTO;
-    m.max_ch = 8;              /* M4: ~60 % with 8 channels (notes, gps-autonomous) */
+    m.max_ch = 8; /* M4: ~60 % with 8 channels (notes, gps-autonomous) */
     int nprn = 0;
     if (!force_full && assisted_possible() && geo_ready_) {
         /* visible PRNs and their Doppler from the sky cache (at most kGeoPeriodS
@@ -2170,6 +2186,7 @@ void GpsView::on_status(const GpsRxStatusMessage& m) {
     status_dt_ms_ = m.dt_ms;
     status_.units = m.units;
     status_.unit_cycles = m.unit_cycles;
+    sample_clock_.at_status(m.sample_now, chTimeNow()); /* the image's samples on the app's clock */
     if (!mem_ && m.scratch && m.scratch_size >= sizeof(GpsScratch)) {
         mem_ = reinterpret_cast<GpsScratch*>(m.scratch);
         std::memset(static_cast<void*>(mem_), 0, sizeof(GpsScratch));
@@ -2197,6 +2214,7 @@ void GpsView::on_status(const GpsRxStatusMessage& m) {
     if (!awaiting_seq_ && job_ != JOB_NONE && m.seq == job_seq_ && m.state == GpsRxStatusMessage::DONE && !done_) {
         done_ = true;
         results_ = static_cast<const gps_rx::Result*>(m.results);
+        results_sample_ = m.results_sample; /* the snapshot the code phases refer to */
         log_results(results_, m.k_ms);
         if (job_ == JOB_FIX || job_ == JOB_AUTO) solve_pending_ = pos_valid_ && (n_alm_ || n_eph_); /* Autonomous: the coarse fix first */
         if (mem_ && results_) {
@@ -2273,7 +2291,10 @@ void GpsView::solve_fix() {
         return;
     }
     solve_n_ = n;
-    solve_t_ = tg;
+    /* the code phases were measured in the result snapshot, a search ago
+     * (~20 s in Autonomous): tag the solve with that time, so the coarse-time
+     * solver's clock allowance is not used up by the search's duration */
+    solve_t_ = tg - results_age_s();
     solve_prior_ = rx_;
     solve_max_rms_ = all_eph ? 30.0 : almanac_max_rms(fix_alm_age_d_);
     solve_max_dt_ = all_eph ? 60.0 : kAlmMaxDtS;
@@ -2332,9 +2353,9 @@ void GpsView::finish_solve() {
 /* ---------------------------------------------------------------- autonomous */
 
 /* About 5 times a second while the tracking loops run (from the status
- * message, UI thread): copy the channel table, take new subframes (not while
- * the solver reads the orbit table: they wait in the ring, 16 slots ~ 12 s),
- * and start a PVT on each new measurement set when the solver is free. */
+ * message, UI thread): copy the channel table, take new subframes (decoded
+ * into the orbit table once the solver no longer reads it), and start a PVT
+ * on each new measurement set when the solver is free. */
 void GpsView::auto_poll_m4() {
     if (!mem_ || !trk_sh_) return;
     AutoState& a = mem_->autos;
@@ -2342,31 +2363,20 @@ void GpsView::auto_poll_m4() {
     bool new_eph = false;
     const gps_trk::Shared* sh = trk_sh_;
     bool newmeas;
-    if (solving()) { /* channels and measurements only (the measurement is logged now, solved after) */
+    /* while the solver reads the orbit table the subframes are still taken
+     * (ring of 16, ~12 s): completed sets wait in AutoState for auto_flush() */
+    const bool busy = solving();
+    log_subframes();
+    const bool got = auto_poll(a, sh, week_hint, busy ? nullptr : mem_->orbits, [&](int prn) {
+        new_eph = true;
+        log_eph_event("decoded", prn);
+    });
+    if (got) log_meas();
+    if (busy) { /* the measurement is logged now, solved after */
         newmeas = false;
-        const uint32_t ms = sh->meas_seq;
-        if (ms && ms != a.meas_seq) {
-            a.meas = sh->meas[(ms - 1) & 1u];
-            if (sh->meas_seq == ms && a.meas.seq == ms) {
-                a.meas_seq = ms;
-                a.have_meas = 1;
-                meas_waiting_ = true;
-                log_meas();
-            }
-        }
-        for (int tries = 0; tries < 3; tries++) {
-            const uint32_t s1 = sh->ch_seq;
-            if (s1 & 1u) continue;
-            for (int i = 0; i < gps_trk::kMaxCh; i++) a.ch[i] = sh->ch[i];
-            if (sh->ch_seq == s1) break;
-        }
+        if (got) meas_waiting_ = true;
     } else {
-        log_subframes();
-        newmeas = auto_poll(a, sh, week_hint, mem_->orbits, [&](int prn) {
-            new_eph = true;
-            log_eph_event("decoded", prn);
-        });
-        if (newmeas) log_meas();
+        newmeas = got;
         if (meas_waiting_) { /* copied while the solver ran: solve it now */
             newmeas = true;
             meas_waiting_ = false;
@@ -2403,7 +2413,7 @@ void GpsView::auto_poll_m4() {
             if (a.meas.ch[i].flags & gps_trk::F_FRAME) {
                 const int32_t wk = a.week > 0 ? a.week : week_hint;
                 const double t = wk * kWeekS + a.meas.ch[i].tx_ms * 1e-3 + 0.075;
-                gps_off_s_ = t - unix_to_gps(now_unix());
+                gps_off_s_ = gps_now_at_sample(t, a.meas.sample) - unix_to_gps(now_unix()); /* both now */
                 gps_time_ok_ = true;
                 log_clock("tow");
                 break;
@@ -2489,7 +2499,7 @@ void GpsView::auto_aided_step() {
     auto_predict(o, fix_.pos, fix_trx_, &code, &dop);
     const bool eph = o.ephemeris != 0;
     int win = auto_aided_windows(eph, eph ? 0.0 : alm_age_days());
-    if (fix_mode_ != FIX_PRECISE) win += 3; /* a coarse fix: ~1 km */
+    if (fix_mode_ != FIX_PRECISE) win += 3;       /* a coarse fix: ~1 km */
     win += static_cast<int>(age / (10u * kFsHz)); /* clock drift since the fix: ~1 window per 10 s */
     GpsRxConfigMessage m;
     m.cmd = GpsRxConfigMessage::CMD_ADD;
@@ -2558,8 +2568,9 @@ void GpsView::auto_finish_pvt() {
     const uint32_t since = static_cast<uint32_t>((chTimeNow() - auto_t0_) / CH_FREQUENCY);
     if (solve_pvt_eph_ && !ttff_s_) ttff_s_ = since ? since : 1;
     if (!ttff_coarse_s_) ttff_coarse_s_ = since ? since : 1;
-    /* GPS time from the solution (the measurement is < ~1 s old: within the RTC's 1 s anyway) */
-    gps_off_s_ = p.t_rx - unix_to_gps(now_unix());
+    /* GPS time from the solution: t_rx is the GPS time at the measurement's
+     * sample, which is a solve (~0.5 s) old; both sides taken now */
+    gps_off_s_ = gps_now_at_sample(p.t_rx, solve_sample_) - unix_to_gps(now_unix());
     gps_time_ok_ = true;
     log_clock("pvt");
     view_fix_.show();
@@ -2652,7 +2663,7 @@ void GpsView::auto_cache_step() {
 }
 
 void GpsView::on_frame() {
-    log_frame(); /* the diagnostics log: rows, card writes (sector-bounded), sync */
+    log_frame();  /* the diagnostics log: rows, card writes (sector-bounded), sync */
     clock_step(); /* "Set clock" pending: the RTC at the next second boundary */
     /* the selected tab's content is refreshed when it becomes visible */
     const uint32_t sel = tab_view_.selected();
@@ -2691,6 +2702,12 @@ void GpsView::on_frame() {
         return;
     }
     if (mem_ && !solving() && !loading() && job_ == JOB_AUTO) auto_cache_step(); /* one line of an off-air ephemeris to /GPS/EPH_AIR.TXT */
+    /* The background jobs below wait while the solver runs. Their units take
+     * longer than a frame on the device (a pass-search step ~20 ms), so the UI
+     * thread never went idle and the low-priority solver got no time: on the
+     * device a coarse fix took 62 s while the first pass search ran, and the
+     * tracking PVT and the subframe intake waited behind it. */
+    if (solving()) return;
     if (geo_active_) {
         geo_step();
         return;
@@ -2796,6 +2813,11 @@ void GpsView::show_antenna() {
 }
 
 void GpsView::on_tick_second() {
+    { /* the RTC's second starts now (its interrupt; the event loop adds ~ms) */
+        rtc::RTC raw;
+        rtcGetTime(&RTCD1, &raw);
+        rtc_phase_.on_tick(static_cast<uint32_t>(rtc_time::rtcToUnixUTC(raw)), chTimeNow());
+    }
     show_antenna();
     if (mem_ && sel_kind_ != SEL_NONE && mem_->track.ready() && mem_->track.pass().set != 0 &&
         now_best() > mem_->track.pass().set + 60.0)
