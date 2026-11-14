@@ -112,6 +112,7 @@ struct Entity {
     bool rssi_dbm{false};
     bool stale{false};
     bool confirmed{false};
+    bool requeued{false}; /* evicted (its DROP logged) and back within kExpireSeconds: listed again without a NEW */
     uint8_t rf_cls{0};  // Kind::Rf: RfClass, RfConf, duty %, flatness 0.1 dB
     uint8_t rf_conf{0};
     uint8_t rf_duty{0};
@@ -158,11 +159,23 @@ class Tracker {
     static constexpr size_t kMaxEntities = 12;
     static constexpr size_t kMaxRid = 8;
 
+    static constexpr size_t kRecent = 16; /* recently evicted addresses remembered (Tracker::create) */
+
     enum Event : uint8_t {
         EV_CONFIRMED,  // new detection, announce (beep, log)
         EV_LOCATION,   // position changed, rate limited
-        EV_DROPPED,    // expired or evicted (only for confirmed ones)
+        EV_DROPPED,    // expired or evicted (only for confirmed ones); why: drop_why()
     };
+    /* Why an EV_DROPPED: valid while it is being handled. */
+    enum DropWhy : uint8_t {
+        DROP_EXPIRED,  // not heard for kExpireSeconds
+        DROP_EVICTED,  // the table was full and it was the stalest (it may still be on the air)
+        DROP_CLASS,    // a signature class change (drop_kind)
+        DROP_GONE,     // its source said so (pattern scan, interference scan)
+        DROP_STOP,     // the log stopped while it was listed (not removed; the app's own rows)
+    };
+    static const char* drop_why_name(uint8_t why);
+    DropWhy drop_why() const { return drop_why_; }
     using Notify = void (*)(void* ctx, Event ev, const Entity& e);
 
     /* Container interface for RecentEntriesView: entities in display order,
@@ -221,16 +234,35 @@ class Tracker {
     void tick(uint32_t now, bool own_valid, int32_t own_lat, int32_t own_lon);
 
     Entity* find_key(Entity::Key key);
+    const Entity* find_addr(const uint8_t* mac) {
+        return find_mac(mac);
+    }
     /* Every entity of this kind goes now, with EV_DROPPED for confirmed ones
      * (a signature class change: their rows must name the class they came
      * from). */
-    void drop_kind(Kind kind);
+    void drop_kind(Kind kind, DropWhy why = DROP_CLASS);
+    /* Evictions so far, and how many of them came back within
+     * kExpireSeconds (listed again without a NEW). */
+    uint32_t evictions() const { return evictions_; }
+    uint32_t requeues() const { return requeues_; }
     /* RID emitters heard within kStaleSeconds. */
     size_t active_rid() const;
     void clear();
 
    private:
+    /* An evicted confirmed entity: heard again within kExpireSeconds it is
+     * listed without a fresh EV_CONFIRMED (a crowd larger than the table
+     * otherwise turns into NEW / DROP pairs every second). */
+    struct Recent {
+        uint8_t mac[6];
+        Kind kind;
+        bool used;
+        uint32_t evicted_s, first_s;
+    };
     Entity items_[kMaxEntities]{};
+    Recent recent_[kRecent]{};
+    DropWhy drop_why_{DROP_EXPIRED};
+    uint32_t evictions_{0}, requeues_{0};
     RidRecord rids_[kMaxRid]{};
     size_t count_{0};
     uint8_t rid_used_{0};  // bit n: rids_[n] in use
@@ -242,8 +274,8 @@ class Tracker {
     Entity* find_uas(const char* uas_id, const Entity* except);
     Entity* create(Kind kind, const uint8_t* mac, uint32_t now);
     bool attach_rid(Entity& e);
-    void remove(size_t index, bool report);
-    void evict_oldest(bool rid_only);
+    void remove(size_t index, bool report, DropWhy why = DROP_EXPIRED);
+    bool evict_oldest(bool rid_only, uint32_t now, bool for_rid);
     void touch(Entity& e, uint8_t source, int8_t rssi, bool rssi_dbm, uint32_t now);
     Entity* merge(Entity* a, Entity* b, uint8_t fresh);
     void confirm(Entity& e, uint32_t now);

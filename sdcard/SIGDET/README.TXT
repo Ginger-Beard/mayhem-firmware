@@ -22,7 +22,9 @@ The "Sig" field on the main view (turn the wheel) picks the class:
 class..."; works without an SD card), then one entry per .TXT file in
 /SIGDET/SIGS, named after the file (up to 15 characters, up to 12 files;
 DRONES.TXT only documents the built-in class and is not listed). The choice is
-saved by name.
+saved by name. The class changes once the wheel has rested for 1 s (each change
+drops every entry with its *_DROP row and writes a CLASS row), so turning past
+classes changes nothing.
 
 A class file decides which receivers run: BLE dwells when it has BLE rules,
 pattern dwells with PAT rules, energy sweeps of the bands its BAND and NB rules
@@ -71,6 +73,12 @@ NB   narrowband energy rule (up to 10 per class), from the energy sweep.
      period=  lo-hi, ms from one burst start to the next (2 starts in a dwell)
      band=    band to measure in (default: the class's bands, then the first
               built-in band that holds f)
+     dwells=  dwells with a hit (each within 60 s of the last) before it is
+              listed, 1..9 (default 2: one dwell's Wi-Fi or BLE burst is not
+              enough); once listed, every hit keeps it
+     With a ZW line, an NB rule within 100 kHz (plus half its bw) of the ZW
+     frequency is the Z-Wave energy fallback: it lists only while a Z-Wave
+     network has been decoded in the last 10 min.
      Resolution: points are 81 kHz apart at 915 MHz, 276 kHz at 2.4 GHz,
      ~970 kHz at 5 GHz, (hi-lo)/(points-1) in a custom band; one look of the
      band takes a few ms (915: ~1-4 ms, 2.4 GHz: ~5-10 ms), so burst and
@@ -234,17 +242,27 @@ WHAT EACH SHIPPED CLASS RUNS
   LAND_MOBILE        two custom sweep bands, NB rules
   INTERFERENCE       interference scan: 30-6000 MHz at 81.5 kHz, HF 1.5-30 MHz
                      at 5 kHz (SCAN lines)
+  HOME_IOT also holds the common phone / earbud / Apple adverts (Handoff,
+  Nearby, AirPods, AirPlay, iBeacon, Fast Pair): a household's BLE crowd, so
+  that the survey shows what is left.
   None of the file classes has rid, dji or rfcls: no drone detections there.
 
 INTERFERENCE SCAN (SCAN lines)
   A sweep that knows no frequencies: window after window over the ranges,
-  4 looks each, then feature tests. About 6 s a pass for the shipped
-  INTERFERENCE class (230 windows of 26 MHz plus 18 of 1.6 MHz; the window
-  switch time is not measured yet). Listed (kind NOIS, src R):
+  4 looks each, then feature tests. About 12.5 s a pass for the shipped
+  INTERFERENCE class, measured on the device (2026-11-14): 10.7 s for the
+  247 windows (230 of 26 MHz plus 18 of 1.6 MHz, ~43 ms each, of which ~16 ms
+  are the looks: the rest is the window switch and the wait for the next
+  display frame) plus a ~2 s hum check in nearly every pass. HB3 pass_ms has
+  the last pass. Listed (kind NOIS, src R):
     Comb <spacing>   6 or more narrow lines on one exact grid in a window
                      (spacing 3 points to 1/5 window: 245 kHz-5.2 MHz wide,
                      15-320 kHz HF), seen in 2 passes. PComb: teeth on in
-                     fewer than 3 of 4 looks (gated by a duty cycle).
+                     fewer than 3 of 4 looks (gated by a duty cycle), or seen
+                     in fewer than half of its passes when listed (a comb
+                     first seen pulsed stays PComb). Track tunes to the tooth
+                     nearest the centre of its extent (tooth_khz in the log),
+                     55 kHz wide.
     Floor+<dB> <MHz> the noise floor of the quietest look 4 dB or more over
                      the session's baseline (the second lowest floor seen
                      since the start or a gain change), 2 passes in a row
@@ -259,11 +277,24 @@ INTERFERENCE SCAN (SCAN lines)
   intermittent ones (burst), flat-topped blocks with steep edges (block:
   TV, LTE, Wi-Fi), other wide emissions (wide), combs on a round spacing,
   a multiple of 100 kHz (round_spacing: the receiver's own clock lines or
-  the occupied channels of a raster such as FM broadcast).
+  the occupied channels of a raster such as FM broadcast: within 0.6 %, or
+  within what one window's fit can tell, ~2 % for 6 teeth, when 5 of 6 teeth
+  sit within 25 kHz of a 100 kHz multiple).
+  Emitters (steady, burst, drift, hum candidates): 48 slots, a reserve of 6
+  each for HF, 30-300 MHz, 300-1000 MHz and above 1 GHz (only the groups the
+  ranges reach), the rest shared; a one-off goes before a recurring carrier,
+  and a newcomer 3 dB stronger takes the weakest unreported slot of its
+  group. Never emitters: FM broadcast (87.5-108 MHz: licensed carriers on a
+  raster; they filled the table and every hum check) and lines within one
+  point of a multiple of 10 MHz (the receiver's own clock: 30, 40, 80, 120
+  MHz ...): an interferer there is not followed as an emitter (combs and
+  floor rises are still seen). Duty in SCN rows: of an emitter, the share of
+  looks it was on in its last window; of a comb, the share of passes it was
+  seen in since first seen (presence, not an on/off duty cycle).
   Hum check: at most once a pass, and with at least 8 s of other dwells
   between two (at most ~22 % of the airtime), the strongest steady or
   drifting emission (10 dB or more over the floor) not checked in the last
-  100 passes gets a ~2 s look: the meter at its centre, a 14 kHz channel,
+  48 passes (~10 min) gets a ~2 s look: the meter at its centre, a 14 kHz channel,
   its power every 256 us searched for harmonics of 50 and 60 Hz (3 or more
   of harmonics 2-12, 300 and 600 Hz left out, 15 dB over the reference
   levels between them, the strongest 24 dB, at most one of the other
@@ -272,8 +303,13 @@ INTERFERENCE SCAN (SCAN lines)
   can delay a weaker one by a few minutes (one check every ~10 s). The
   check's memory is the Wi-Fi receiver's, so it never runs during a Wi-Fi
   dwell (it waits a few ms for a frame still being handled).
+  If the ADC clipped during the check (raw samples at full scale, 1 in 1,000
+  or more), the verdict is "Clip" (why=clipped, conf -) instead of NoHum: the
+  envelope was flattened. From 1 in 100,000 the status line shows CLIP
+  (yellow) for 10 s; the track meter's clipping does the same. Turn LNA / VGA
+  / amp down by hand: the app never changes the gains.
   It cannot: see anything under the noise; see emissions shorter than a
-  pass reliably (an emission is looked at ~16 ms every ~6 s); find combs
+  pass reliably (an emission is looked at ~16 ms every ~12.5 s); find combs
   closer than 3 points or with fewer than 6 teeth a window, or a comb whose
   spacing is a multiple of 100 kHz; tell a steady interferer from a
   transmitter; follow a drift faster than about one width a pass; notice a
@@ -283,22 +319,27 @@ INTERFERENCE SCAN (SCAN lines)
   mains-modulated one correctly (its pattern leaks into the channel: Hum);
   tell intermodulation in the
   receiver from real signals; give dBm, distance or the device. Opening a
-  map or the track view restarts the scan (its tables live in the map's
-  RAM). Log rows: SCN_NEW / SCN_DROP / SCN_SRV (detail: type, conf, why,
-  lo_khz, hi_khz and what was measured: spacing_hz + teeth, rise_cdb +
-  windows, range_hz + rate_hz_min, mains_hz + harmonics, ripple_cdb +
-  fill_pct, passes, duty, width_pts, pt_hz), SCN_HUM (each hum check; with
-  Log when mains was found, with Survey also when not): id SC<n>, label
-  Hum60 / Hum50 / NoHum and the centre, kind noise, freq_khz, bw_khz 14,
+  map restarts the scan (its tables live in the map's RAM); the track view
+  does not (the scan goes on with its tables afterwards). Log rows: SCN_NEW
+  / SCN_DROP / SCN_SRV (detail: type, conf, why, lo_khz, hi_khz and what was
+  measured: spacing_hz + teeth + tooth_khz, rise_cdb + windows, range_hz +
+  rate_hz_min, mains_hz + harmonics, ripple_cdb + fill_pct, passes, duty,
+  width_pts, pt_hz; SCN_DROP also drop=gone|class|stop and the finding's
+  last numbers), SCN_HUM (each hum check; with
+  Log when mains was found or the ADC clipped, with Survey also when not): id SC<n>, label
+  Hum60 / Hum50 / NoHum / Clip and the centre, kind noise, freq_khz, bw_khz 14,
   level = mean channel power, unit dBFS; detail class, type, conf, why
-  (mains_modulation, no_mains_pattern, no_result: two looks in a row
+  (mains_modulation, no_mains_pattern, clipped, no_result: two looks in a row
   without a result), mains_hz, harmonics, other (the other family's over
   15 dB), best_db, h60 / h50 (harmonics 1-12 in dB over the references,
   '/' separated), blocks, clip, wait_buf (DMA buffers the look waited for
   the Wi-Fi memory). HB3 every 60 s (classes with SCAN lines): scan_win,
   scan_pass, hum_dwells, hum_checks, hum_found, hum_lost (looks without a
   result), hum_deferred (looks that waited for a Wi-Fi frame), hum_windows,
-  hum_ms.
+  hum_ms, pass_ms (the last complete pass, window 0 to window 0, hum dwell
+  included), hum_clipped, floor_full (floor rises that found the 4 floor
+  slots taken), emit_full (new emitters with no slot they could take). The
+  HB cyc_ms of a scan class is the last pass time.
 
 LIST COLUMNS
   ID (name), Src (receiver letters; signature rows: the label continues here),
@@ -318,6 +359,10 @@ Own position (distance to a drone, lat/lon in the log): a live GPS fix (ESP32
 add-on GPS or the USB shell "gotgps") while it is fresh (30 s), else the
 manual position from Setup. The main status shows "ManPos" when the manual
 one is used; Setup shows where it came from and how old it is ("Map 2h").
+Every log row with our own position says which one in its detail:
+pos_src=gps (live fix) | manual | map | saved_gps (a GPS fix loaded from
+position.ini) and pos_age_s (seconds; -1 unknown). A manual position does not
+follow you: in a moving vehicle every row carries the same one.
 
 Setup, "Manual pos:" row:
   On map   pick the manual position on the map (source Map, time now)
@@ -384,7 +429,11 @@ Events
   START    the log opened: detail format, fw (version), build (date), log
            (detections|survey), class, part, lna, vga, amp
   CLASS    the signature class changed (same detail as START)
-  STOP     the log closed (app exit or Log unticked): rows, lost
+  STOP     the log closed (app exit or Log unticked): label = class; rows,
+           lost, why (exit | log_off), evictions, requeues. Before it: a
+           SIG_DROP (why=stop) for each signature entry and an SCN_DROP
+           (drop=stop) for each scan finding still listed, and the survey's
+           last summaries; the entries stay listed
   HB3      the interference scan's heartbeat (classes with SCAN lines; see
            INTERFERENCE SCAN)
   HB, HB2  heartbeat every 60 s, two rows (each under 512 bytes; HB2 starts at
@@ -400,15 +449,24 @@ Events
            srv_nrg (survey table entries), usb_drop, lna, vga, amp, fsk_nochk (frames
            of FSK rules without a check), fsk_rx (FSK frames the app got), gps
            (fix|nofix|none), survey, class_ok, class_bad_line, m0_stack_free_w (the
-           UI thread's stack never used since boot, in 4-byte words, as sysinfo). Counters run
-           from the app start.
+           UI thread's stack never used since boot, in 4-byte words, as sysinfo),
+           evictions / requeues (list entries pushed out by a full 12 entry
+           table, and those back within 60 s, listed again without a NEW).
+           rid_fwd counts every frame the BLE receiver queued as SOURCE_BLE:
+           Remote ID, and also the Track view's BLE target / rule frames
+           (rid_ok counts Remote ID only). Counters run from the app start.
   RID_NEW / RID_LOC / RID_DROP   Remote ID: level, unit, drone lat/lon; detail
            mac, id_type, ua_type, status, alt_geo_m, height_m, speed_ms,
            heading, vspeed_ms, op_lat, op_lon, op_alt_m, op_loc, operator_id,
            self_id
   RF_NEW / RF_CONF / RF_DROP     energy sweep track (candidate, confirmed,
            gone): label, class tag, freq, width, dB>floor; detail band, conf
-           (L M H), duty (%), flat_db
+           (L M H), duty (%), flat_db, step (the sweep's tune slice of the
+           centre), step_off_khz (from the slice's lower edge), step_khz,
+           lo_off_khz (where the LO sits in a slice). At 1.2 GHz a video
+           verdict whose level repeats at the same slice offset in two other
+           slices is dropped (a receiver artefact seen at high gain: 5-8 MHz
+           humps ~4.3 MHz above the LO of several slices at once).
   PAT_NEW / PAT_DROP   pattern scan: name, class, channel, dBFS; detail class,
            name, freq_khz, rssi, hits_per_s
   DJI_NEW / DJI_DROP   DJI Bluetooth advert (presence): address, name, match
@@ -418,8 +476,13 @@ Events
            class's detections at once, so SIG_DROP names the class they came
            from): id (address or NB<n>), label,
            kind, freq/bw (NB), level; detail class, rule (index in the file's
-           BLE or NB rules), valid, frames, seen_s, max (DROP); NB: conf=low,
-           duty, runs, burst_ms, period_ms
+           BLE or NB rules), valid, frames, seen_s, max and why (DROP:
+           expired = not heard for 60 s, evicted = pushed out of the full
+           list, it may still be there, class = class change, stop = the log
+           stopped), requeued=1 (NEW never: an evicted entry heard again
+           within 60 s is listed again silently, its first_s kept; its final
+           DROP is logged again); NB: conf=low, duty, runs, burst_ms,
+           period_ms
   POS_LOAD / POS_SAVE   Setup Load / Save of /SETTINGS/position.ini: label
            the source (GPS, HackRF GPS, Manual, Map), kind position, lat/lon
            the position; detail source (number), alt_m, age_s (-1 unknown),
@@ -453,8 +516,9 @@ Events
   Survey rows (Survey ticked; at most 30 at once, then 1 a second):
   BLE_SEEN an advertiser no detector or rule took, first heard (once per
            address per session: the last 64 addresses reported are remembered,
-           so one evicted and heard again gets no second BLE_SEEN; a class
-           change clears the survey tables, so it starts again): id address,
+           so one evicted and heard again gets no second BLE_SEEN; the tables
+           and that memory stay across class changes; only BLE dwells of a
+           class with BLE add to it): id address,
            level = strongest dBFS; detail pdu (the PDU types heard, '+'
            separated: ADV_IND, ADV_NONCONN_IND, ADV_SCAN_IND, SCAN_RSP; a
            scan response is the same entry and fills in its data), addr_type (public|random), cid (company
@@ -479,7 +543,9 @@ Events
            hold dB>floor; detail band (custom bands of a class also lo_mhz,
            hi_mhz, class), mean_db, duty (% of looks, max of the dwells),
            dwells, dwells_new, seen_s, conf, pt_khz (point spacing)
-  NRG_SUM  the same every 5 min while seen again (16 slots), and at the end
+  NRG_SUM  the same every 5 min while seen again (16 slots), at the end, and
+           at a class change for the old class's custom bands (those entries
+           go; the built-in bands' stay)
 
 Size: detections only, a few kB an hour without drones (HB rows ~0.6 kB a
 minute: ~40 kB/h). Survey: the first build measured 1.15 MB/h in testing (1304

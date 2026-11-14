@@ -63,6 +63,12 @@ uint8_t quantile(size_t n, size_t q, Get get) {
     return static_cast<uint8_t>(lo);
 }
 
+/* Frequency group of the emitter reserve: HF, 30-300 MHz, 300-1000 MHz,
+ * above (10 Hz units). */
+uint8_t group_of(uint32_t f10) {
+    return f10 < 3000000u ? 0 : (f10 < 30000000u ? 1 : (f10 < 100000000u ? 2 : 3));
+}
+
 }  // namespace
 
 const char* scan_type_tag(uint8_t t) {
@@ -91,6 +97,10 @@ size_t ScanEngine::configure(const ScanRange* ranges, size_t n) {
         nrange_++;
     }
     first_[nrange_] = static_cast<uint16_t>(nwin_);
+    groups_ = 0;
+    for (size_t r = 0; r < nrange_; r++)
+        for (uint8_t g = group_of(range_[r].lo_khz * 100u); g <= group_of(range_[r].hi_khz * 100u - 1); g++) groups_ |= 1u << g;
+    floor_full_ = emit_full_ = 0;
 
     pass_ = 1;
     t_s_ = 0;
@@ -632,7 +642,10 @@ void ScanEngine::window_comb() {
         const int64_t k = (df >= 0 ? df + sp / 2 : df - sp / 2) / sp;
         const int64_t kabs = k < 0 ? -k : k;
         const int64_t err = df - k * sp;
-        if (kabs > hit->base_k && (err < 0 ? -err : err) * 4 < sp) {
+        /* Only past the span of the widest one-window fit: a baseline of a
+         * tooth or two (a window whose first tooth is the next one) is worse
+         * than the fit (2026-11-14 test: 799.7 kHz fit, 794.6 kHz "refined"). */
+        if (kabs > hit->base_k && kabs >= hit->places && (err < 0 ? -err : err) * 4 < sp) {
             hit->sp_hz = static_cast<uint32_t>(((df < 0 ? -df : df) + kabs / 2) / kabs);
             hit->base_k = static_cast<uint16_t>(kabs > 65535 ? 65535 : kabs);
         }
@@ -642,7 +655,14 @@ void ScanEngine::window_comb() {
     if (hi_khz > hit->hi_khz) hit->hi_khz = hi_khz;
     if (fit_.teeth > hit->teeth) hit->teeth = fit_.teeth;
     if (fit_.level > hit->level) hit->level = fit_.level;
-    if (!fit_.pulsed) hit->pulsed = false;
+    if (fit_.places > hit->places) hit->places = static_cast<uint8_t>(fit_.places > 255 ? 255 : fit_.places);
+    {
+        const uint16_t on = comb_on_grid();
+        if (on >= 5 && on * 6u >= fit_.teeth * 5u) hit->grid100 = true;
+    }
+    /* A comb first seen pulsed stays pulsed once listed (its presence, not
+     * one continuous window, says what it is: close_pass). */
+    if (!fit_.pulsed && !hit->reported) hit->pulsed = false;
     if (hit->pass_last != pass_) {
         hit->seen++;
         hit->pass_last = pass_;
@@ -650,18 +670,52 @@ void ScanEngine::window_comb() {
     hit->upd = true;
 }
 
-/* A round spacing: a multiple of 100 kHz within 0.6 %. Either the
- * receiver's own clock harmonics (lines on round frequencies, 0.5 / 1 /
- * 2.5 MHz apart) or the occupied channels of a raster (FM broadcast every
- * 200 kHz: any subset 2, 3 ... channels apart is a geometric comb). A
+/* The window's comb teeth (lines on the fitted grid) whose frequency sits on
+ * a 100 kHz grid, within max(0.3 point, kRasterTolMinHz) <= kRasterTolMaxHz:
+ * the occupied channels of a raster (FM broadcast) or round clock lines.
+ * A switching supply's teeth fall there by chance (~half of them at 25 kHz),
+ * and a spacing off a round one walks them off the grid tooth by tooth:
+ * window_comb asks for 5 of 6 of the teeth. */
+uint16_t ScanEngine::comb_on_grid() const {
+    if (!fit_.ok) return 0;
+    Line lines[kMaxLines];
+    const size_t n = find_lines(lines, fit_.pulsed);
+    uint32_t tol = range_[cur_range_].res_hz * 3 / 10;
+    if (tol < kRasterTolMinHz) tol = kRasterTolMinHz;
+    if (tol > kRasterTolMaxHz) tol = kRasterTolMaxHz;
+    const uint32_t gtol = fit_.sp16 / 8 > 8 ? fit_.sp16 / 8 : 8;
+    const uint32_t last16 = fit_.first16 + (fit_.places - 1u) * fit_.sp16;
+    uint16_t on = 0;
+    for (size_t i = 0; i < n; i++) {
+        const uint32_t p = lines[i].p16;
+        if (p + gtol < fit_.first16 || p > last16 + gtol) continue;
+        const uint32_t m = (p + fit_.sp16 - fit_.first16) % fit_.sp16;
+        if (m > gtol && fit_.sp16 - m > gtol) continue;
+        const uint64_t f_hz = static_cast<uint64_t>(f10_of(p)) * 10;
+        const uint32_t r = static_cast<uint32_t>(f_hz % kRoundGridHz);
+        if ((r < kRoundGridHz - r ? r : kRoundGridHz - r) <= tol) on++;
+    }
+    return on;
+}
+
+/* A round spacing: a multiple of 100 kHz within 0.6 % (a spacing known to
+ * that precision), or, when the comb's teeth sat on a 100 kHz grid in a
+ * window (grid100), within what one window's fit can tell: one point over
+ * the fitted span (6 teeth at 81.5 kHz: ~2 %). Either the receiver's own
+ * clock harmonics (lines on round frequencies, 0.5 / 1 / 2.5 MHz apart) or
+ * the occupied channels of a raster (FM broadcast every 200 kHz: any subset
+ * 2, 3 ... channels apart is a geometric comb; 2026-11-14: "Comb 809.9k" at
+ * 95-105 MHz, a 6 tooth fit 1.2 % off 800 kHz, missed by the 0.6 % test). A
  * switching supply's comb seldom has a round spacing; one that does is
- * missed (stated in the README). One window's spacing is good to ~0.5 %,
- * which sets the tolerance. */
+ * missed (stated in the README). */
 bool ScanEngine::comb_clock(const Comb& c) const {
     if (c.sp_hz < kRoundGridHz) return false;
     const uint64_t k = (c.sp_hz + kRoundGridHz / 2) / kRoundGridHz;
     const uint64_t round = k * kRoundGridHz;
-    return static_cast<uint64_t>(absdiff(c.sp_hz, static_cast<uint32_t>(round))) * 1000000u <= round * kRoundTolPpm;
+    const uint64_t err = absdiff(c.sp_hz, static_cast<uint32_t>(round));
+    if (err * 1000000u <= round * kRoundTolPpm) return true;
+    if (!c.grid100 || c.places < 2) return false;
+    return err * (c.places - 1u) <= range_[c.range].res_hz;
 }
 
 /* A frequency on a known comb's grid (within 0.6 point), inside its extent. */
@@ -688,7 +742,7 @@ void ScanEngine::emitters_from_runs() {
         const uint32_t width = r.hi - r.lo + 1u;
         if (width * g.res_hz > kEmitMaxHz) continue;
         const uint32_t f10 = f10_of(r.c16);
-        if (on_comb(f10, cur_range_)) continue;
+        if (on_comb(f10, cur_range_) || known_carrier(f10, width, g.res_hz)) continue;
         /* The same emitter: the run overlaps where it was last seen, give or
          * take half a point. Neighbouring channels (FM: 2.45 points apart)
          * stay apart; a carrier drifting less than its width a pass is
@@ -709,18 +763,10 @@ void ScanEngine::emitters_from_runs() {
             continue;
         }
         if (!hit) {
-            for (auto& e : em_)
-                if (!e.uid) {
-                    hit = &e;
-                    break;
-                }
+            hit = emitter_slot(f10, level);
             if (!hit) {
-                /* Full: the least seen, longest unseen, unreported one goes. */
-                for (auto& e : em_) {
-                    if (scan_reported(e.type) || e.upd) continue;
-                    if (!hit || e.pass_last < hit->pass_last || (e.pass_last == hit->pass_last && e.seen < hit->seen)) hit = &e;
-                }
-                if (!hit) continue;
+                emit_full_++;
+                continue;
             }
             *hit = Emitter{};
             hit->uid = new_uid();
@@ -749,12 +795,81 @@ void ScanEngine::emitters_from_runs() {
     }
 }
 
+bool ScanEngine::known_carrier(uint32_t f10, uint32_t width_pts, uint32_t res_hz) const {
+    const uint32_t khz = (f10 + 50) / 100;
+    if (khz >= kFmLoKhz && khz <= kFmHiKhz) return true;
+    if (width_pts > kOwnClockMaxW) return false;
+    const uint32_t clk10 = kOwnClockHz / 10;
+    const uint32_t m = f10 % clk10;
+    const uint32_t d10 = m < clk10 - m ? m : clk10 - m;
+    return f10 >= clk10 / 2 && d10 * 10u <= res_hz;
+}
+
+/* A slot for a new emitter at f10 (level cdB over floor), nullptr if none it
+ * may take (constants: kEmitReplaceCdb). In order: a free slot, unless the
+ * free ones are owed to the reserves of other groups; an unreported entry not
+ * seen in this pass, in its own group or a group over its reserve (least
+ * seen, then longest unseen: a one-off goes before a steady carrier whose
+ * window comes later in the pass); while its group is under its
+ * reserve, the weakest unreported entry of a group over its reserve; else
+ * the weakest unreported entry of its group, when it is kEmitReplaceCdb
+ * weaker. Reported ones (drift, hum) never go. */
+ScanEngine::Emitter* ScanEngine::emitter_slot(uint32_t f10, int16_t level) {
+    size_t ngroups = 0;
+    for (uint8_t g = 0; g < 4; g++) ngroups += (groups_ >> g) & 1u;
+    const size_t reserve = ngroups ? kMaxEmitters / (2 * ngroups) : 0;
+    const uint8_t mine = group_of(f10);
+    size_t cnt[4] = {}, nfree = 0;
+    Emitter* free_slot = nullptr;
+    for (auto& e : em_) {
+        if (!e.uid) {
+            nfree++;
+            if (!free_slot) free_slot = &e;
+        } else {
+            cnt[group_of(e.f10)]++;
+        }
+    }
+    if (free_slot) {
+        size_t owed = 0;
+        for (uint8_t g = 0; g < 4; g++)
+            if (g != mine && ((groups_ >> g) & 1u) && cnt[g] < reserve) owed += reserve - cnt[g];
+        if (cnt[mine] < reserve || nfree > owed) return free_slot;
+    }
+    Emitter* best = nullptr;
+    for (auto& e : em_) {
+        if (!e.uid || scan_reported(e.type) || e.upd) continue;
+        const uint8_t g = group_of(e.f10);
+        if (g != mine && cnt[g] <= reserve) continue;
+        if (!best || e.seen < best->seen || (e.seen == best->seen && e.pass_last < best->pass_last)) best = &e;
+    }
+    if (best) return best;
+    if (cnt[mine] < reserve) {
+        for (auto& e : em_) {
+            if (!e.uid || scan_reported(e.type)) continue;
+            const uint8_t g = group_of(e.f10);
+            if (g == mine || cnt[g] <= reserve) continue;
+            if (!best || e.level < best->level) best = &e;
+        }
+        return best;
+    }
+    for (auto& e : em_) {
+        if (!e.uid || scan_reported(e.type) || group_of(e.f10) != mine) continue;
+        if (!best || e.level < best->level) best = &e;
+    }
+    return (best && best->level + kEmitReplaceCdb <= level) ? best : nullptr;
+}
+
 /* ---- end of a pass ----------------------------------------------------- */
 
 void ScanEngine::emit_emitter(uint8_t ev, uint8_t type, uint8_t conf, const Emitter& e) {
-    const ScanRange& g = range_[e.range];
     ScanEvent s{};
+    fill_emitter(type, conf, e, s);
     s.ev = ev;
+    emit(s);
+}
+
+void ScanEngine::fill_emitter(uint8_t type, uint8_t conf, const Emitter& e, ScanEvent& s) const {
+    const ScanRange& g = range_[e.range];
     s.type = type;
     s.conf = conf;
     s.uid = e.uid;
@@ -780,7 +895,6 @@ void ScanEngine::emit_emitter(uint8_t ev, uint8_t type, uint8_t conf, const Emit
     s.duty = e.duty;
     s.width_pts = e.width;
     s.res_hz = g.res_hz;
-    emit(s);
 }
 
 void ScanEngine::close_pass() {
@@ -822,22 +936,11 @@ void ScanEngine::close_pass() {
 
     for (auto& c : comb_) {
         if (!c.uid) continue;
-        const ScanRange& g = range_[c.range];
         if (!c.reported) c.clock = comb_clock(c);
+        if (c.upd && !c.reported && c.seen >= 2 && c.seen * 100u < kCombContPct * (pass_ - c.pass_first + 1u))
+            c.pulsed = true; /* seen in few of its passes: gated, whatever one window showed */
         ScanEvent s{};
-        s.uid = c.uid;
-        s.range = c.range;
-        s.type = c.clock ? ST_CLOCK : (c.pulsed ? ST_PCOMB : ST_COMB);
-        s.conf = c.clock ? SC_LOW : SC_MED;
-        s.f_khz = (c.lo_khz + c.hi_khz) / 2;
-        s.lo_khz = c.lo_khz;
-        s.hi_khz = c.hi_khz;
-        s.param = c.sp_hz;
-        s.count = c.teeth;
-        s.passes = static_cast<uint16_t>(pass_ - c.pass_first + 1);
-        s.level_cdb = static_cast<int16_t>(c.level * 50);
-        s.duty = static_cast<uint8_t>(c.seen * 100u / s.passes);
-        s.res_hz = g.res_hz;
+        comb_event(c, s);
         if (c.upd) {
             if (!c.reported && c.seen >= 2) {
                 c.reported = true;
@@ -926,28 +1029,18 @@ void ScanEngine::floors_close() {
                         f->uid = new_uid();
                         break;
                     }
-            if (!f || !f->uid) continue;
+            if (!f || !f->uid) {
+                floor_full_++; /* every slot follows another rise (HB3 floor_full) */
+                continue;
+            }
             matched[fi] = true;
             f->w_lo = lo;
             f->w_hi = hi;
             f->rise = static_cast<uint16_t>(rise * 50);
             f->miss = 0;
-            ScanWindowPlan a, b;
-            plan(lo, a);
-            plan(hi, b);
             ScanEvent s{};
+            floor_event(*f, s);
             s.ev = f->reported ? SE_UPD : SE_NEW;
-            s.type = ST_FLOOR;
-            s.conf = hi > lo ? SC_MED : SC_LOW;
-            s.uid = f->uid;
-            s.range = static_cast<uint8_t>(r);
-            s.lo_khz = static_cast<uint32_t>(a.start_hz / 1000);
-            s.hi_khz = static_cast<uint32_t>((b.start_hz + b.span_hz) / 1000);
-            s.f_khz = (s.lo_khz + s.hi_khz) / 2;
-            s.param = f->rise;
-            s.level_cdb = static_cast<int16_t>(f->rise);
-            s.count = static_cast<uint16_t>(hi - lo + 1);
-            s.res_hz = range_[r].res_hz;
             f->reported = true;
             emit(s);
         }
@@ -957,25 +1050,77 @@ void ScanEngine::floors_close() {
         if (!f.uid || matched[i]) continue;
         if (++f.miss < 2) continue;
         if (f.reported) {
-            ScanWindowPlan a, b;
-            plan(f.w_lo, a);
-            plan(f.w_hi, b);
             ScanEvent s{};
+            floor_event(f, s);
             s.ev = SE_DROP;
-            s.type = ST_FLOOR;
-            s.conf = f.w_hi > f.w_lo ? SC_MED : SC_LOW;
-            s.uid = f.uid;
-            s.range = a.range;
-            s.lo_khz = static_cast<uint32_t>(a.start_hz / 1000);
-            s.hi_khz = static_cast<uint32_t>((b.start_hz + b.span_hz) / 1000);
-            s.f_khz = (s.lo_khz + s.hi_khz) / 2;
-            s.param = f.rise;
-            s.level_cdb = static_cast<int16_t>(f.rise);
-            s.count = static_cast<uint16_t>(f.w_hi - f.w_lo + 1);
             emit(s);
         }
         f = Floor{};
     }
+}
+
+void ScanEngine::comb_event(const Comb& c, ScanEvent& s) const {
+    s.uid = c.uid;
+    s.range = c.range;
+    s.type = c.clock ? ST_CLOCK : (c.pulsed ? ST_PCOMB : ST_COMB);
+    s.conf = c.clock ? SC_LOW : SC_MED;
+    s.f_khz = (c.lo_khz + c.hi_khz) / 2;
+    s.lo_khz = c.lo_khz;
+    s.hi_khz = c.hi_khz;
+    s.param = c.sp_hz;
+    s.count = c.teeth;
+    s.passes = static_cast<uint16_t>(pass_ - c.pass_first + 1);
+    s.level_cdb = static_cast<int16_t>(c.level * 50);
+    /* Presence: passes it was seen in, of the passes since first seen. */
+    s.duty = static_cast<uint8_t>(c.seen * 100u / s.passes);
+    s.res_hz = range_[c.range].res_hz;
+    s.anchor_khz = (c.anchor10 + 50) / 100;
+}
+
+/* A listed finding as it stands (its SE_UPD event, ev SE_DROP), for rows
+ * written while the engine still has it but no event is in hand: a class
+ * change, the log stopping. */
+bool ScanEngine::describe(uint8_t uid, ScanEvent& s) const {
+    if (!uid) return false;
+    for (const auto& e : em_) {
+        if (e.uid != uid || !scan_reported(e.type)) continue;
+        s = ScanEvent{};
+        fill_emitter(e.type, e.type == ST_HUM ? SC_HIGH : SC_MED, e, s);
+        s.ev = SE_DROP;
+        return true;
+    }
+    for (const auto& c : comb_) {
+        if (c.uid != uid || !c.reported || c.clock) continue;
+        s = ScanEvent{};
+        comb_event(c, s);
+        s.ev = SE_DROP;
+        return true;
+    }
+    for (const auto& f : fl_) {
+        if (f.uid != uid || !f.reported) continue;
+        s = ScanEvent{};
+        floor_event(f, s);
+        s.ev = SE_DROP;
+        return true;
+    }
+    return false;
+}
+
+void ScanEngine::floor_event(const Floor& f, ScanEvent& s) const {
+    ScanWindowPlan a, b;
+    plan(f.w_lo, a);
+    plan(f.w_hi, b);
+    s.type = ST_FLOOR;
+    s.conf = f.w_hi > f.w_lo ? SC_MED : SC_LOW;
+    s.uid = f.uid;
+    s.range = a.range;
+    s.lo_khz = static_cast<uint32_t>(a.start_hz / 1000);
+    s.hi_khz = static_cast<uint32_t>((b.start_hz + b.span_hz) / 1000);
+    s.f_khz = (s.lo_khz + s.hi_khz) / 2;
+    s.param = f.rise;
+    s.level_cdb = static_cast<int16_t>(f.rise);
+    s.count = static_cast<uint16_t>(f.w_hi - f.w_lo + 1);
+    s.res_hz = range_[a.range].res_hz;
 }
 
 /* ---- hum check --------------------------------------------------------- */
@@ -985,6 +1130,10 @@ bool ScanEngine::hum_candidate(uint8_t& uid, uint32_t& f_khz, uint32_t& width_hz
     for (const auto& e : em_) {
         if (!e.uid || e.type == ST_HUM) continue;
         if (e.surveyed != ST_STEADY && e.type != ST_DRIFT) continue;
+        /* Never FM broadcast or the receiver's own clock lines (they took
+         * all 111 checks of a 2026-11-14 session); the table keeps them out
+         * already, a drift could still carry one in. */
+        if (known_carrier(e.f10, e.width, range_[e.range].res_hz)) continue;
         if (e.level < kHumMinCdb) continue;
         if (e.hum_pass && pass_ - e.hum_pass < kHumRecheckPasses) continue;
         if (!best || e.level > best->level) best = &e;

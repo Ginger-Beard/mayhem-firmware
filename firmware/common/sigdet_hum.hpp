@@ -82,6 +82,20 @@ constexpr float kHumBlockRate = 3906.25f;
 constexpr uint32_t kHumWindowBlocks = 3906;
 constexpr uint8_t kHumWindows = 2;
 
+/* Clipping during a hum window: SignatureDetectHumMessage::clip counts raw
+ * I or Q values at |x| >= 120 over about the window (blocks x 1024 complex
+ * samples, 2048 values). From 1 in 100,000 (the track meter's "4 in 50 ms")
+ * the app warns (status CLIP); from 1 in 1,000 the envelope is flattened
+ * often enough that the check gives no verdict ("clipped", not NoHum).
+ * Display and log only: the gains are never changed. */
+constexpr uint32_t kHumValuesPerBlock = 2048;
+inline bool hum_clip_warn(uint32_t clip, uint32_t blocks) {
+    return blocks && static_cast<uint64_t>(clip) * 100000u >= static_cast<uint64_t>(blocks) * kHumValuesPerBlock;
+}
+inline bool hum_clip_heavy(uint32_t clip, uint32_t blocks) {
+    return blocks && static_cast<uint64_t>(clip) * 1000u >= static_cast<uint64_t>(blocks) * kHumValuesPerBlock;
+}
+
 struct HumLevels {
     int8_t h60[kHumHarm]; /* k x 60 Hz (k = 1..12) over the 60 Hz family's reference, dB */
     int8_t h50[kHumHarm]; /* k x 50 Hz over the 50 Hz family's reference, dB */

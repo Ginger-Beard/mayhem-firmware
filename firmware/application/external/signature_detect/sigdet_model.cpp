@@ -105,6 +105,12 @@ size_t Tracker::active_rid() const {
 void Tracker::clear() {
     count_ = 0;
     rid_used_ = 0;
+    for (auto& r : recent_) r = Recent{};
+}
+
+const char* Tracker::drop_why_name(uint8_t why) {
+    static constexpr const char* kNames[] = {"expired", "evicted", "class", "gone", "stop"};
+    return why < sizeof(kNames) / sizeof(kNames[0]) ? kNames[why] : "expired";
 }
 
 bool Tracker::attach_rid(Entity& e) {
@@ -120,26 +126,66 @@ bool Tracker::attach_rid(Entity& e) {
     return false;
 }
 
-void Tracker::remove(size_t index, bool report) {
+void Tracker::remove(size_t index, bool report, DropWhy why) {
     Entity& e = items_[index];
+    drop_why_ = why;
     if (report && e.confirmed) emit(EV_DROPPED, e);
     if (e.rid) rid_used_ &= ~(1u << (e.rid - rids_));
     for (size_t i = index; i + 1 < count_; i++) items_[i] = items_[i + 1];
     count_--;
 }
 
-void Tracker::evict_oldest(bool rid_only) {
+/* The table is full: the entity heard longest ago goes. last_s has a 1 s
+ * resolution, so in a crowd most entities tie; then the one with the fewest
+ * frames (a passer-by rather than a steady neighbour), then the one listed
+ * first. (Before, a tie took index 0: the newest entity, often in the second
+ * it was created; a crowd larger than the table turned over every second.)
+ * An entity heard in this second does not go (nor, so, one created in it):
+ * the newcomer is refused instead (nullptr from create(); it is heard
+ * again). A Remote ID newcomer may still take the place of another kind
+ * heard in this second, not of one created in it. An evicted confirmed
+ * entity is remembered (recent_) so that its return within kExpireSeconds is
+ * not a new detection; its DROP (why=evicted) is logged once. */
+bool Tracker::evict_oldest(bool rid_only, uint32_t now, bool for_rid) {
     size_t victim = count_;
-    for (size_t i = 0; i < count_; i++) {
-        if (rid_only && !items_[i].rid) continue;
-        if (victim == count_ || items_[i].last_s < items_[victim].last_s) victim = i;
+    for (size_t i = count_; i-- > 0;) { /* oldest listed first: it wins a full tie */
+        const Entity& e = items_[i];
+        if ((rid_only && !e.rid) || e.first_s == now) continue;
+        if (e.last_s == now && !(for_rid && !e.rid)) continue;
+        if (victim == count_) {
+            victim = i;
+            continue;
+        }
+        const Entity& v = items_[victim];
+        if (e.last_s != v.last_s ? e.last_s < v.last_s : (e.frames != v.frames ? e.frames < v.frames : e.first_s < v.first_s)) victim = i;
     }
-    if (victim < count_) remove(victim, true);
+    if (victim == count_) return false;
+    const Entity& e = items_[victim];
+    if (e.confirmed) {
+        Recent* slot = &recent_[0]; /* a free one, else the one evicted longest ago */
+        for (auto& r : recent_) {
+            if (!r.used) {
+                slot = &r;
+                break;
+            }
+            if (r.evicted_s < slot->evicted_s) slot = &r;
+        }
+        Recent& r = *slot;
+        memcpy(r.mac, e.mac, 6);
+        r.kind = e.kind;
+        r.used = true;
+        r.evicted_s = now;
+        r.first_s = e.first_s;
+    }
+    evictions_++;
+    remove(victim, !e.requeued, DROP_EVICTED);
+    return true;
 }
 
 Entity* Tracker::create(Kind kind, const uint8_t* mac, uint32_t now) {
-    if (count_ == kMaxEntities) evict_oldest(false);
-    if (kind == Kind::RemoteId && rid_used_ == (1u << kMaxRid) - 1) evict_oldest(true);
+    const bool rid = kind == Kind::RemoteId;
+    if (count_ == kMaxEntities && !evict_oldest(false, now, rid)) return nullptr;
+    if (rid && rid_used_ == (1u << kMaxRid) - 1 && !evict_oldest(true, now, rid)) return nullptr;
     if (count_ == kMaxEntities) return nullptr;
 
     for (size_t i = count_; i > 0; i--) items_[i] = items_[i - 1];
@@ -155,6 +201,18 @@ Entity* Tracker::create(Kind kind, const uint8_t* mac, uint32_t now) {
     if (kind == Kind::RemoteId && !attach_rid(e)) {
         remove(0, false);
         return nullptr;
+    }
+    for (auto& r : recent_) {
+        if (!r.used || r.kind != kind || memcmp(r.mac, mac, 6) != 0) continue;
+        if (now - r.evicted_s < kExpireSeconds) {
+            e.confirmed = true; /* silently: its NEW was logged, and its DROP (why=evicted) */
+            e.requeued = true;
+            e.first_s = r.first_s;
+            e.loc_report_s = now;
+            requeues_++;
+        }
+        r = Recent{};
+        break;
     }
     return &e;
 }
@@ -320,7 +378,7 @@ Entity* Tracker::ingest_pattern(const uint8_t* mac, int8_t rssi, uint32_t now) {
 
 void Tracker::drop_pattern(const uint8_t* mac) {
     Entity* e = find_mac(mac);
-    if (e) remove(static_cast<size_t>(e - items_), true);
+    if (e) remove(static_cast<size_t>(e - items_), true, DROP_GONE);
 }
 
 Entity* Tracker::ingest_vendor(const uint8_t* mac, int8_t rssi, uint8_t why, uint8_t pdu_type, const uint8_t* name, size_t name_len, uint32_t now) {
@@ -390,7 +448,7 @@ void Tracker::tick(uint32_t now, bool own_valid, int32_t own_lat, int32_t own_lo
         Entity& e = items_[i];
         const uint32_t age = now - e.last_s;
         if (age >= kExpireSeconds) {
-            remove(i, true);
+            remove(i, true, DROP_EXPIRED);
             continue;
         }
         e.stale = age >= kStaleSeconds;
@@ -403,9 +461,9 @@ void Tracker::tick(uint32_t now, bool own_valid, int32_t own_lat, int32_t own_lo
     }
 }
 
-void Tracker::drop_kind(Kind kind) {
+void Tracker::drop_kind(Kind kind, DropWhy why) {
     for (size_t i = count_; i-- > 0;)
-        if (items_[i].kind == kind) remove(i, true);
+        if (items_[i].kind == kind) remove(i, true, why);
 }
 
 void entity_name(const Entity& e, char* out, size_t cap) {
