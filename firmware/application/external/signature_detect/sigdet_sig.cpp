@@ -521,6 +521,13 @@ const char* sig_kind_tag(uint8_t kind) {
     return kKindTags[kind < SK_COUNT ? kind : 0];
 }
 
+bool nb_tied_to_zw(const SigClass& c, size_t i) {
+    if (c.zw_rule < 0 || i >= c.nnb || !c.zw.f_khz) return false;
+    const NbRule& r = c.nb[i];
+    const uint32_t d = r.f_khz > c.zw.f_khz ? r.f_khz - c.zw.f_khz : c.zw.f_khz - r.f_khz;
+    return d <= kNbZwTieKhz + r.bw_khz / 2u;
+}
+
 const char* sig_valid_name(uint8_t valid) {
     return kValidNames[valid < 3 ? valid : 0];
 }
@@ -644,6 +651,7 @@ const char* SigParser::parse_line(const char* line, size_t len) {
         r.min_db = 8;
         r.duty_hi = 100;
         r.band = BAND_COUNT;
+        r.dwells = kNbDwellsDefault;
         bool label = false, freq = false, bw = false;
         uint32_t v = 0, lo = 0, hi = 0;
         while (f.next()) {
@@ -665,6 +673,9 @@ const char* SigParser::parse_line(const char* line, size_t len) {
             } else if (f.key("db")) {
                 if (!parse_uint(f.vb, f.ve, 60, v) || v < 3) return "db not 3..60";
                 r.min_db = static_cast<uint8_t>(v);
+            } else if (f.key("dwells")) {
+                if (!parse_uint(f.vb, f.ve, 9, v) || v < 1) return "dwells not 1..9";
+                r.dwells = static_cast<uint8_t>(v);
             } else if (f.key("duty")) {
                 if (!parse_range(f.vb, f.ve, 100, lo, hi)) return "duty: lo-hi %";
                 r.duty_lo = static_cast<uint8_t>(lo);

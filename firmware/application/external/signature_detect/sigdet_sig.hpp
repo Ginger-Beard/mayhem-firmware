@@ -62,6 +62,10 @@
  *     burst=   lo-hi, ms of one burst (needs whole bursts inside the dwell)
  *     period=  lo-hi, ms from one burst start to the next (two in a dwell)
  *     band=    the band to measure it in (default: the first that holds f)
+ *     dwells=  dwells with a hit within 60 s before it is listed, 1..9
+ *              (default 2); once listed, every hit refreshes it. With a ZW
+ *              line, an NB rule at the ZW frequency lists only while the
+ *              frame receiver has had a valid frame (kNbZwTieSeconds)
  *
  *   BAND,name=915                built-in band: 2.4 5.8 5.3 1.2 915 868 5.1
  *   BAND,name=LMR,lo=450,hi=470,points=320,dwell=300
@@ -189,8 +193,17 @@ struct NbRule {
     uint16_t line;                 /* file line (a rule rejected at the end) */
     uint8_t kind;
     uint8_t valid;
+    uint8_t dwells; /* dwells with a hit (within kNbPairSeconds) before it is listed, default kNbDwellsDefault */
     char label[kSigLabelLen];
 };
+constexpr uint8_t kNbDwellsDefault = 2; /* one dwell's burst of Wi-Fi or BLE listed "Zigbee ch15?" 54 times on a drive */
+constexpr uint32_t kNbPairSeconds = 60;
+/* An NB rule within this of the class's ZW frequency (and its own half
+ * width) is the Z-Wave energy fallback: listed only while the frame receiver
+ * has had a valid frame within kNbZwTieSeconds (2026-11-14: "Z-Wave 908.4?"
+ * listed with no Z-Wave frame at all). */
+constexpr uint32_t kNbZwTieKhz = 100;
+constexpr uint32_t kNbZwTieSeconds = 600;
 
 struct SigBand {
     uint16_t lo_mhz, hi_mhz, points;
@@ -276,6 +289,9 @@ struct SigClass {
     ScanRange scan[kSigMaxScan]; /* a class with SCAN lines sweeps these ranges, not its bands */
     SigReport report;
 };
+
+/* NB rule nb_index of the class is its Z-Wave energy fallback (kNbZwTieKhz). */
+bool nb_tied_to_zw(const SigClass& c, size_t nb_index);
 
 /* The built-in Z-Wave R1 rule (the ZW line), as FSK fields. */
 extern const char* const kZwFskFields;

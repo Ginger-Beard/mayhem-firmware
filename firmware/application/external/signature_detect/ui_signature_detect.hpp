@@ -130,6 +130,8 @@ struct SigMemory {
     SigParser parser{}; /* only while a class loads */
     NbState nb[kSigMaxNb]{};
     NbResult nb_last[kSigMaxNb]{}; /* each NB rule's last hit */
+    uint8_t nb_hits[kSigMaxNb]{};  /* dwells with a hit, the last within kNbPairSeconds (NbRule::dwells) */
+    uint32_t nb_hit_s[kSigMaxNb]{};
     BleSurvey ble{};
     NrgSurvey nrg{};
     ZwNets zw{}; /* Z-Wave networks heard (home ID, nodes) */
@@ -242,6 +244,13 @@ class SignatureDetectView : public View {
     bool sig_scan_pending_{true}; /* list /SIGDET/SIGS on the first frame */
     bool sig_load_failed_{false}; /* the file could not be opened */
     bool sd_legacy_{false};       /* /SIGDET/SIGS missing, /DRONEDET/SIGS read instead (one release) */
+    /* The wheel's pick: applied once it has rested kClassSettleMs (each
+     * change drops every entry and writes a CLASS row). */
+    static constexpr systime_t kClassSettleMs = 1000;
+    uint8_t sig_index_{0};          /* the class in force (field_sig_ index) */
+    uint8_t sig_pick_{0};           /* the wheel's latest pick */
+    bool sig_pick_pending_{false};  /* ... not applied yet */
+    systime_t sig_pick_ms_{0};      /* ... when it was made */
     const char* sd_root() const;
     void update_columns();
     bool nb_dwell_{false};     /* NB rules measure this sweep dwell */
@@ -287,6 +296,7 @@ class SignatureDetectView : public View {
     uint32_t fsk_rx_{0};    /* SignatureDetectFskMessages received */
     uint8_t fsk_cursor_{0}; /* the FSK dwell (SigClass::fskg) last visited */
     uint32_t zw_bad_{0};    /* ... failing the header sanity checks */
+    uint32_t zw_ok_s_{0};   /* last frame of a listed Z-Wave network (uptime s), 0: none */
 
     /* Wi-Fi Remote ID dwells (PSDT DSSS mode). */
     uint8_t ble_since_wifi_{0};                 /* BLE dwells since the last Wi-Fi dwell */
@@ -323,9 +333,10 @@ class SignatureDetectView : public View {
     spec_an::Sweep* sweep_{nullptr};
     RfEngine::Work* work_{nullptr};
     /* Interference scan (a class with SCAN lines, sigdet_scan.hpp): the
-     * engine lives in the map's part of PSDT's lent RAM (a map or the track
-     * view takes it back: the scan starts again afterwards), its per-window
-     * work in the RF engine's arrays, which a scan class does not use. */
+     * engine lives in the map's part of PSDT's lent RAM (a map takes it back:
+     * the scan starts again afterwards; the track view does not, the scan
+     * goes on after it with its tables), its per-window work in the RF
+     * engine's arrays, which a scan class does not use. */
     ScanEngine* scan_{nullptr};
     uint16_t scan_w_{0};                        /* window being swept / next */
     uint8_t scan_range_{0xFF};                  /* range of the window before (a range change switches the sample rate) */
@@ -333,6 +344,8 @@ class SignatureDetectView : public View {
     uint8_t scan_gain_[3]{};                    /* lna, vga, amp the floor baseline belongs to */
     const ScanEvent* scan_ev_{nullptr};         /* the event being turned into an entity (its NEW row) */
     uint32_t scan_windows_{0}, scan_passes_{0}; /* this session, for the heartbeat */
+    systime_t pass_t0_{0};                      /* when the current scan pass started (its first window), 0: not yet */
+    uint32_t pass_ms_{0};                       /* the last complete pass, ms (HB3 pass_ms, hum dwells included) */
     uint8_t scan_gen_{0};                       /* engines started (a result for an engine that is gone is dropped) */
     /* Hum dwells (the scan's mains hum check, sigdet_hum.hpp): the meter at
      * a candidate's centre, a 14 kHz channel, two ~1 s ladder windows; the
@@ -349,6 +362,8 @@ class SignatureDetectView : public View {
     uint16_t hum_dwells_{0}, hum_checks_{0}, hum_found_{0}, hum_lost_{0};
     uint8_t hum_uid_{0}, hum_gen_{0}, hum_win_{0};
     uint8_t hum_lost_uid_{0}; /* the candidate whose last dwell brought no result */
+    uint16_t hum_clipped_{0}; /* hum checks judged "clipped" (the ADC saturated: no verdict) */
+    uint32_t clip_s_{0};      /* last time a hum window or the track meter saw clipping (status "CLIP") */
     bool rf_paused_{false};
     RfEngine rf_{};
 
@@ -476,18 +491,18 @@ class SignatureDetectView : public View {
     void next_phase();
     void start_sweep(uint8_t band);
     void end_sweep();
-    bool scan_memory(bool on);
+    bool scan_memory(bool on, uint8_t why = Tracker::DROP_GONE);
     void start_scan();
     void end_scan();
     bool hum_due();
     void start_hum(bool rate_switch);
     void end_hum();
     void on_hum(const SignatureDetectHumMessage& message);
-    void hum_row(const sigdet::HumVerdict& v, bool lost);
+    void hum_row(const sigdet::HumVerdict& v, bool lost, bool clipped = false);
     static void on_scan_event(void* ctx, const ScanEvent& e);
     void scan_event(const ScanEvent& e);
     void report_scan(Tracker::Event ev, const Entity& e);
-    void scan_row(const char* event, const ScanEvent& e);
+    void scan_row(const char* event, const ScanEvent& e, const char* drop_why = nullptr);
     void on_slice(const SpecAnSliceMessage& message);
     void on_rf(RfEngine::Event ev, const RfTrack& t);
     static void on_rf_event(void* ctx, RfEngine::Event ev, const RfTrack& t);
@@ -507,6 +522,11 @@ class SignatureDetectView : public View {
     void log_line(const char* line);
     void open_log();
     void close_log();
+    void stop_row(const char* why);
+    bool drop_stop_{false}; /* report_sig / report_scan write the log stop's summaries (why=stop) */
+    /* ";pos_src=gps|manual|map|saved_gps;pos_age_s=N" after the detail of a
+     * row that carries the own position (nothing without one). */
+    void put_pos_src(Fmt& f) const;
     void new_log_name();
     void log_failed(const char* what, const char* why);
     void log_tick();

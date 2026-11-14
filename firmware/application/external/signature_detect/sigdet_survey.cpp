@@ -223,7 +223,7 @@ size_t nrg_extract(const RfEngine& rf, NrgEvent* out, size_t max) {
         const size_t b = x - 1;
         NrgEvent ev{};
         ev.f_khz = rf.point_khz(peak);
-        ev.bw_khz = static_cast<uint16_t>((b - a + 1) * step > 65535 ? 65535 : (b - a + 1) * step);
+        ev.bw_khz = (b - a + 1) * step; /* a 5.8 GHz hump can be > 65 MHz wide (was clamped at 65535) */
         ev.maxh_cdb = static_cast<int16_t>(rf.maxh_at(peak) * 50);
         ev.mean_cdb = mean_max;
         ev.duty = static_cast<uint8_t>(occ_max * 100u / looks > 100 ? 100 : occ_max * 100u / looks);
@@ -345,13 +345,18 @@ const NrgSeen* NrgSurvey::due(uint32_t now_ms, uint32_t period_ms) {
     return nullptr;
 }
 
-const NrgSeen* NrgSurvey::pending() {
+const NrgSeen* NrgSurvey::pending(uint8_t band_min) {
     for (auto& s : slots_)
-        if (s.used && s.reported && s.dwells != s.dwells_emit) {
+        if (s.used && s.band >= band_min && s.reported && s.dwells != s.dwells_emit) {
             mark(s, s.last_ms);
             return &s;
         }
     return nullptr;
+}
+
+void NrgSurvey::forget_bands(uint8_t band_min) {
+    for (auto& s : slots_)
+        if (s.used && s.band >= band_min) s = NrgSeen{};
 }
 
 } /* namespace ui::external_app::signature_detect */

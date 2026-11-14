@@ -150,7 +150,7 @@ class BleSurvey {
 
 struct NrgSeen {
     uint32_t f_khz;
-    uint16_t bw_khz;
+    uint32_t bw_khz;
     uint8_t band;
     bool used;
     int8_t db_max;     /* max hold over floor, dB */
@@ -165,7 +165,7 @@ struct NrgSeen {
 /* One energy event of a dwell. */
 struct NrgEvent {
     uint32_t f_khz;
-    uint16_t bw_khz;
+    uint32_t bw_khz;
     int16_t maxh_cdb, mean_cdb;
     uint8_t duty, cls, conf;
 };
@@ -185,7 +185,11 @@ class NrgSurvey {
      * (seen in a second dwell for the first time: "new"), else nullptr. */
     NrgSeen* add(uint8_t band, const NrgEvent& ev, uint32_t now_ms);
     const NrgSeen* due(uint32_t now_ms, uint32_t period_ms);
-    const NrgSeen* pending();
+    /* An entry (of a band >= band_min) with dwells since its last row. */
+    const NrgSeen* pending(uint8_t band_min = 0);
+    /* Entries of bands >= band_min go (a class change: its custom bands);
+     * the first-seen memory stays. */
+    void forget_bands(uint8_t band_min);
     size_t used() const;
     const NrgSeen* slot(size_t i) const { return i < kSurveyNrgSlots && slots_[i].used ? &slots_[i] : nullptr; }
     static void mark(NrgSeen& e, uint32_t now_ms) {
