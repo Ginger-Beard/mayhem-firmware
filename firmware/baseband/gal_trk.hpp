@@ -159,6 +159,15 @@ class Channel {
     GAL_COLD void reacquired(double code_phase_chips, float doppler_hz) {
         set_code(code_phase_chips);
         restart(doppler_hz);
+        if (sym_epoch_) (*sym_epoch_)++; /* the symbol timing starts over */
+    }
+    /* where the E1-B soft symbols go (the tracker's TrkShared rings); a new
+     * start counts as a new symbol timing */
+    void attach_symbols(int8_t* ring, volatile uint32_t* write, uint16_t* epoch) {
+        sym_ = ring;
+        sym_write_ = write;
+        sym_epoch_ = epoch;
+        if (sym_epoch_) (*sym_epoch_)++;
     }
     /* free the channel (reported once by the tracker) */
     void release(uint8_t why) {
@@ -304,6 +313,17 @@ class Channel {
     float side_e_{0}, side_l_{0};
     bool side_flag_{false};
     uint16_t side_jumps_{0};
+    /* E1-B soft symbols out */
+    int8_t* sym_{nullptr};
+    volatile uint32_t* sym_write_{nullptr};
+    uint16_t* sym_epoch_{nullptr};
+    void put_symbol(int8_t v) {
+        if (!sym_) return;
+        const uint32_t w = *sym_write_;
+        sym_[w % static_cast<uint32_t>(gal_acq::kSymRing)] = v;
+        gps_trk::mem_barrier();
+        *sym_write_ = w + 1;
+    }
     /* release */
     bool released_{false}, rel_reported_{false};
     uint8_t release_{0};
@@ -583,6 +603,7 @@ GAL_COLD inline void Channel::skip(uint64_t samples) {
     m_ = static_cast<uint32_t>(mm % kHalf);
     for (uint64_t k = 0; k < crossed; k++) { /* epochs passed: the secondary code keeps counting */
         epochs_++;
+        put_symbol(0);
         cs_k_ = static_cast<uint8_t>(cs_k_ + 1 >= 25 ? 0 : cs_k_ + 1);
         if (state_ != gps_trk::TRK_SEARCH) {
             mode_ms_ += 4;
@@ -682,6 +703,7 @@ GAL_COLD inline void Channel::track_epoch(const float* v, bool valid, const floa
     if (!valid) {
         secondary(ic, false);
         have_prev_ = false;
+        put_symbol(0);
         return;
     }
     /* the secondary code (and the polarity found with it) wiped off */
@@ -690,6 +712,18 @@ GAL_COLD inline void Channel::track_epoch(const float* v, bool valid, const floa
         if (neg) ic = -ic, qc = -qc, id = -id, qd = -qd, ib = -ib, qb = -qb;
     }
     if (on_epoch) on_epoch(on_epoch_ctx, prn_, ic, qc, ib, qb, cs_sync_);
+    { /* the E1-B symbol: its prompt before the pilot's secondary code wipe (E1-B has
+       * none), scaled by the pilot's amplitude; its sign is the data up to one
+       * polarity for the whole lock (the decoder finds it on the page sync) */
+        int8_t sv = 0;
+        if (cs_sync_ && p2_avg_ > 0) {
+            float x = v[4] * 40.0f / std::sqrt(p2_avg_);
+            x = x > 127.0f ? 127.0f : (x < -127.0f ? -127.0f : x);
+            sv = static_cast<int8_t>(x);
+            if (!sv) sv = v[4] < 0 ? -1 : 1;
+        }
+        put_symbol(sv);
+    }
     constexpr float T = 4e-3f;
     constexpr float kTwoPi = 6.2831853f;
     const float pll_err = (cs_sync_ ? atan_4q(qc, ic) : gps_trk::atan_2q(qc, ic)) / kTwoPi; /* cycles */

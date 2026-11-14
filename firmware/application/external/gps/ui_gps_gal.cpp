@@ -59,6 +59,7 @@ void GpsView::gal_reset() {
     std::memset(mem_->gal_state, 0, sizeof(mem_->gal_state));
     std::memset(mem_->gal_cn0, 0, sizeof(mem_->gal_cn0));
     std::memset(static_cast<void*>(mem_->gal_prev), 0, sizeof(mem_->gal_prev));
+    if (gal_nav_) std::memset(gal_nav_, 0, sizeof(gal_inav::Work));
     gal_round_t_ = chTimeNow();
 }
 
@@ -145,6 +146,39 @@ void GpsView::gal_poll() {
         p.lock_ms = c.lock_ms;
     }
     if (changed) view_heard_.show();
+}
+
+static_assert(sizeof(gal_inav::Work) <= gal_acq::kNavWorkBytes, "gal_inav::Work outgrew the RAM the tracking image lends");
+static_assert(gal_inav::Work::kCh >= gal_acq::kMaxTrk, "one decoder per Galileo channel");
+
+uint16_t GpsView::gal_nav_pages(int prn) const {
+    if (!gal_nav_) return 0;
+    const gal_inav::Work& w = *static_cast<const gal_inav::Work*>(gal_nav_);
+    for (const auto& c : w.ch)
+        if (c.prn == prn) return c.pages_ok;
+    return 0;
+}
+
+/* frame handler (E1 box on, tracking image): the next channel's symbols, at
+ * most one page part decoded per frame (~150k M0 instructions) */
+void GpsView::gal_nav_step() {
+    if (!gal_on_ || !gal_nav_ || !gal_trk_sh_ || image_ != gps_image::ID_L1T || !tracking_) return;
+    gal_inav::Work& w = *static_cast<gal_inav::Work*>(gal_nav_);
+    for (int k = 0; k < gal_acq::kMaxTrk; k++) {
+        const int i = (gal_nav_rr_ + k) % gal_acq::kMaxTrk;
+        const uint8_t prn = mem_ ? mem_->gal_prev[i].prn : 0;
+        const uint8_t st = mem_ ? mem_->gal_prev[i].state : 0;
+        if (!prn || st == gps_trk::TRK_IDLE || st == gps_trk::TRK_FAILED) continue;
+        const uint32_t parts = w.ch[i].parts;
+        gal_inav::Page pg;
+        const bool page = gal_inav::step(w, i, prn, gal_trk_sh_->sym[i], gal_acq::kSymRing, gal_trk_sh_->sym_write[i], gal_trk_sh_->sym_epoch[i], &pg);
+        if (page) log_gal_page(pg);
+        if (page || w.ch[i].parts != parts) { /* one part decoded: the next channel next frame */
+            gal_nav_rr_ = static_cast<uint8_t>((i + 1) % gal_acq::kMaxTrk);
+            if (page && pg.crc_ok && w.ch[i].pages_ok == 1) view_heard_.show(); /* " N" on its row */
+            return;
+        }
+    }
 }
 
 /* the tracking image finished the search */

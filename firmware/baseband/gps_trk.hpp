@@ -1372,6 +1372,7 @@ class Tracker {
         }
         const double dt = (static_cast<double>(now) - static_cast<double>(at)) / kFs;
         const double cp = code_phase_chips + dt * kChip * (1.0 + doppler_hz / kL1);
+        if (gsh_) gal_[slot].attach_symbols(gsh_->sym[slot], &gsh_->sym_write[slot], &gsh_->sym_epoch[slot]);
         gal_[slot].start(prn, hc_b, hc_c, cp, static_cast<float>(doppler_hz), gp_);
         if (active_ == 0) next_ = now;
         if (gsh_) gsh_->handovers = static_cast<uint16_t>(gsh_->handovers + 1);

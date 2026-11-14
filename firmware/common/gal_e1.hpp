@@ -61,6 +61,12 @@ struct Result {
  * while the image runs). The M4 writes, the app copies under the seqlock
  * (odd while the M4 writes). */
 constexpr int kMaxTrk = 4; /* Galileo channels at most */
+/* E1-B soft symbols per channel (one per 4 ms epoch, 0 = none: not in
+ * secondary-code sync, or a gap), ~2 s: the app's I/NAV decoder reads them */
+constexpr int kSymRing = 512;
+/* RAM the tracking image lends the app's I/NAV decoder (its state and
+ * Viterbi work; the app checks its size against this) */
+constexpr uint32_t kNavWorkBytes = 3072;
 
 enum TrkFlags : uint8_t {
     TF_PLL = 1,       /* phase lock indicator good */
@@ -115,6 +121,12 @@ struct TrkShared {
     uint8_t last_ho_result;  /* TrkHandover */
     uint16_t pool_x10;       /* channel pool in use, GPS-channel equivalents x10 */
     uint16_t pool_budget_x10;
+    /* E1-B soft symbols: sym_write counts symbols written into sym[ch] (ring
+     * index = count % kSymRing); sym_epoch changes with each start or
+     * re-acquisition of that channel (the symbol timing starts over) */
+    volatile uint32_t sym_write[kMaxTrk];
+    uint16_t sym_epoch[kMaxTrk];
+    int8_t sym[kMaxTrk][kSymRing];
 };
 
 enum TrkHandover : uint8_t {

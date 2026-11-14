@@ -42,6 +42,7 @@ alignas(8) static uint8_t tracker_mem[sizeof(gps_trk::Tracker)];
 static gal_acq::Searcher gal_search;
 static gal_acq::Codes gal_codes;
 static gal_acq::TrkShared gal_shared;
+alignas(8) static uint8_t gal_nav_work[gal_acq::kNavWorkBytes]; /* lent to the app's I/NAV decoder: never touched here */
 static gps_trk::GalService gal_svc{gal_search};
 #else
 /* Big working memory, outside the processor object (bss). */
@@ -190,6 +191,7 @@ void GpsRxProcessor::send_status() {
     status_.gal_seq = gal_svc.seq();
     status_.gal_busy = gal_svc.busy() ? 1 : 0;
     status_.gal_track = &gal_shared;
+    status_.gal_nav = gal_nav_work;
 #else
     status_.level = session.level();
     status_.confirming = session.confirming();
