@@ -114,6 +114,7 @@ void GpsView::log_header() {
         "#CLK,event (tow / pvt: GPS time in use; set: RTC written by Set clock),gps_minus_rtc_ms,rtc_utc,gps_utc,zone_min",
         "#ERR,what,detail",
         "#LOG,event,errors (the log file reopened after the Log box was ticked again)",
+        "#IMG,image,result,bytes,load_ms,loads (a baseband image loaded from /APPS)",
     };
     for (const char* h : kHead) log_push(mem_->log, h, std::strlen(h));
 }
@@ -232,7 +233,18 @@ void GpsView::log_fail(const char* what) {
     view_fix_.show();
 }
 
+/* the last baseband image load (from the card), once logging runs */
+void GpsView::log_image() {
+    if (!log_active() || img_logged_ == img_loads_) return;
+    img_logged_ = img_loads_;
+    Fmt f = log_row("IMG");
+    f.c(',').s(gps_image::name(img_last_id_)).c(',').s(gps_image::check_text(img_last_check_)).c(',').u(img_last_size_);
+    f.c(',').u(img_last_ms_).c(',').u(img_loads_);
+    log_end(f);
+}
+
 void GpsView::log_second() {
+    log_image();
     const auto& st = status_;
     {
         Fmt f = log_row("SEC");

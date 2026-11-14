@@ -931,7 +931,10 @@ void HeardView::show() {
     {
         Fmt f{b, sizeof(b)};
         Color c = white;
-        if (!main_.mem_) {
+        if (main_.image_err_ != gps_image::OK) {
+            f.s(gps_image::name(main_.image_err_id_)).s(".BIN: ").s(gps_image::check_text(main_.image_err_));
+            c = red;
+        } else if (!main_.mem_) {
             f.s("Baseband starting...");
             c = yellow;
         } else if (main_.want_job_ != GpsView::JOB_NONE) {
@@ -1158,7 +1161,8 @@ FixView::FixView(GpsView& main, Rect r)
             return;
         }
         save_msg_ = nullptr;
-        if (main_.fix_blocker() != GpsView::BLOCK_NONE) { /* the reason is on screen */
+        if (main_.fix_blocker() == GpsView::BLOCK_IMAGE) main_.image_err_ = gps_image::OK; /* copied meanwhile? try again */
+        if (main_.fix_blocker() != GpsView::BLOCK_NONE) {                                  /* the reason is on screen */
             show();
             return;
         }
@@ -1217,6 +1221,15 @@ void FixView::show_blocker(size_t row) {
     char b[TextLines::kCols + 1];
     const Color white = Color::white(), yellow = Color::yellow(), grey = Color::light_grey();
     switch (main_.fix_blocker()) {
+        case GpsView::BLOCK_IMAGE: {
+            Fmt f{b, sizeof(b)};
+            f.s(gps_image::name(main_.image_err_id_)).s(".BIN: ").s(gps_image::check_text(main_.image_err_));
+            text_.set(row, b, Color::red());
+            text_.set(row + 1, "Copy the APPS folder of this", white);
+            text_.set(row + 2, "firmware's package to the SD", white);
+            text_.set(row + 3, "card (/APPS), then Get fix.", white);
+            return;
+        }
         case GpsView::BLOCK_STARTING:
             text_.set(row, "Starting...", yellow);
             return;
@@ -1810,7 +1823,9 @@ GpsView::GpsView(NavigationView& nav, uint32_t reselect)
           {"Fix", Theme::getInstance()->fg_cyan->foreground, &view_fix_},
           {"Heard", Theme::getInstance()->fg_green->foreground, &view_heard_},
           {"Passes", Theme::getInstance()->fg_yellow->foreground, &view_passes_}} {
-    baseband::run_image(portapack::spi_flash::image_tag_gps_rx);
+    /* the L1 acquisition image from the card (/APPS/GPS_L1A.BIN): without it
+     * the Fix and Heard tabs say what is missing, Passes still works */
+    if (load_image(gps_image::ID_L1A) != gps_image::OK) image_fallback_ram();
 
     add_children({&labels_, &field_lna_, &field_vga_, &field_amp_, &text_ant_,
                   &tab_view_, &view_fix_, &view_heard_, &view_passes_});
@@ -1827,7 +1842,7 @@ GpsView::GpsView(NavigationView& nav, uint32_t reselect)
     /* rx_gps.ini (RX settings) restores the saved modulation, frequency, rate and
      * filter: older files say WFM, which tunes the radio fs/4 = 512 kHz below L1
      * (ReceiverModel::tuning_offset) and puts every satellite out of the search.
-     * PGPR expects L1 at DC and exactly 2.048 Msps: enforce that here. */
+     * The GPS images expect L1 at DC and exactly 2.048 Msps: enforce that here. */
     receiver_model.settings().mode = ReceiverModel::Mode::SpectrumAnalysis;
     receiver_model.set_target_frequency(1575420000);
     receiver_model.set_sampling_rate(2048000);
@@ -1896,9 +1911,19 @@ double GpsView::now_unix() const {
 }
 
 double GpsView::results_age_s() const {
-    if (!sample_clock_.ok || !results_sample_) return 0.0;
-    const double a = -sample_clock_.ms_before_now(results_sample_, chTimeNow()) / 1000.0;
+    if (!results_ms_ok_) return 0.0;
+    const double a = static_cast<int32_t>(static_cast<uint32_t>(chTimeNow()) - results_ms_) / 1000.0;
     return a < 0 ? 0.0 : (a > 120.0 ? 120.0 : a);
+}
+
+/* No image could be loaded: the kept block is idle M4 RAM, so the app
+ * still has its tables (Passes works; Fix / Heard say what is missing). */
+void GpsView::image_fallback_ram() {
+    if (mem_) return;
+    mem_ = reinterpret_cast<GpsScratch*>(gps_keep::block()->scratch);
+    std::memset(static_cast<void*>(mem_), 0, sizeof(GpsScratch));
+    trk_sh_ = nullptr;
+    if (load_wanted_) start_load();
 }
 
 double GpsView::gps_now_at_sample(double gps_at_sample, uint64_t sample) const {
@@ -2003,6 +2028,7 @@ void GpsView::refresh_orbits() {
 }
 
 GpsView::Blocker GpsView::fix_blocker() const {
+    if (image_err_ != gps_image::OK) return BLOCK_IMAGE;
     if (!mem_) return BLOCK_STARTING;
     if (loading()) return BLOCK_LOADING;
     if (!pos_valid_) return BLOCK_NO_POS;
@@ -2087,6 +2113,24 @@ void GpsView::geo_step() {
 
 bool GpsView::start_search(Job job, uint8_t k_ms, bool force_full) {
     if (!mem_) return false;
+    if (image_ != gps_image::ID_L1A || !image_ready_) { /* searches run in the acquisition image: switch first */
+        if (image_err_ != gps_image::OK && image_err_id_ == gps_image::ID_L1A && image_ != gps_image::ID_L1A &&
+            chTimeNow() - image_fail_t_ < MS2ST(5000))
+            return false; /* just failed: the reason is on screen */
+        pending_search_ = true;
+        pending_job_ = job;
+        pending_kms_ = k_ms;
+        pending_full_ = force_full;
+        want_image(gps_image::ID_L1A);
+        job_ = job;
+        done_ = false;
+        tracking_ = false;
+        awaiting_seq_ = true;
+        results_ = nullptr;
+        results_ms_ok_ = false;
+        return true;
+    }
+    results_ms_ok_ = false;
     if (!rx_on_) { /* enabled since the app opened; kept as a guard */
         receiver_model.enable();
         rx_on_ = true;
@@ -2139,6 +2183,9 @@ bool GpsView::start_search(Job job, uint8_t k_ms, bool force_full) {
 
 void GpsView::stop_auto() {
     want_job_ = JOB_NONE;
+    pending_track_mask_ = 0;
+    pending_search_ = false;
+    if (image_want_ == gps_image::ID_L1T) image_want_ = gps_image::ID_NONE; /* the switch was not done yet */
     if (job_ != JOB_AUTO) return;
     GpsRxConfigMessage m;
     m.cmd = GpsRxConfigMessage::CMD_STOP; /* the search and the tracking loops */
@@ -2152,6 +2199,7 @@ void GpsView::stop_auto() {
 }
 
 void GpsView::stop_search() {
+    pending_search_ = false; /* a search waiting for the acquisition image */
     if (job_ == JOB_AUTO) {
         stop_auto();
         return;
@@ -2174,6 +2222,7 @@ int GpsView::progress_pct() const {
 }
 
 void GpsView::on_status(const GpsRxStatusMessage& m) {
+    if (m.image != image_) return; /* from an image that is gone (or not the one started) */
     status_.state = m.state;
     status_.level = m.level;
     status_.confirming = m.confirming;
@@ -2188,10 +2237,11 @@ void GpsView::on_status(const GpsRxStatusMessage& m) {
     status_.unit_cycles = m.unit_cycles;
     sample_clock_.at_status(m.sample_now, chTimeNow()); /* the image's samples on the app's clock */
     if (!mem_ && m.scratch && m.scratch_size >= sizeof(GpsScratch)) {
-        mem_ = reinterpret_cast<GpsScratch*>(m.scratch);
+        mem_ = reinterpret_cast<GpsScratch*>(m.scratch); /* kept across the images: cleared once */
         std::memset(static_cast<void*>(mem_), 0, sizeof(GpsScratch));
         if (load_wanted_) start_load();
     }
+    if (!image_ready_) on_image_ready(); /* the first status of this image: what waited for it */
     if (awaiting_seq_ && m.state == GpsRxStatusMessage::CAPTURING) {
         awaiting_seq_ = false;
         job_seq_ = m.seq;
@@ -2215,6 +2265,11 @@ void GpsView::on_status(const GpsRxStatusMessage& m) {
         done_ = true;
         results_ = static_cast<const gps_rx::Result*>(m.results);
         results_sample_ = m.results_sample; /* the snapshot the code phases refer to */
+        {                                   /* ... on the app's clock (outlives the image's sample clock) */
+            const uint32_t now = static_cast<uint32_t>(chTimeNow());
+            results_ms_ = now + static_cast<uint32_t>(static_cast<int32_t>(std::lround(sample_clock_.ms_before_now(m.results_sample, now))));
+            results_ms_ok_ = m.results_sample != 0;
+        }
         log_results(results_, m.k_ms);
         if (job_ == JOB_FIX || job_ == JOB_AUTO) solve_pending_ = pos_valid_ && (n_alm_ || n_eph_); /* Autonomous: the coarse fix first */
         if (mem_ && results_) {
@@ -2224,6 +2279,15 @@ void GpsView::on_status(const GpsRxStatusMessage& m) {
                     mem_->heard_at[p] = t;
                     mem_->heard_cn0[p] = static_cast<uint8_t>(results_[p].cn0 + 0.5f);
                 }
+        }
+        if (job_ == JOB_AUTO && results_) { /* the detections go to the tracking image */
+            uint32_t mask = 0;
+            for (int p = 0; p < 32; p++)
+                if (results_[p].detected && !results_[p].once) mask |= 1u << p;
+            if (mask) {
+                pending_track_mask_ = mask;
+                want_image(gps_image::ID_L1T);
+            }
         }
     }
     if (m.track) trk_sh_ = static_cast<const gps_trk::Shared*>(m.track);
@@ -2664,6 +2728,7 @@ void GpsView::auto_cache_step() {
 
 void GpsView::on_frame() {
     log_frame();  /* the diagnostics log: rows, card writes (sector-bounded), sync */
+    image_step(); /* a due image switch (acquisition <-> tracking) */
     clock_step(); /* "Set clock" pending: the RTC at the next second boundary */
     /* the selected tab's content is refreshed when it becomes visible */
     const uint32_t sel = tab_view_.selected();
@@ -2765,7 +2830,7 @@ uint8_t GpsView::sel_downlinks() const {
     return n;
 }
 
-/* The orbit tables live in M4 RAM that PGPR lends and are gone once the
+/* The orbit tables live in M4 RAM the GPS images lend and are gone once the
  * stock audio image runs, so Follow gets its own copy of the element set,
  * the observer and the downlinks, on the heap (not the stack: the M0 stack
  * has ~1.3 KB to spare and the replace below runs this view's destructor,
@@ -2784,7 +2849,7 @@ bool GpsView::follow() {
     for (uint8_t k = 0; k < n_freq_ && ctx->n_dl < FollowCtx::kMaxDl; k++)
         if (satfreq_matches(mem_->freq[k], t.catnr, t.name)) ctx->dl[ctx->n_dl++] = mem_->freq[k];
     /* Pop the satellite page, then replace this view: this view's destructor
-     * stops the solver, disables the receiver and shuts PGPR down before
+     * stops the solver, disables the receiver and shuts the baseband down before
      * FollowView starts its image. Nothing of this object is used after the
      * replace. */
     NavigationView& nav = nav_;

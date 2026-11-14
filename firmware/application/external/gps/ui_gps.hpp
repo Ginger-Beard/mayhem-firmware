@@ -33,7 +33,7 @@
  *   Follow  (from the satellite page) a TLE satellite's downlink, Doppler
  *           corrected, with a signal meter, tone and the pointing readout
  * Files: /GPS/ALMANAC.TXT (YUMA), /GPS/EPHEM.RNX (RINEX 2/3 navigation),
- * /GPS/TLE.TXT, /GPS/SATFREQ.TXT (downlinks) (sdcard/GPS/README.TXT). The baseband (PGPR) does the signal
+ * /GPS/TLE.TXT, /GPS/SATFREQ.TXT (downlinks) (sdcard/GPS/README.TXT). The baseband images on the card (gps_image.hpp) do the signal
  * processing and lends the app M4 RAM for the orbit tables and the solver, so
  * they do not take the M0 heap. */
 
@@ -64,6 +64,8 @@
 #include "gps_log.hpp"
 #include "gps_fmt.hpp"
 #include "gps_clock.hpp"
+#include "gps_image.hpp"
+#include "gps_keep.hpp"
 #endif
 
 namespace ui::external_app::gps {
@@ -186,7 +188,7 @@ struct SatGeo {
     float rr{0}; /* range rate, m/s (Doppler = -rr / lambda) */
 };
 
-/* What lives in the M4 RAM PGPR lends (GpsRxStatusMessage::scratch). */
+/* What lives in the M4 RAM the GPS images lend (GpsRxStatusMessage::scratch; kept across them, gps_keep.hpp). */
 struct GpsScratch {
     static constexpr size_t kMaxTle = PassList::kMax; /* 12 */
     static constexpr size_t kMaxFreq = 24;
@@ -435,7 +437,7 @@ struct FollowCtx {
  * baseband's DDC shift on NFM / AM, a retune on WFM), a signal meter with
  * peak hold, min/max and a 40 s history, Voice or Tone (the stock NFM image's
  * pitch-by-level tone, pulsed faster as the level rises), a level squelch,
- * and the pointing readout. It replaces the GPS app (so PGPR stops); "GPS"
+ * and the pointing readout. It replaces the GPS app (so its baseband stops); "GPS"
  * goes back to it, the title bar's back arrow to the menu. Message IDs
  * registered: DisplayFrameSync, ChannelStatistics; none of its stock widgets
  * (gain fields, volume, options, buttons) registers any. */
@@ -600,7 +602,7 @@ class GpsView : public View {
         2048000 /* 2048 samples = 1 ms = one DMA buffer */,
         /* SpectrumAnalysis: the only mode ReceiverModel tunes exactly; every other
          * mode tunes fs/4 (512 kHz) off and expects the baseband to shift it back,
-         * which PGPR does not (GpsView's constructor enforces this mode again after
+         * which the GPS images do not (GpsView's constructor enforces this mode again after
          * the settings file is read) */
         ReceiverModel::Mode::SpectrumAnalysis};
     /* Time zone of the PortaPack clock: local standard time minus UTC, in
@@ -749,7 +751,7 @@ class GpsView : public View {
 
     /* "Autonomous": tracking loops (M4) -> subframes, ephemerides, PVT (M0) */
     const gps_trk::Shared* trk_sh_{nullptr};
-    bool tracking_{false}; /* PGPR reports TRACKING */
+    bool tracking_{false}; /* the tracking image reports TRACKING */
     systime_t auto_t0_{0}; /* Get fix pressed */
     uint32_t ttff_s_{0};   /* first precise fix, s after Get fix (0 none yet) */
     uint32_t ttff_coarse_s_{0};
@@ -824,12 +826,44 @@ class GpsView : public View {
     void start_load();
     /* Why a fix cannot be tried now (FixView explains it), or OK. */
     enum Blocker : uint8_t { BLOCK_NONE,
+                             BLOCK_IMAGE, /* a baseband image on the card is missing or does not match */
                              BLOCK_STARTING,
                              BLOCK_LOADING,
                              BLOCK_NO_POS,
                              BLOCK_NO_ORBITS,
                              BLOCK_ALM_OLD };
     Blocker fix_blocker() const;
+    /* The baseband images on the SD card (gps_image.hpp, ui_gps_image.cpp):
+     * L1 acquisition for searches, L1 tracking for Autonomous. A switch
+     * happens in the frame handler; the RAM lent to the app, the search
+     * results and the tracking output are in the M4 RAM kept across the
+     * images (gps_keep.hpp), so the solver and the views carry on. */
+    gps_image::Id image_{gps_image::ID_NONE};      /* running (or starting) */
+    gps_image::Id image_want_{gps_image::ID_NONE}; /* a switch is due */
+    bool image_ready_{false};                      /* the running image has reported */
+    gps_image::Check image_err_{gps_image::OK};    /* the last load's result (shown while not OK) */
+    gps_image::Id image_err_id_{gps_image::ID_NONE};
+    systime_t image_fail_t_{0};
+    /* what to do once the wanted image reports */
+    bool pending_search_{false};
+    Job pending_job_{JOB_NONE};
+    uint8_t pending_kms_{20};
+    bool pending_full_{false};
+    uint32_t pending_track_mask_{0}; /* Autonomous: PRNs for the tracking image */
+    uint32_t results_ms_{0};         /* the app's ms clock at the result snapshot's first sample */
+    bool results_ms_ok_{false};
+    /* the last loads, for the log (IMG rows) */
+    uint16_t img_loads_{0}, img_logged_{0};
+    uint32_t img_last_size_{0}, img_last_ms_{0};
+    gps_image::Check img_last_check_{gps_image::OK};
+    gps_image::Id img_last_id_{gps_image::ID_NONE};
+    gps_image::Check load_image(gps_image::Id id); /* shut the running image down, load and start one */
+    void want_image(gps_image::Id id);             /* ask for a switch (frame handler) */
+    void image_step();                             /* frame handler: a due switch */
+    void on_image_ready();                         /* the wanted image reported: what was waiting */
+    void send_track();                             /* Autonomous: CMD_TRACK to the tracking image */
+    void log_image();
+    void image_fallback_ram(); /* no image: use the kept block as plain RAM */
     /* Start now if the sky cache is ready, else as soon as it is. */
     void request_search(Job job, uint8_t k_ms);
     /* Start a snapshot search: assisted (visible PRNs, predicted Doppler)

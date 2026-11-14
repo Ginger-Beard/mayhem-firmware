@@ -23,7 +23,7 @@
 #define __GPS_AUTO_H__
 
 /* "Autonomous" method, the M0 side (no UI, host tested): takes the parity-
- * checked subframes and the once-a-second measurement sets the PGPR tracking
+ * checked subframes and the once-a-second measurement sets the tracking
  * loops publish (gps_trk_shared.hpp), and
  *  - assembles subframes 1-3 per satellite into ephemerides (same issue in
  *    all three; replaces an almanac orbit or an older ephemeris in the table),

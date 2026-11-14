@@ -22,21 +22,31 @@
 #ifndef __PROC_GPS_RX_H__
 #define __PROC_GPS_RX_H__
 
-/* PGPR: GPS L1 C/A receiver (HackRF Pro). Receive only.
- * On GpsRxConfig CMD_SEARCH: capture K ms at 2.048 Msps into a 2-bit
- * snapshot, then search the requested PRNs (gps_acq.hpp), one work unit per
- * DMA buffer, and refine the detected ones; progress and noise statistics go
- * to the app in GpsRxStatus messages, the results stay in M4 RAM.
- * With `track` set (or on CMD_TRACK) the confirmed PRNs are handed to the
- * real-time tracking loops (gps_trk.hpp, up to max_ch channels), which run
- * on every DMA buffer and publish channels, parity-checked subframes and
- * once-a-second transmit-time measurements in M4 RAM (gps_trk::Shared). */
+/* The GPS app's L1 baseband images (HackRF Pro), loaded by the app from the
+ * SD card (common/gps_image.hpp). Receive only. One source, two images:
+ *
+ * GPS_L1A (PGRA, acquisition): on GpsRxConfig CMD_SEARCH capture K ms at
+ * 2.048 Msps into a 2-bit snapshot, search the requested PRNs (gps_acq.hpp),
+ * one work unit per DMA buffer, refine the detected ones; progress and noise
+ * statistics go to the app in GpsRxStatus messages, the results to the M4
+ * RAM block kept across the images (gps_keep.hpp) when the search is done.
+ *
+ * GPS_L1T (PGRT, tracking): on CMD_TRACK the detected PRNs of those results
+ * go to the real-time tracking loops (gps_trk.hpp, up to max_ch channels),
+ * which run on every DMA buffer and publish channels, parity-checked
+ * subframes and once-a-second transmit-time measurements in the kept block
+ * (gps_trk::Shared); CMD_ADD starts an aided search for a newly risen
+ * satellite; lost channels search locally. */
 
 #include "baseband_processor.hpp"
 #include "baseband_thread.hpp"
 #include "message.hpp"
 #include "gps_acq.hpp"
+#include "gps_keep.hpp"
+#include "gps_image.hpp"
+#if defined(BASEBAND_gps_l1t)
 #include "gps_trk.hpp"
+#endif
 
 #include <cstdint>
 
@@ -51,6 +61,11 @@ class GpsRxProcessor : public BasebandProcessor {
 
    private:
     static constexpr uint32_t kStatusCycles = 20000000; /* 100 ms at 200 MHz */
+#if defined(BASEBAND_gps_l1t)
+    static constexpr uint8_t kImage = gps_image::ID_L1T;
+#else
+    static constexpr uint8_t kImage = gps_image::ID_L1A;
+#endif
 
     /* Written by the event thread, applied by the baseband thread. */
     volatile bool pending_{false};
@@ -62,36 +77,45 @@ class GpsRxProcessor : public BasebandProcessor {
         uint8_t confirm{1};
         uint8_t track{0};
         uint8_t max_ch{8};
+        uint32_t age_ms{0};
         uint8_t add_prn{0}, add_windows{0};
         float add_code{0}, add_doppler{0};
         uint64_t add_at{0};
     } req_{};
 
-    static constexpr uint32_t kVerifyTimeoutMs = 10000; /* unconfirmed hand-over: verify within 10 s or release */
-    static constexpr uint8_t kSettleBuffers = 20; /* 20 ms skipped before a capture: LO / gain settling after enable */
     uint8_t state_{GpsRxStatusMessage::IDLE};
-    uint8_t settle_{0};
     uint32_t seq_{0};
-    uint32_t units_{0};
-    uint64_t unit_cycles_sum_{0};
     uint32_t last_status_{0};
-    /* Time for the A -> B interval in samples of the sample clock (DMA buffers
-     * handled + missed): the code phases are measured in that clock too, so a
-     * TCXO error cancels in the confirmation rule. */
+    /* Time in samples of the sample clock (DMA buffers handled + missed): the
+     * code phases are measured in that clock too, so a TCXO error cancels. */
     uint64_t samples_{0};
     uint16_t missed_seen_{0};
     GpsRxStatusMessage status_{};
-    /* tracking: the loops live in the snapshot's RAM while they run */
+    uint64_t results_sample_{0}; /* first sample of the result snapshot (this image's clock) */
+
+#if defined(BASEBAND_gps_l1t)
+    static constexpr uint32_t kVerifyTimeoutMs = 10000; /* unconfirmed hand-over: verify within 10 s or release */
+    /* The tracking image's sample count starts here, so that the result
+     * snapshot, taken before this image started, still has a positive index
+     * (its age arrives with CMD_TRACK). */
+    static constexpr uint64_t kSampleBase = static_cast<uint64_t>(gps_acq::kFs) * 600u;
     gps_trk::Tracker* trk_{nullptr};
     uint8_t max_ch_{8};
+    uint32_t trk_cycles_sum_{0}, trk_cycles_max_{0}, trk_buffers_{0};
+    void start_tracking(uint32_t prn_mask, uint32_t age_ms);
+    void stop_tracking();
+#else
+    static constexpr uint8_t kSettleBuffers = 20; /* 20 ms skipped before a capture: LO / gain settling after enable */
+    uint8_t settle_{0};
+    uint32_t units_{0};
+    uint64_t unit_cycles_sum_{0};
     uint16_t last_rms_x10_{0}, last_clip_{0};
     uint8_t last_k_{0};
-    uint32_t trk_cycles_sum_{0}, trk_cycles_max_{0}, trk_buffers_{0};
+    bool results_kept_{false}; /* this search's results copied to the kept block */
+#endif
 
     void apply();
     void send_status();
-    void start_tracking(uint32_t prn_mask);
-    void stop_tracking();
 
     /* NB: Threads should be the last members in the class definition. */
     BasebandThread baseband_thread{gps_acq::kFs, this, baseband::Direction::Receive};

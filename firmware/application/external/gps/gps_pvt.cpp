@@ -102,7 +102,7 @@ __attribute__((noinline)) void elevations(PvtWork& w, int n, const Vec3& x, doub
 double tropo_delay_m(double el_deg, double lat_deg, double h_m) {
     const double h = h_m < 0 ? 0 : (h_m > 9000 ? 9000 : h_m);
     const double p = 1013.25 * std::pow(1.0 - 2.2557e-5 * h, 5.2568); /* hPa */
-    const double t = 288.15 - 6.5e-3 * h;                           /* K */
+    const double t = 288.15 - 6.5e-3 * h;                             /* K */
     const double e = 6.108 * 0.5 * std::exp((17.15 * t - 4684.0) / (t - 38.45));
     const double zhd = 0.0022768 * p / (1.0 - 0.00266 * std::cos(2.0 * lat_deg * kPi / 180.0) - 0.00028e-3 * h);
     const double zwd = 0.002277 * (1255.0 / t + 0.05) * e;
@@ -148,7 +148,7 @@ __attribute__((noinline)) bool ls(PvtWork& w, int n, Vec3& x, double& b, double 
     bool have_el = norm(x) > 6.0e6;
     if (have_el && tropo) elevations(w, n, x, t_rx, b);
     for (int it = 0; it < 12; it++) {
-        double (*a)[8] = w.a;
+        double(*a)[8] = w.a;
         for (int p = 0; p < 4; p++)
             for (int q = 0; q < 5; q++) a[p][q] = 0;
         int m = 0;
@@ -294,7 +294,7 @@ bool pvt_solve(PvtWork& w, int n, const Vec3& prior, double dt_rx_guess, PvtSolu
     out.used = static_cast<uint8_t>(used);
     out.dropped = dropped;
     out.checked = used >= 5 ? 1 : 0;
-    {   /* corrections applied (mean over the satellites used), for the log */
+    { /* corrections applied (mean over the satellites used), for the log */
         double st = 0, si = 0;
         int k = 0;
         for (int i = 0; i < n; i++) {
@@ -309,8 +309,8 @@ bool pvt_solve(PvtWork& w, int n, const Vec3& prior, double dt_rx_guess, PvtSolu
     }
     /* DOP in east / north / up */
     {
-        double (*hth)[8] = w.a;
-        double (*q)[4] = w.q;
+        double(*hth)[8] = w.a;
+        double(*q)[4] = w.q;
         for (int p = 0; p < 4; p++)
             for (int k = 0; k < 4; k++) hth[p][k] = 0;
         const Observer ob = make_observer(x);
@@ -338,7 +338,7 @@ bool pvt_solve(PvtWork& w, int n, const Vec3& prior, double dt_rx_guess, PvtSolu
     /* velocity and clock drift from the Dopplers: -lambda f = (vs - v).u + drift - c * clock rate of the satellite */
     {
         const double lambda = kC / kL1Hz;
-        double (*a)[8] = w.a;
+        double(*a)[8] = w.a;
         for (int p = 0; p < 4; p++)
             for (int k = 0; k < 5; k++) a[p][k] = 0;
         int m = 0;

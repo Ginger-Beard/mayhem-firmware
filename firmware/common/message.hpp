@@ -2589,8 +2589,8 @@ struct WMBusPacketMessage : public Message {
     uint8_t data[500] = {0};
 };
 
-/* GPS receiver (PGPR baseband, HackRF Pro). M0 -> M4: start a snapshot
- * capture and a search, or stop. */
+/* GPS receiver (the GPS app's baseband images on the SD card, HackRF Pro).
+ * M0 -> M4: start a snapshot capture and a search, start or stop tracking. */
 struct GpsRxConfigMessage : public Message {
     constexpr GpsRxConfigMessage()
         : Message{ID::GpsRxConfig} {}
@@ -2607,6 +2607,10 @@ struct GpsRxConfigMessage : public Message {
     uint8_t confirm{1};    /* report a PRN only if a second snapshot confirms it */
     uint8_t track{0};      /* CMD_SEARCH: hand the confirmed PRNs to the tracking loops when done ("Autonomous") */
     uint8_t max_ch{8};     /* tracking channels at most (M4 time) */
+    /* CMD_TRACK (tracking image): age of the search results, ms on the app's
+     * clock (the acquisition image took the result snapshot before the image
+     * switch; the code phases are propagated over this time) */
+    uint32_t age_ms{0};
     /* CMD_ADD: PRN, predicted code phase (chips) of the signal arriving at
      * sample add_at (the image's sample count, as in the measurement sets),
      * predicted Doppler incl. the receiver clock (Hz), windows of 15 half chips
@@ -2619,7 +2623,7 @@ struct GpsRxConfigMessage : public Message {
 };
 
 /* M4 -> M0: progress, noise statistics, and where the results and the lent
- * RAM are (valid while the PGPR image runs). */
+ * RAM are (in the M4 RAM block kept across the GPS images, gps_keep.hpp). */
 struct GpsRxStatusMessage : public Message {
     constexpr GpsRxStatusMessage()
         : Message{ID::GpsRxStatus} {}
@@ -2632,8 +2636,8 @@ struct GpsRxStatusMessage : public Message {
     enum Level : uint8_t { LEVEL_OK = 0,
                            LEVEL_LOW, /* snapshot AC rms below the floor: no search done */
                            LEVEL_HIGH /* clipping: results still reported */ };
-    /* The M4 RAM PGPR lends the app: orbit tables and solver work space
-     * (never touched by the M4). */
+    /* The M4 RAM the GPS images lend the app: orbit tables and solver work
+     * space (never touched by the M4). */
     static constexpr uint16_t kScratchSize = 23552; /* Autonomous (AutoState, PVT work, cache record) + the diagnostics log ring */
     uint8_t state{IDLE};
     uint8_t level{LEVEL_OK};
@@ -2649,13 +2653,14 @@ struct GpsRxStatusMessage : public Message {
     const void* results{nullptr}; /* gps_rx::Result[32], by PRN - 1 */
     uint8_t* scratch{nullptr};
     uint16_t scratch_size{0};
-    const void* track{nullptr}; /* gps_trk::Shared (channels, subframes, measurements), valid while the image runs */
+    const void* track{nullptr}; /* gps_trk::Shared (channels, subframes, measurements), written by the tracking image */
     int32_t dt_ms{0};           /* the confirmation interval: snapshot B - snapshot A, ms (diagnostics) */
-    /* the image's sample clock (2.048 Msps since it started): the next sample
+    /* the image's sample clock (2.048 Msps, restarts with each image): the next sample
      * when this status was sent, and the first sample of the snapshot the
      * results refer to (their age; the app maps samples to its own clock) */
     uint64_t sample_now{0};
     uint64_t results_sample{0};
+    uint8_t image{0}; /* the GPS image sending this (gps_image::Id: 1 L1 acquisition, 2 L1 tracking) */
 };
 
 #endif /*__MESSAGE_H__*/

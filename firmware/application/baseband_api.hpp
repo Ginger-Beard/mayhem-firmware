@@ -139,7 +139,7 @@ void set_signature_detect_target(uint8_t channel, uint8_t flags, uint64_t addr);
 /* FSK frame mode (MODE_FSK): the caller has tuned target = the rules' frequency; the M4 copies *dwell
  * while it handles the message. tag is the app's (the dwell). */
 void set_signature_detect_fsk(uint32_t sampling_rate, uint8_t tag, uint8_t flags, const sigdet::FskDwell* dwell);
-/* GPS receiver (PGPR): start a snapshot search or stop. */
+/* GPS receiver (the GPS app's baseband images): search, track, stop. */
 void gps_rx_config(const GpsRxConfigMessage& message);
 
 void request_roger_beep();
@@ -151,6 +151,9 @@ bool is_image_running();
 bool supports_rx_fs4();
 void set_rx_fs4_direction(RxFs4Direction direction);
 void run_image(const portapack::spi_flash::image_tag_t image_tag, bool enforce_core_sync = true);
+/* Start an image the caller already placed in m4_code (the GPS app loads its
+ * baseband images from the SD card). */
+void run_prepared_image(const uint32_t m4_code, bool enforce_core_sync = true, const portapack::spi_flash::image_tag_t prepared_image_tag = portapack::spi_flash::image_tag_none);
 void shutdown();
 
 void spectrum_streaming_start();
