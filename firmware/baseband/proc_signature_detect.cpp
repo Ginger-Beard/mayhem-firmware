@@ -91,15 +91,9 @@ static void clear_rx_stats() {
     }
 }
 
-/* FCS valid frames for the event thread (two slots, wifi_head_/wifi_tail_). */
-struct WifiSlot {
-    sigdet::DsssFrame frame;
-    uint32_t t_ms;
-    uint8_t channel;
-    int8_t slice;
-    bool legacy;
-};
-static WifiSlot wifi_slot[2];
+/* FCS valid frames for the event thread (two slots); outside Wi-Fi dwells
+ * also the hum dwell's ladder (sigdet_wifi_slots.hpp: who owns them when). */
+static sigdet::WifiSlots wifi_handoff;
 #else
 /* HackRF One: the app is a "Requires HackRF Pro" stub and never starts PSDT,
  * whose image must still fit the H1's 32 KB M4 code region: no pattern mode,
@@ -392,6 +386,8 @@ void SignatureDetectProcessor::send_stats(uint32_t elapsed) {
     stats_message.fsk_bad = static_cast<uint16_t>(zs.bad_len + zs.bad_sum);
     stats_message.fsk_qf = fsk_qf_;
     stats_message.fsk_nochk = zs.nocheck;
+    stats_message.hum_deferred = hum_deferred_;
+    stats_message.hum_windows = hum_windows_;
 #endif
     const auto& ws = dsss_stats();
     stats_message.wifi_triggers = ws.triggers;
@@ -464,6 +460,28 @@ void SignatureDetectProcessor::apply_config() {
      * thread, a few ms) is neither reset nor taken down: the change waits
      * (config_pending_ stays set, no buffer is fed meanwhile). */
     if (did_mode && did_busy_) return;
+    /* Any new configuration ends a hum dwell first: the ladder goes and the
+     * Wi-Fi slots are left zeroed and empty (head == tail), before any mode
+     * that could fill them (MODE_DSSS) is configured below. */
+    if (wifi_handoff.lent()) hum_.end(wifi_handoff, meter_);
+    /* A hum dwell borrows the Wi-Fi slots: not while a frame is still in one
+     * or being drained by the event thread. Meanwhile nothing runs (so
+     * nothing new is put in a slot: no DSSS) and the request stays pending;
+     * the event thread drains within a few ms. A newer request replaces it. */
+    if (hum_request()) {
+        if (!wifi_handoff.idle()) {
+            if (!hum_waiting_) {
+                hum_waiting_ = true;
+                hum_wait_ = 0;
+                hum_deferred_++;
+            }
+            if (hum_wait_ < 0xFFFF) hum_wait_++;
+            mode_ = SignatureDetectConfigMessage::MODE_IDLE;
+            return;
+        }
+    } else {
+        hum_waiting_ = false;
+    }
 #endif
     config_pending_ = false;
     const uint8_t channel = req_channel_;
@@ -559,9 +577,19 @@ void SignatureDetectProcessor::apply_config() {
         return;
     }
     /* Track meter: a fresh boxcar and pulse detector (a retune or a
-     * bandwidth change). */
+     * bandwidth change). Hum dwell: the ladder in the Wi-Fi slots, which
+     * are empty (checked above, and nothing has filled them since). */
     if (mode == SignatureDetectConfigMessage::MODE_METER) {
         meter_.configure(channel);
+        if (flags & SignatureDetectConfigMessage::FLAG_HUM) {
+            if (!hum_waiting_) hum_wait_ = 0;
+            hum_waiting_ = false;
+            if (!hum_.begin(wifi_handoff, meter_)) {
+                /* Not reached (idle() was true on this thread just now):
+                 * the meter alone, no hum messages. */
+                hum_deferred_++;
+            }
+        }
         settle_left_ = hop_settle_buffers;
         since_hop_ = 0;
         mode_ = mode;
@@ -613,10 +641,20 @@ void SignatureDetectProcessor::fsk_callback(void* ctx, const sigdet::FskFrame& f
     if (!self->push(m)) self->fsk_qf_++;
 }
 
+/* The pending request is a hum dwell. */
+bool SignatureDetectProcessor::hum_request() const {
+    return req_mode_ == SignatureDetectConfigMessage::MODE_METER && (req_flags_ & SignatureDetectConfigMessage::FLAG_HUM);
+}
+
 /* Track meter (MODE_METER): every buffer through the boxcar; a report about
- * every 50 ms. */
+ * every 50 ms. Hum dwell: the ladder's windows instead (about 1 s each). */
 void SignatureDetectProcessor::execute_meter(const buffer_c8_t& buffer) {
     meter_.feed(reinterpret_cast<const int8_t*>(buffer.p), buffer.count);
+    if (wifi_handoff.lent()) {
+        sigdet::HumLevels lv;
+        if (hum_.poll(wifi_handoff, meter_, lv)) send_hum(lv);
+        return;
+    }
     sigdet::MeterReport r;
     if (!meter_.take(r)) return;
     meter_message.t_ms = t_ms_;
@@ -630,6 +668,20 @@ void SignatureDetectProcessor::execute_meter(const buffer_c8_t& buffer) {
     meter_message.width_us = r.width_us;
     meter_message.log2d = meter_.log2d();
     push(meter_message);
+}
+
+/* One ladder window to the M0 (by value, from the stack). */
+void SignatureDetectProcessor::send_hum(const sigdet::HumLevels& levels) {
+    SignatureDetectHumMessage m{};
+    m.t_ms = t_ms_;
+    m.levels = levels;
+    m.clip = hum_.clip();
+    m.level_cdb = sigdet::PowerMeter::to_cdb(hum_.mean());
+    m.wait_buffers = hum_wait_;
+    m.window = hum_.window();
+    m.log2d = meter_.log2d();
+    hum_windows_++;
+    push(m);
 }
 #endif
 
@@ -853,28 +905,14 @@ void SignatureDetectProcessor::wifi_callback(void* context, const sigdet::DsssFr
 }
 
 /* Baseband thread: an FCS valid beacon / probe response / action frame
- * into a free slot (by words: GCC would call newlib-nano's byte memcpy),
- * then wake the event thread. Both slots busy: dropped, counted. */
-__attribute__((optimize("no-tree-loop-distribute-patterns"))) void SignatureDetectProcessor::on_wifi_frame(const sigdet::DsssFrame& frame) {
+ * into a free slot, then wake the event thread. Both slots busy: dropped,
+ * counted. */
+void SignatureDetectProcessor::on_wifi_frame(const sigdet::DsssFrame& frame) {
 #ifdef PRALINE
-    const uint8_t head = wifi_head_;
-    if (static_cast<uint8_t>(head - wifi_tail_) >= wifi_slots) {
+    if (!wifi_handoff.put(frame, t_ms_, wifi_channel_, wifi_slice_, wifi_legacy_)) {
         wifi_busy_++;
         return;
     }
-    WifiSlot& s = wifi_slot[head % wifi_slots];
-    const size_t words = (frame.length + 3u) / 4u;
-    const uint32_t* src = reinterpret_cast<const uint32_t*>(frame.mpdu);
-    uint32_t* dst = reinterpret_cast<uint32_t*>(s.frame.mpdu);
-    for (size_t i = 0; i < words; i++) dst[i] = src[i];
-    s.frame.length = frame.length;
-    s.frame.rssi_cdb = frame.rssi_cdb;
-    s.t_ms = t_ms_;
-    s.channel = wifi_channel_;
-    s.slice = wifi_slice_;
-    s.legacy = wifi_legacy_;
-    __asm__ volatile("" ::: "memory"); /* the slot before the index (one core: a compiler barrier) */
-    wifi_head_ = head + 1;
     EventDispatcher::events_flag(EVT_MASK_SPECTRUM);
 #else
     (void)frame;
@@ -884,7 +922,7 @@ __attribute__((optimize("no-tree-loop-distribute-patterns"))) void SignatureDete
 /* Event thread: every waiting slot is classified, counted, forwarded if it
  * carries Remote ID, then wiped (no copy of an ordinary frame outlives
  * this). */
-__attribute__((optimize("no-tree-loop-distribute-patterns"))) void SignatureDetectProcessor::drain_wifi() {
+void SignatureDetectProcessor::drain_wifi() {
     if (wifi_reset_) {
         wifi_reset_ = false;
         wifi_beacon_ = wifi_probe_ = wifi_action_ = wifi_rid_ = wifi_fwd_ = 0;
@@ -892,8 +930,7 @@ __attribute__((optimize("no-tree-loop-distribute-patterns"))) void SignatureDete
         wifi_dedup_.reset();
     }
 #ifdef PRALINE
-    while (wifi_tail_ != wifi_head_) {
-        WifiSlot& s = wifi_slot[wifi_tail_ % wifi_slots];
+    wifi_handoff.drain([this](const sigdet::WifiSlot& s) {
         const uint8_t fc = s.frame.mpdu[0];
         if (fc == sigdet::kWifiFcBeacon)
             wifi_beacon_++;
@@ -924,11 +961,7 @@ __attribute__((optimize("no-tree-loop-distribute-patterns"))) void SignatureDete
                 wifi_qf_++;
             }
         }
-        uint32_t* w = reinterpret_cast<uint32_t*>(s.frame.mpdu);
-        for (size_t i = 0; i < (s.frame.length + 3u) / 4u; i++) w[i] = 0;
-        __asm__ volatile("" ::: "memory");
-        wifi_tail_ = wifi_tail_ + 1;
-    }
+    });
 #endif
 }
 

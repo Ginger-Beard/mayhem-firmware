@@ -1,10 +1,12 @@
 # Signature Detect signature class: general interference scan (SCAN lines).
 # Sweeps 30-6000 MHz in 26 MHz windows (320 points 81.5 kHz apart) and HF,
 # 1.5-30 MHz, at 5 kHz points: about 6 s a pass. Reports combs (regular
-# lines), always-on emissions whose centre moves (drift) and broadband rises
-# of the noise floor. Steady carriers, digital blocks (TV, LTE, Wi-Fi),
-# intermittent traffic and combs on a round spacing reach the survey log
-# only (tick Survey): by energy alone a steady interferer and a licensed
-# transmitter look the same. What it cannot see: /SIGDET/README.TXT, SCAN.
+# lines), always-on emissions whose centre moves (drift), broadband rises
+# of the noise floor, and steady emissions modulated by the mains (Hum50 /
+# Hum60: a ~2 s hum check now and then). Other steady carriers, digital
+# blocks (TV, LTE, Wi-Fi), intermittent traffic and combs on a round
+# spacing reach the survey log only (tick Survey): by energy alone a steady
+# interferer and a licensed transmitter look the same. What it cannot see:
+# /SIGDET/README.TXT, SCAN.
 SCAN,lo=30,hi=6000,res=81.5,looks=4
 SCAN,lo=1.5,hi=30,res=5,looks=4,fft=2048

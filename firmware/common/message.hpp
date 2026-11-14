@@ -46,6 +46,7 @@
 #include "spec_an_shared.hpp"
 #include "sigdet_wifi_rid.hpp"
 #include "sigdet_fsk.hpp"
+#include "sigdet_hum.hpp"
 
 #include "utility.hpp"
 
@@ -194,6 +195,7 @@ class Message {
         SignatureDetectFsk = 133,
         GpsRxConfig = 134,
         GpsRxStatus = 135,
+        SignatureDetectHum = 136,
         MAX
     };
 
@@ -2192,6 +2194,7 @@ struct SignatureDetectConfigMessage : public Message {
     static constexpr uint8_t FLAG_WIFI_LEGACY = 0x08;  // MODE_DSSS bench aid: also forward French / legacy DJI drone IEs (raw)
     static constexpr uint8_t FLAG_TARGET = 0x80;       // MODE_GFSK_BLE: forward every advert of AdvA = sync_hi:sync_lo (low 48 bits, MSB first) and nothing else (track view)
     static constexpr uint8_t FLAG_FWD_ADV = 0x40;      // MODE_GFSK_BLE: also forward other CRC valid adverts with AdvData (SOURCE_BLE_OTHER; deduplicated per address and payload for 1 s, rate capped)
+    static constexpr uint8_t FLAG_HUM = 0x10;          // MODE_METER (HackRF Pro): the mains hum check on the block powers (sigdet_hum.hpp; its ladder in the idle Wi-Fi slots), SignatureDetectHumMessage per ~1 s window, no meter reports
     static constexpr uint8_t SEARCH_SHIFT = 4;         // MODE_DSSS flags bits 4-5: search phases - 1 (1..3 = 2..4), 0 = the image's default (bring-up)
     static constexpr uint8_t SEARCH_MASK = 0x30;
     static constexpr uint8_t PAT_INVERT = 0x01;   // pat_flags: bit 1 = negative deviation
@@ -2367,6 +2370,9 @@ struct SignatureDetectStatsMessage : public Message {
     uint16_t fsk_bad{0};    // bad length or check
     uint16_t fsk_qf{0};     // frames lost to a full application queue
     uint32_t fsk_nochk{0};  // frames of rules without a check (sync + length only)
+    /* Hum dwells (MODE_METER with FLAG_HUM), since the image started. */
+    uint16_t hum_deferred{0};  // hum dwells whose start waited for a Wi-Fi frame still in the hand-off slots
+    uint16_t hum_windows{0};   // ladder windows ended (SignatureDetectHumMessage sent, or lost: q_fail)
 };
 
 // One DJI DroneID burst detection (MODE_DRONEID), by value. M4 -> M0. Presence only: a burst of the
@@ -2402,6 +2408,20 @@ struct SignatureDetectMeterMessage : public Message {
     uint32_t last_period_us{0};
     uint32_t width_us{0};  // last pulse width
     uint8_t log2d{0};      // boxcar 2^log2d of 4 Msps
+};
+
+// Mains hum check (MODE_METER with FLAG_HUM): one ~1 s ladder window, every ~1 s. M4 -> M0.
+struct SignatureDetectHumMessage : public Message {
+    constexpr SignatureDetectHumMessage()
+        : Message{ID::SignatureDetectHum} {}
+
+    uint32_t t_ms{0};
+    sigdet::HumLevels levels{};  // harmonics of 60 and 50 Hz over their references, dB; blocks in the window
+    uint32_t clip{0};            // raw I / Q samples at |x| >= 120 over about the window
+    int16_t level_cdb{-12000};   // mean channel power of the window, centi-dB re full scale (|x| = 128)
+    uint16_t wait_buffers{0};    // DMA buffers the dwell's start waited for the Wi-Fi slots (0: none)
+    uint8_t window{0};           // 1, 2, ... since the dwell started (the first one's DC removal is rougher)
+    uint8_t log2d{0};            // boxcar 2^log2d of 4 Msps
 };
 
 // One FSK frame (MODE_FSK): a rule's frame whose check passed (or, for a rule without a check, sync and length

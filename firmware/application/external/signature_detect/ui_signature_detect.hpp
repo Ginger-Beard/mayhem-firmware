@@ -189,6 +189,7 @@ class SignatureDetectView : public View {
     static constexpr uint8_t kTrack = 0xFA;   /* phase_band_ while the track view is open: the cycle is paused */
     static constexpr uint8_t kZw = 0xF9;      /* phase_band_ of an FSK dwell (PSDT MODE_FSK; Z-Wave and the class's FSK rules) */
     static constexpr uint8_t kScan = 0xF8;    /* phase_band_ of an interference scan window (a class with SCAN lines) */
+    static constexpr uint8_t kHum = 0xF7;     /* phase_band_ of a hum dwell of the interference scan (PSDT MODE_METER + FLAG_HUM) */
     static constexpr uint8_t kSetupBands = 6;
 
     struct BandStat {
@@ -330,6 +331,22 @@ class SignatureDetectView : public View {
     uint8_t scan_gain_[3]{};                    /* lna, vga, amp the floor baseline belongs to */
     const ScanEvent* scan_ev_{nullptr};         /* the event being turned into an entity (its NEW row) */
     uint32_t scan_windows_{0}, scan_passes_{0}; /* this session, for the heartbeat */
+    uint8_t scan_gen_{0};                       /* engines started (a result for an engine that is gone is dropped) */
+    /* Hum dwells (the scan's mains hum check, sigdet_hum.hpp): the meter at
+     * a candidate's centre, a 14 kHz channel, two ~1 s ladder windows; the
+     * second one is judged. At most one per scan pass, tune::kHumGapMs apart. */
+    sigdet::HumLevels hum_lv_{}; /* the dwell's latest window */
+    uint32_t hum_khz_{0};        /* candidate centre */
+    uint32_t hum_scan_pass_{0};  /* scan pass when the last hum dwell started */
+    systime_t hum_last_end_{0};  /* when it ended */
+    uint32_t hum_ms_{0};         /* airtime total (DDSTAT) */
+    uint32_t hum_rx_{0};         /* SignatureDetectHumMessages received */
+    uint32_t hum_clip_{0};       /* ... the latest one's clip count */
+    int16_t hum_level_cdb_{0};   /* ... its mean channel power */
+    uint16_t hum_wait_{0};       /* ... buffers its start waited for the Wi-Fi slots */
+    uint16_t hum_dwells_{0}, hum_checks_{0}, hum_found_{0}, hum_lost_{0};
+    uint8_t hum_uid_{0}, hum_gen_{0}, hum_win_{0};
+    uint8_t hum_lost_uid_{0}; /* the candidate whose last dwell brought no result */
     bool rf_paused_{false};
     RfEngine rf_{};
 
@@ -454,6 +471,11 @@ class SignatureDetectView : public View {
     bool scan_memory(bool on);
     void start_scan();
     void end_scan();
+    bool hum_due();
+    void start_hum(bool rate_switch);
+    void end_hum();
+    void on_hum(const SignatureDetectHumMessage& message);
+    void hum_row(const sigdet::HumVerdict& v, bool lost);
     static void on_scan_event(void* ctx, const ScanEvent& e);
     void scan_event(const ScanEvent& e);
     void report_scan(Tracker::Event ev, const Entity& e);
@@ -582,6 +604,11 @@ class SignatureDetectView : public View {
         Message::ID::SignatureDetectMeter,
         [this](Message* const p) {
             this->on_meter(*static_cast<const SignatureDetectMeterMessage*>(p));
+        }};
+    MessageHandlerRegistration message_handler_hum{
+        Message::ID::SignatureDetectHum,
+        [this](Message* const p) {
+            this->on_hum(*static_cast<const SignatureDetectHumMessage*>(p));
         }};
     MessageHandlerRegistration message_handler_gps{
         Message::ID::GPSPosData,

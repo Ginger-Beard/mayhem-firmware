@@ -98,6 +98,14 @@ constexpr uint8_t kWifiChannelMaskAll = 0x07;  // debug key w: channels 6, 1 and
  * channel). Time based: a dwell when kDidGapMs have passed since the last one
  * ended, outside the BLE ratio, the cycle resumed after it (rf_test/
  * sched_model.py: default cycle 4.90 -> 5.50 s, +12.4 %; 11 % airtime). */
+/* Hum dwells of the interference scan (PSDT MODE_METER + FLAG_HUM at the
+ * strongest unchecked steady emitter's centre, 14 kHz channel): over when the
+ * second ~1 s ladder window arrives (~2.0 s after the start), at kHumDwellMs
+ * at most. Bound: at most one per completed scan pass, and kHumGapMs of
+ * other dwells at least between two, so hum dwells take <= 2.3 / (2.3 + 8)
+ * = 22 % of the airtime and hold a pass up by one dwell at most. */
+constexpr uint16_t kHumDwellMs = 2300;
+constexpr uint16_t kHumGapMs = 8000;
 constexpr uint32_t kDidSampleRate = 15360000;
 constexpr uint16_t kDidDwellMs = 4500;
 constexpr uint16_t kDidGapMs = 36000;                                // one DroneID dwell every ~40.5 s (< kExpireSeconds: a drone stays listed)

@@ -769,6 +769,12 @@ void ScanEngine::emit_emitter(uint8_t ev, uint8_t type, uint8_t conf, const Emit
         s.rate = static_cast<int32_t>(d10 * 10 * 60 / static_cast<int64_t>(e.t_last - e.t_first));
     }
     s.count = e.seen;
+    if (type == ST_HUM) {
+        /* Its updates and drop keep the hum check's numbers (label, rows). */
+        s.param = e.hum_family;
+        s.count = e.hum_count;
+        s.rate = 0;
+    }
     s.passes = static_cast<uint16_t>(pass_ - e.pass_first + 1);
     s.level_cdb = e.level;
     s.duty = e.duty;
@@ -996,6 +1002,8 @@ void ScanEngine::hum_result(uint8_t uid, const sigdet::HumVerdict& v) {
         e.hum_pass = pass_;
         if (v.family && e.type != ST_HUM) {
             e.type = ST_HUM;
+            e.hum_family = v.family;
+            e.hum_count = v.count;
             const ScanRange& g = range_[e.range];
             ScanEvent s{};
             s.ev = SE_NEW;

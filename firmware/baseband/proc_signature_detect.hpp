@@ -31,6 +31,7 @@
 #include "sigdet_droneid.hpp"
 #include "sigdet_ble_vendor.hpp"
 #include "sigdet_wifi_rid.hpp"
+#include "sigdet_wifi_slots.hpp"
 
 #include "message.hpp"
 
@@ -54,7 +55,8 @@
  *   buffer goes into its input ring and is demodulated in steps while this
  *   buffer's cycle budget lasts (kDsssLimitCycles): a SYNC burst is spread
  *   over the next buffers. FCS valid frames are handed to the event thread
- *   (two slots, no lock), which keeps only Remote ID (sigdet_wifi_rid.hpp: ODID
+ *   (two slots, no lock: sigdet_wifi_slots.hpp, which also states who owns
+ *   the slots when), which keeps only Remote ID (sigdet_wifi_rid.hpp: ODID
  *   vendor IE or NAN; French / legacy DJI IEs with FLAG_WIFI_LEGACY), counts
  *   the rest by type and forgets it, and queues SignatureDetectWifiMessage (the
  *   used prefix only), at most kWifiRateMaxFrames per 100 ms.
@@ -66,6 +68,15 @@
  *   SignatureDetectDroneIdMessage. Presence only, no decoding. Its memory is the
  *   pattern and Wi-Fi receivers' (mode arena in the .cpp): they are taken
  *   down for a DroneID dwell and rebuilt after it, counters kept.
+ * - Track meter (MODE_METER, HackRF Pro): channel power at the target
+ *   (sigdet_meter.hpp), SignatureDetectMeterMessage every ~50 ms. With
+ *   FLAG_HUM it is the interference scan's hum dwell instead: the block
+ *   powers go into the mains ladder (sigdet_hum.hpp), whose ~630 B live in
+ *   the Wi-Fi hand-off slots for the dwell (sigdet::HumDwell); one
+ *   SignatureDetectHumMessage per ~1 s window, no meter reports. The dwell
+ *   starts only once both slots are empty (until then nothing is fed, the
+ *   request stays pending: hum_deferred_), and any next configuration ends
+ *   it first, leaving the slots zeroed and empty.
  * - Sweep: entered with SpecAnConfig and served by spec_an::Engine exactly as
  *   in proc_wideband_spectrum, so the M0 drives it with spec_an::Sweep. Left
  *   with any SignatureDetectConfig.
@@ -108,9 +119,9 @@ class SignatureDetectProcessor : public BasebandProcessor {
      * Search or Lock block of 32 groups ~3.5-4.4 k, 8 Sync groups ~3.4 k.
      * With margin: 32 us, so execute() stays within dsss_limit_cycles. */
     static constexpr uint32_t dsss_step_bound_cycles = 32 * cycles_per_us;
-    /* FCS valid frames waiting for the event thread: a frame takes >= 1.4 ms
-     * on air, the event thread a few k cycles per frame. */
-    static constexpr uint8_t wifi_slots = 2;
+    /* FCS valid frames wait for the event thread in two slots
+     * (sigdet::WifiSlots::kSlots): a frame takes >= 1.4 ms on air, the event
+     * thread a few k cycles per frame. */
     /* DroneID stage B: at most this many candidates tested a second (each
      * ~0.7 M cycles, ~0.9 M with the 20 % the M4 ran over the DSSS model:
      * <= 11 % of the M4). Household 2.4 GHz gives 8-11 a second, next to a
@@ -187,8 +198,6 @@ class SignatureDetectProcessor : public BasebandProcessor {
     uint32_t wifi_cyc_[4]{};
     uint32_t wifi_grp_[4]{};
     uint32_t wifi_seen_[4]{};
-    volatile uint8_t wifi_head_{0}; /* slots filled (baseband thread) */
-    volatile uint8_t wifi_tail_{0}; /* slots done (event thread) */
     /* ... event thread (read by send_stats): */
     uint32_t wifi_beacon_{0};
     uint32_t wifi_probe_{0};
@@ -250,6 +259,12 @@ class SignatureDetectProcessor : public BasebandProcessor {
 #ifdef PRALINE
     sigdet::PowerMeter meter_{};
     SignatureDetectMeterMessage meter_message{};
+    /* Hum dwell (FLAG_HUM), baseband thread. */
+    sigdet::HumDwell hum_{};
+    bool hum_waiting_{false};  /* a hum request waits for the Wi-Fi slots */
+    uint16_t hum_wait_{0};     /* ... buffers so far (then sent with its windows) */
+    uint16_t hum_deferred_{0}; /* hum dwells that had to wait */
+    uint16_t hum_windows_{0};  /* ladder windows ended */
 #endif
     bool target_on_{false};
     uint8_t target_[6]{};
@@ -257,6 +272,8 @@ class SignatureDetectProcessor : public BasebandProcessor {
     uint32_t tgt_window_count_{0};
 #ifdef PRALINE
     void execute_meter(const buffer_c8_t& buffer);
+    bool hum_request() const;
+    void send_hum(const sigdet::HumLevels& levels);
     /* FSK frame rules (MODE_FSK; Z-Wave R1 is one). */
     sigdet::FskRx fsk_{};
     sigdet::FskDwell req_fsk_{};

@@ -781,7 +781,7 @@ void SignatureDetectView::pause_rf(bool on) {
     if (on == rf_paused_) return;
     rf_paused_ = on;
     if (on) {
-        if (sweeping() || phase_band_ == kDid) next_phase();
+        if (sweeping() || phase_band_ == kDid || phase_band_ == kHum) next_phase();
         scan_memory(false); /* a map takes its RAM back */
         rf_memory(false);
     }
@@ -908,7 +908,8 @@ void SignatureDetectView::next_phase() {
         SWEEP,
         WIFI,
         DID,
-        ZW
+        ZW,
+        HUM
     };
     const uint8_t prev = phase_band_;
     const bool from_sweep = sweeping();
@@ -948,6 +949,9 @@ void SignatureDetectView::next_phase() {
     }
     if (next == BLE && !ble) next = wifi ? WIFI : (zw ? ZW : (pat ? PAT : BLE)); /* nothing else left on: BLE after all */
     if (next == SWEEP && !rf_memory(true)) next = ble ? BLE : (wifi ? WIFI : (zw ? ZW : (pat ? PAT : BLE)));
+    /* The scan's hum check takes the sweep's turn when one is due (bounded:
+     * hum_due()). After it the cycle goes on as after a sweep. */
+    if (next == SWEEP && scan_on() && hum_due()) next = HUM;
 
     if (next == DID) {
         did_resume_ = from;
@@ -965,6 +969,8 @@ void SignatureDetectView::next_phase() {
             start_scan();
         else
             start_sweep(next_band(true));
+    } else if (next == HUM) {
+        start_hum(rate_switch);
     } else if (next == PAT) {
         start_pattern(rate_switch);
     } else if (next == WIFI) {
@@ -986,6 +992,10 @@ void SignatureDetectView::end_phase() {
     const uint16_t dt = now - phase_t0_;
     if (prev == kScan) {
         end_scan();
+    } else if (prev == kHum) {
+        hum_ms_ += dt;
+        hum_last_end_ = now;
+        end_hum();
     } else if (sweeping()) {
         end_sweep();
     } else if (prev == kBle) {
@@ -1313,6 +1323,8 @@ bool SignatureDetectView::scan_memory(bool on) {
     }
     scan_w_ = 0;
     scan_t0_ = now_s();
+    scan_gen_++;
+    hum_scan_pass_ = 0;
     scan_gain_[0] = static_cast<uint8_t>(receiver_model.lna());
     scan_gain_[1] = static_cast<uint8_t>(receiver_model.vga());
     scan_gain_[2] = receiver_model.rf_amp() ? 1 : 0;
@@ -1382,6 +1394,133 @@ void SignatureDetectView::end_scan() {
     if (scan_w_ + 1u >= scan_->windows()) scan_passes_++;
     if (dump_band_ == kDumpAll) scan_->dump(dump_line, this);
     scan_w_ = static_cast<uint16_t>(scan_w_ + 1u >= scan_->windows() ? 0 : scan_w_ + 1u);
+}
+
+/* A hum dwell is due: the scan has a candidate (the strongest steady or
+ * drifting emitter not checked within kHumRecheckPasses), a pass has been
+ * completed since the last hum dwell, and kHumGapMs have passed since it
+ * ended. */
+bool SignatureDetectView::hum_due() {
+    if (!scan_ || scan_->pass() == hum_scan_pass_) return false;
+    if (chTimeNow() - hum_last_end_ < tune::kHumGapMs) return false;
+    uint8_t uid = 0;
+    uint32_t khz = 0, width_hz = 0;
+    if (!scan_->hum_candidate(uid, khz, width_hz)) return false;
+    hum_uid_ = uid;
+    hum_khz_ = khz;
+    return true;
+}
+
+/* The meter at the candidate's centre (target = centre: ReceiverModel puts
+ * it at +fs/4), boxcar 2^kHumLog2d (14 kHz), FLAG_HUM: the M4 runs the
+ * ladder in its idle Wi-Fi slots and sends one SignatureDetectHumMessage per
+ * ~1 s window. */
+void SignatureDetectView::start_hum(bool rate_switch) {
+    phase_band_ = kHum;
+    phase_dwell_ms_ = tune::kHumDwellMs;
+    hum_win_ = 0;
+    hum_lv_ = sigdet::HumLevels{};
+    hum_scan_pass_ = scan_ ? scan_->pass() : 0;
+    hum_gen_ = scan_gen_;
+    hum_dwells_++;
+    if (rate_switch || !portapack::clock_manager.sampling_frequency_ok()) { /* see start_ble() */
+        receiver_model.set_sampling_rate(sampling_rate);
+        if (sweep_) sweep_->invalidate_rates();
+    }
+    receiver_model.set_target_frequency(static_cast<rf::Frequency>(hum_khz_) * 1000);
+    baseband::set_signature_detect(sampling_rate, SignatureDetectConfigMessage::MODE_METER, sigdet::kHumLog2d, SignatureDetectConfigMessage::FLAG_HUM);
+}
+
+/* One ladder window. The second one ends the dwell (the next frame moves
+ * on); a late one (the dwell already over) is ignored. */
+void SignatureDetectView::on_hum(const SignatureDetectHumMessage& message) {
+    hum_rx_++;
+    if (raw_usb_) {
+        /* "DDHUM,t_ms,window,blocks,level_cdb,clip,wait_buf,h60 x12,h50 x12" */
+        char line[200];
+        Fmt f{line, sizeof(line)};
+        f.s("DDHUM,").d(message.t_ms).c(',').d(message.window).c(',').d(message.levels.blocks).c(',').d(message.level_cdb);
+        f.c(',').d(message.clip).c(',').d(message.wait_buffers);
+        for (size_t k = 0; k < sigdet::kHumHarm; k++) f.c(',').d(message.levels.h60[k]);
+        for (size_t k = 0; k < sigdet::kHumHarm; k++) f.c(',').d(message.levels.h50[k]);
+        usb_line(line);
+    }
+    if (phase_band_ != kHum) return;
+    hum_lv_ = message.levels;
+    hum_win_ = message.window;
+    hum_level_cdb_ = message.level_cdb;
+    hum_clip_ = message.clip;
+    hum_wait_ = message.wait_buffers;
+    if (hum_win_ >= sigdet::kHumWindows) rf_full_ = true;
+    refresh_status();
+}
+
+/* The hum dwell is over: the second window's verdict goes to the engine
+ * (Hum50 / Hum60: an SE_NEW event, the list entry and its SCN_NEW row) and
+ * into an SCN_HUM row. Without that window (a lost message, the dwell cut
+ * short) the candidate comes up again; twice in a row without one, it is
+ * marked checked (no finding) so that it cannot hold the others up. */
+void SignatureDetectView::end_hum() {
+    if (!scan_ || hum_gen_ != scan_gen_) return; /* the engine (and its uids) went meanwhile */
+    if (hum_win_ < sigdet::kHumWindows) {
+        hum_lost_++;
+        if (hum_lost_uid_ == hum_uid_) {
+            hum_lost_uid_ = 0;
+            scan_->hum_result(hum_uid_, sigdet::HumVerdict{});
+            hum_row(sigdet::HumVerdict{}, true);
+        } else {
+            hum_lost_uid_ = hum_uid_;
+        }
+        return;
+    }
+    hum_lost_uid_ = 0;
+    const sigdet::HumVerdict v = sigdet::hum_verdict(hum_lv_);
+    hum_checks_++;
+    if (v.family) hum_found_++;
+    scan_->hum_result(hum_uid_, v);
+    hum_row(v, false);
+}
+
+/* SCN_HUM: every hum check with Log ticked when it found mains modulation,
+ * with Survey ticked (rate limited like SCN_SRV) when it did not. id SC<uid>,
+ * label, kind noise, centre, channel width, mean channel power (dBFS);
+ * detail: class, type, conf, why, mains_hz, harmonics (of that family over
+ * the bar), other (of the other family), best_db, h60 / h50 (the twelve
+ * levels, dB over the references, '/' separated), blocks, clip, wait_buf. */
+void SignatureDetectView::hum_row(const sigdet::HumVerdict& v, bool lost) {
+    if (!log_) return;
+    if (!v.family && !(survey_on() && sig_mem_ && sig_mem_->budget.take(uptime_ms()))) return;
+    char label[kSigLabelLen];
+    {
+        Fmt l{label, sizeof(label)};
+        if (v.family)
+            l.s("Hum").d(v.family).c(' ');
+        else
+            l.s("NoHum ");
+        l.d(static_cast<int32_t>(hum_khz_ / 1000)).c('.').d(static_cast<int32_t>(hum_khz_ % 1000 / 100)).d(static_cast<int32_t>(hum_khz_ % 100 / 10)).d(static_cast<int32_t>(hum_khz_ % 10));
+    }
+    char row[400];
+    Fmt f{row, sizeof(row)};
+    row_begin(f, "SCN_HUM", "R");
+    f.s(",SC").d(hum_uid_).c(',').s(label, Fmt::Esc::Csv).s(",noise,").d(static_cast<int32_t>(hum_khz_)).s(",14,");
+    if (!lost) f.d(hum_level_cdb_ / 100);
+    f.s(",dBFS,");
+    int32_t lat, lon;
+    if (own_position(lat, lon))
+        f.e7(lat).c(',').e7(lon);
+    else
+        f.c(',');
+    f.s(",class=").s(sig_name_.c_str(), Fmt::Esc::Kv).s(";type=").s(v.family ? scan_type_tag(ST_HUM) : "-").s(";conf=").c(v.family ? 'H' : '-');
+    f.s(";why=").s(lost ? "no_result" : (v.family ? "mains_modulation" : "no_mains_pattern"));
+    if (!lost) {
+        f.s(";mains_hz=").d(v.family).s(";harmonics=").d(v.count).s(";other=").d(v.other).s(";best_db=").d(v.best_db);
+        f.s(";h60=");
+        for (size_t k = 0; k < sigdet::kHumHarm; k++) f.s(k ? "/" : "").d(hum_lv_.h60[k]);
+        f.s(";h50=");
+        for (size_t k = 0; k < sigdet::kHumHarm; k++) f.s(k ? "/" : "").d(hum_lv_.h50[k]);
+        f.s(";blocks=").d(hum_lv_.blocks).s(";clip=").d(static_cast<int32_t>(hum_clip_)).s(";wait_buf=").d(hum_wait_);
+    }
+    log_line(row);
 }
 
 void SignatureDetectView::on_scan_event(void* ctx, const ScanEvent& e) {
@@ -1739,6 +1878,13 @@ void SignatureDetectView::stat_line() {
     const I d[] = {I(m.did_cands), I(m.did_evals), I(m.did_dets), m.did_skips, m.did_capped, m.did_b_max_us, m.did_b_mean_us,
                    m.drops_did, m.did_qf, I(did_rx_), I(did_ms_)};
     for (const I x : d) f.c(',').d(x);
+    /* Interference scan and its hum dwells (appended): windows, passes,
+     * hum dwells, checks judged, mains found, dwells without a result, hum
+     * windows received, hum airtime ms; M4: hum dwells deferred for a busy
+     * Wi-Fi slot, ladder windows sent. */
+    const I s[] = {I(scan_windows_), I(scan_passes_), hum_dwells_, hum_checks_, hum_found_, hum_lost_, I(hum_rx_), I(hum_ms_),
+                   m.hum_deferred, m.hum_windows};
+    for (const I x : s) f.c(',').d(x);
     usb_line(buf);
 }
 
@@ -2239,7 +2385,7 @@ void SignatureDetectView::select_class(size_t index) {
         pat_table_.begin_file(false);
         pat_scan_.reset();
     }
-    if (sweeping() || phase_band_ == kPat || phase_band_ == kWifi || phase_band_ == kDid) next_phase(); /* the old class's dwell ends */
+    if (sweeping() || phase_band_ == kPat || phase_band_ == kWifi || phase_band_ == kDid || phase_band_ == kHum) next_phase(); /* the old class's dwell ends */
     apply_options();
     if (log_) start_row("CLASS"); /* the class change, with the build, in the log */
 }
@@ -2560,6 +2706,24 @@ void SignatureDetectView::heartbeat_row() {
         }
         log_line(row);
     }
+    /* HB3 (a class with SCAN lines): the interference scan and its hum
+     * dwells: windows, passes, hum dwells, checks judged, mains found, dwells
+     * without a result, starts deferred for a busy Wi-Fi slot (M4), ladder
+     * windows (M4), hum airtime ms. */
+    if (scan_on()) {
+        char row[300];
+        Fmt f{row, sizeof(row)};
+        row_begin(f, "HB3", "");
+        f.s(",,").s(sig_name_.c_str(), Fmt::Esc::Csv).s(",,,,,,");
+        if (own)
+            f.e7(lat).c(',').e7(lon);
+        else
+            f.c(',');
+        f.s(",scan_win=").d(static_cast<int32_t>(scan_windows_)).s(";scan_pass=").d(static_cast<int32_t>(scan_passes_));
+        f.s(";hum_dwells=").d(hum_dwells_).s(";hum_checks=").d(hum_checks_).s(";hum_found=").d(hum_found_).s(";hum_lost=").d(hum_lost_);
+        f.s(";hum_deferred=").d(m.hum_deferred).s(";hum_windows=").d(m.hum_windows).s(";hum_ms=").d(static_cast<int32_t>(hum_ms_));
+        log_line(row);
+    }
 }
 
 /* Debug console / USB raw line for every frame (bring-up tool). */
@@ -2607,6 +2771,8 @@ void SignatureDetectView::refresh_status() {
         f.s("ZW").d(sig_ready() ? sig_mem_->cls.zw.f_khz / 1000 : 908);
     else if (phase_band_ == kScan)
         f.s("SCN").d(scan_w_).c('p').d(scan_ ? static_cast<int32_t>(scan_->pass()) : 0); /* window, pass */
+    else if (phase_band_ == kHum)
+        f.s("HUM").d(static_cast<int32_t>(hum_khz_ / 1000)).c('w').d(hum_win_); /* centre MHz, windows so far */
     else
         f.s(kBands[phase_band_].name);
     f.s(" RID ").d(tracker_.active_rid()).c(' ');
