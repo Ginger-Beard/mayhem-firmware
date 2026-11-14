@@ -90,6 +90,14 @@ void GpsRxProcessor::apply() {
         send_status();
         return;
     }
+    if (req_.cmd == GpsRxConfigMessage::CMD_ADD) { /* the loops keep running */
+        if (trk_ && req_.add_prn >= 1 && req_.add_prn <= 32) {
+            /* apply() runs before this buffer goes to the loops: it starts at samples_ - kN */
+            trk_->start_aided(req_.add_prn, req_.add_code, req_.add_doppler, req_.add_at, samples_ - gps_acq::kN, req_.add_windows);
+            trk_->publish();
+        }
+        return;
+    }
     max_ch_ = req_.max_ch ? req_.max_ch : 8;
     if (req_.cmd == GpsRxConfigMessage::CMD_TRACK) {
         start_tracking(req_.prn_mask);
@@ -225,6 +233,16 @@ void GpsRxProcessor::execute(const buffer_c8_t& buffer) {
 void GpsRxProcessor::on_message(const Message* const message) {
     if (message->id == Message::ID::GpsRxConfig) {
         const auto& m = *reinterpret_cast<const GpsRxConfigMessage*>(message);
+        if (m.cmd == GpsRxConfigMessage::CMD_ADD) { /* only the aided-search fields: the search settings stay */
+            req_.cmd = m.cmd;
+            req_.add_prn = m.add_prn;
+            req_.add_windows = m.add_windows;
+            req_.add_code = m.add_code;
+            req_.add_doppler = m.add_doppler;
+            req_.add_at = m.add_at;
+            pending_ = true;
+            return;
+        }
         req_.cmd = m.cmd;
         req_.k_ms = m.k_ms;
         req_.half_bins = m.half_bins;

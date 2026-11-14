@@ -137,6 +137,15 @@ double auto_t_rx_guess(const AutoState& a, int n);
  * toa: decode them into recs (32, by PRN - 1). wn_full: the full almanac
  * week (from wna8 and the current week). */
 bool auto_almanac_complete(const AutoState& a);
+
+/* Aided search of a newly risen satellite: from its orbit (almanac or
+ * ephemeris), the receiver position and the true GPS time t_rx at some sample,
+ * the code phase (chips) of the signal arriving at that sample and the
+ * geometric Doppler (Hz, without the receiver clock's frequency error). */
+void auto_predict(const Orbit& o, const Vec3& rx, double t_rx, double* code_chips, double* doppler_geo_hz);
+/* half-width of the aided code search (windows of 15 half chips either side):
+ * the orbit's position error over the light time, from the almanac's age */
+int auto_aided_windows(bool ephemeris, double age_days);
 int auto_almanac_decode(const AutoState& a, int32_t week_now, AlmRec* recs);
 
 }  // namespace ui::external_app::gps

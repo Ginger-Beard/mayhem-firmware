@@ -2310,7 +2310,8 @@ struct GpsRxConfigMessage : public Message {
         : Message{ID::GpsRxConfig} {}
     enum Cmd : uint8_t { CMD_STOP = 0, /* stops a search and the tracking */
                          CMD_SEARCH = 1,
-                         CMD_TRACK = 2 }; /* track the PRNs in prn_mask from the last search's results */
+                         CMD_TRACK = 2,   /* track the PRNs in prn_mask from the last search's results */
+                         CMD_ADD = 3 };   /* while tracking: aided search for one newly risen satellite (add_*) */
     uint8_t cmd{CMD_STOP};
     uint8_t k_ms{20};      /* snapshot length, 1..20 ms */
     uint8_t half_bins{12}; /* Doppler bins of 500 Hz either side of each centre */
@@ -2320,6 +2321,15 @@ struct GpsRxConfigMessage : public Message {
     uint8_t confirm{1};    /* report a PRN only if a second snapshot confirms it */
     uint8_t track{0};      /* CMD_SEARCH: hand the confirmed PRNs to the tracking loops when done ("Autonomous") */
     uint8_t max_ch{8};     /* tracking channels at most (M4 time) */
+    /* CMD_ADD: PRN, predicted code phase (chips) of the signal arriving at
+     * sample add_at (the image's sample count, as in the measurement sets),
+     * predicted Doppler incl. the receiver clock (Hz), windows of 15 half chips
+     * either side to search */
+    uint8_t add_prn{0};
+    uint8_t add_windows{0};
+    float add_code{0};
+    float add_doppler{0};
+    uint64_t add_at{0};
 };
 
 /* M4 -> M0: progress, noise statistics, and where the results and the lent

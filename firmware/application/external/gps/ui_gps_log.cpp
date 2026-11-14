@@ -100,6 +100,7 @@ void GpsView::log_header() {
         "#SR,seq,search,k_ms,prn,searched,detected,once,refined,metric_x100,thr_x100,cn0_x10,doppler,code_x1000,verdict,b_metric_x100,b_doppler,b_code_x1000",
         "#HO,handovers,age_ms,prns",
         "#REL,prn,after_ms,released,refills (channel freed: detection never verified)",
+        "#ADD,prn,el_deg,code_x1000,doppler,clock_hz,windows,fix_age_ms,orbit,aided_starts (aided search: newly risen satellite)",
         "#SF,prn,ch,sfid,page,tow,w1..w10 (24-bit data words hex)",
         "#EPH,event,prn,have,fresh,in_table,toe_age_s,iode",
         "#MEAS,seq,sample,missed,n,prn:flags:tx_ms:tx_frac_hex:doppler:cn0_x10 ...",
@@ -264,7 +265,7 @@ void GpsView::log_second() {
         Fmt f = log_row("CH");
         f.c(',').u(static_cast<uint32_t>(i)).c(',').u(c.prn).c(',').u(c.state).c(',').u(c.mode).c(',');
         f.s(c.flags & gps_trk::F_PLL ? "L" : "-").s(c.flags & gps_trk::F_BIT ? "B" : "-").s(c.flags & gps_trk::F_FRAME ? "T" : "-").s(c.flags & gps_trk::F_VERIFIED ? "V" : "-");
-        f.s(c.flags & gps_trk::F_EVER ? "E" : "-").s(c.flags & gps_trk::F_RELEASED ? "R" : "-");
+        f.s(c.flags & gps_trk::F_EVER ? "E" : "-").s(c.flags & gps_trk::F_RELEASED ? "R" : "-").s(c.flags & gps_trk::F_AIDED ? "A" : "-");
         f.c(',').u(c.cn0_x10).c(',').d(c.pld_x100).c(',').d(static_cast<int32_t>(std::lround(c.doppler_hz * 10.0f))).c(',').u(c.code_x64);
         f.c(',').d(static_cast<int32_t>(std::lround(c.code_err * 1000.0f))).c(',').u(c.lock_ms).c(',').u(c.bits).c(',').u(c.words_ok).c(',').u(c.parity_errs);
         f.c(',').u(c.subframes).c(',').u(c.tow_s).c(',').u(c.reacq).c(',').u(c.sweeps).c(',').u(c.half_fixes);
@@ -360,6 +361,15 @@ void GpsView::log_clock_set(double rtc_before, int64_t t) {
     Fmt f = log_row("CLK");
     f.s(",set,").d(static_cast<int32_t>(std::lround((static_cast<double>(t) - rtc_before) * 1000.0)));
     f.c(',').u(static_cast<uint32_t>(rtc_before)).c(',').u(static_cast<uint32_t>(t)).c(',').d(utc_off_min_);
+    log_end(f);
+}
+
+void GpsView::log_aided(int prn, float el, double code, double dop, double clk, int windows, uint32_t age_ms, bool eph) {
+    if (!log_active()) return;
+    Fmt f = log_row("ADD");
+    f.c(',').c('G').d2(prn).c(',').d(static_cast<int32_t>(std::lround(el))).c(',').u(static_cast<uint32_t>(code * 1000.0));
+    f.c(',').d(static_cast<int32_t>(std::lround(dop))).c(',').d(static_cast<int32_t>(std::lround(clk))).c(',').u(static_cast<uint32_t>(windows));
+    f.c(',').u(age_ms).c(',').s(eph ? "eph" : "alm").c(',').u(trk_sh_ ? trk_sh_->aided_starts : 0u);
     log_end(f);
 }
 

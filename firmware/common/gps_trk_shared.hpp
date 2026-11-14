@@ -55,6 +55,7 @@ enum ChFlags : uint8_t {
     F_MEAS_GAP = 16,  /* (measurement) a missed DMA buffer in the last second */
     F_EVER = 32,      /* verified (or bit-synced) at least once since the hand-over: a real satellite */
     F_RELEASED = 64,  /* never verified within the verification timeout: channel given up (detection only) */
+    F_AIDED = 128,    /* started by the aided search for a newly risen satellite */
 };
 
 struct ChInfo {
@@ -136,6 +137,8 @@ struct Shared {
     uint16_t refills;
     uint8_t rel_prn[8];
     uint16_t rel_ms[8]; /* time from the start of that channel to the release, ms */
+    /* searches for newly risen satellites (app predictions while tracking) */
+    uint16_t aided_starts;
 };
 
 }  // namespace gps_trk

@@ -97,6 +97,12 @@ class TextLines : public Widget {
     void end();
     /* one row drawn inverted (the wheel selection), -1 for none */
     void set_highlight(int row);
+    /* row `row` is painted over its first `cols` columns only: a neighbouring
+     * widget owns the rest of that row (otherwise the blank fill erases it) */
+    void set_short_row(int row, uint8_t cols) {
+        short_row_ = static_cast<int8_t>(row);
+        short_cols_ = cols;
+    }
     /* a tap on a row (rows are line_height apart) */
     std::function<void(size_t)> on_row{};
     bool on_touch(const TouchEvent event) override;
@@ -107,6 +113,8 @@ class TextLines : public Widget {
     const Font* font_;
     uint32_t used_{0};
     int8_t hl_{-1};
+    int8_t short_row_{-1};
+    uint8_t short_cols_{0};
 };
 
 /* 8x16 text drawn at twice the size (the pointing readout). */
@@ -746,6 +754,17 @@ class GpsView : public View {
     uint16_t cache_errs_{0};
     bool meas_waiting_{false}; /* a measurement set copied while the solver ran */
     bool req_confirm_{true};   /* the last search asked for a 2nd-snapshot confirmation */
+    /* aided search for newly risen satellites while tracking (auto_aided_step) */
+    static constexpr float kAidedMinEl = 10.0f; /* deg */
+    static constexpr uint8_t kAidedEvery = 5;   /* s between attempts */
+    static constexpr uint8_t kAidedRetry = 24;  /* attempts (x 5 s) before the same PRN again: 2 min */
+    uint64_t solve_sample_{0}, fix_sample_{0};  /* sample of the solved measurement set */
+    double fix_trx_{0};                         /* its GPS time (from the fix) */
+    bool fix_have_time_{false};
+    uint8_t aided_tick_{0};
+    uint8_t aided_wait_[32]{};
+    void auto_aided_step();
+    void log_aided(int prn, float el, double code, double dop, double clk, int windows, uint32_t age_ms, bool eph);
     uint16_t log_rel_seen_{0}; /* tracker releases already logged */
     int32_t status_dt_ms_{0}; /* the last search's snapshot A -> B interval */
 
@@ -821,10 +840,9 @@ class GpsView : public View {
      * shown here read only: the app never switches it (by design); the
      * user does, with Mayhem's status-bar control or Settings > Radio. */
     Text text_ant_{{UI_POS_X(22), UI_POS_Y(0), UI_POS_WIDTH(8), UI_POS_HEIGHT(1)}, ""};
-    Text text_warn_{{0, UI_POS_Y(1), UI_POS_MAXWIDTH, UI_POS_HEIGHT(1)}, ""};
     void show_antenna();
 
-    Rect view_rect_{0, UI_POS_Y(2) + 24, screen_width, static_cast<Dim>(screen_height - UI_POS_Y(2) - 24 - UI_POS_Y(1))};
+    Rect view_rect_{0, UI_POS_Y(1) + 24, screen_width, static_cast<Dim>(screen_height - UI_POS_Y(1) - 24 - UI_POS_Y(1))};
     FixView view_fix_;
     HeardView view_heard_;
     PassesView view_passes_;
