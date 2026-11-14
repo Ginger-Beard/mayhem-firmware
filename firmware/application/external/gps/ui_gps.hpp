@@ -66,6 +66,7 @@
 #include "gps_clock.hpp"
 #include "gps_image.hpp"
 #include "gps_keep.hpp"
+#include "gps_sys.hpp"
 #endif
 
 namespace ui::external_app::gps {
@@ -219,9 +220,12 @@ struct GpsScratch {
     double iono_cache_t{0};   /* GPS s of the subframe that carried it, 0 none */
     uint8_t cache_have;
     LogRing log; /* diagnostics log rows waiting for the card (ui_gps_log.cpp) */
+    SysSky sys;  /* the other systems' satellites now (GNSSALM.TXT, ui_gps_sys.cpp) */
 };
 
 class GpsView;
+
+Color sys_color(uint8_t sys); /* one colour per system on the sky plots (ui_gps_sys.cpp) */
 
 /* Incremental reader of the orbit files: a few KB per display frame, so the
  * UI stays responsive and nothing large sits on the stack. */
@@ -277,6 +281,7 @@ class PassesView : public View {
     void restart_passes();    /* new position, time or files */
     void frame(systime_t t0); /* the pass search until the frame's slice is used */
     void tick();              /* countdowns ("in 1h05") */
+    void sync_sys();          /* the wheel moved on the other tab */
 
    private:
     GpsView& main_;
@@ -289,7 +294,8 @@ class PassesView : public View {
     NumberField field_zone_h_;
     OptionsField field_zone_m_;
     SkyPlot sky_;
-    static constexpr size_t kSideRows = 14;
+    OptionsField field_sys_;
+    static constexpr size_t kSideRows = 12;
     TextLines::Line side_[kSideRows]{};
     TextLines text_side_;
     static constexpr size_t kPassRows = 4; /* a window on up to 12, following the selection */
@@ -303,7 +309,8 @@ class PassesView : public View {
     int pos_of_tle(uint8_t idx) const; /* list position of a TLE, -1 */
     void show_passes();
     void zone_changed();
-    int items() const; /* TLE pass rows, then GPS side rows */
+    size_t side_other(size_t row, uint8_t sys) __attribute__((noinline)); /* rows for another system's satellites */
+    int items() const;                                                    /* TLE pass rows, then GPS side rows */
     void item(int i, uint8_t& kind, uint8_t& idx) const;
     void show_selection();
     bool on_encoder(const EncoderEvent delta) override;
@@ -315,7 +322,8 @@ class HeardView : public View {
    public:
     HeardView(GpsView& main, Rect r);
     void focus() override;
-    void show(); /* status / results changed */
+    void show();     /* status / results changed */
+    void sync_sys(); /* the wheel moved on the other tab */
     /* what the rows say (diagnostics log) */
     const TextLines::Line* status_lines() const { return status_; }
     size_t status_rows() const { return kStatusRows; }
@@ -324,8 +332,11 @@ class HeardView : public View {
 
    private:
     void show_tracking();
+    void show_gps() __attribute__((noinline));   /* GPS / All L1 */
+    void show_other() __attribute__((noinline)); /* the wheel shows Galileo, BeiDou, GLONASS or SBAS */
     GpsView& main_;
     OptionsField field_depth_;
+    OptionsField field_sys_;
     Button button_search_;
     Button button_stop_;
     static constexpr size_t kStatusRows = 2;
@@ -611,9 +622,10 @@ class GpsView : public View {
      * with it off, the clock shows whatever it was set to and this must be
      * the offset in force (e.g. -240 in US summer). */
     int32_t utc_off_min_{0};
-    uint32_t tab_{2};    /* last tab (saved) */
-    uint32_t depth_{1};  /* Heard snapshot: 0 = 10 ms, 1 = 20 ms (saved) */
-    uint32_t log_on_{0}; /* diagnostics log (Log box on the Fix tab, saved) */
+    uint32_t tab_{2};                /* last tab (saved) */
+    uint32_t depth_{1};              /* Heard snapshot: 0 = 10 ms, 1 = 20 ms (saved) */
+    uint32_t log_on_{0};             /* diagnostics log (Log box on the Fix tab, saved) */
+    uint32_t sys_view_{VIEW_ALL_L1}; /* the System wheel (Heard, Passes; saved) */
     app_settings::SettingsManager settings_;
     int8_t bias_shown_{-1};  /* last antenna-power state shown (read only) */
     uint32_t tab_shown_{99}; /* tab whose content was last refreshed */
@@ -863,6 +875,25 @@ class GpsView : public View {
     void on_image_ready();                         /* the wanted image reported: what was waiting */
     void send_track();                             /* Autonomous: CMD_TRACK to the tracking image */
     void log_image();
+    /* The System wheel and the other systems' sky (ui_gps_sys.cpp) */
+    bool sys_active_{false};  /* GNSSALM.TXT being read */
+    File* sys_file_{nullptr}; /* on the heap during a pass only */
+    size_t sys_tmp_n_{0};     /* this pass: satellites so far */
+    uint8_t sys_tmp_up_[SYS_N]{};
+    uint8_t sys_tmp_total_[SYS_N]{};
+    double sys_tmp_toa_{0};
+    uint16_t sys_tmp_bad_{0};
+    void set_sys_view(uint8_t v);
+    bool sys_wanted(); /* another system shown on a visible tab */
+    void sys_maybe_start();
+    void sys_close();
+    void sys_take_line();
+    void sys_finish(uint8_t file_state);
+    void sys_step(systime_t t0);
+    double sys_age_days() const;
+    size_t sys_top(uint8_t sys, uint8_t* idx, size_t max) const;
+    void sys_label(const SysSat& s, char* b, size_t size) const;
+    void log_sys(const char* event);
     void image_fallback_ram(); /* no image: use the kept block as plain RAM */
     /* Start now if the sky cache is ready, else as soon as it is. */
     void request_search(Job job, uint8_t k_ms);

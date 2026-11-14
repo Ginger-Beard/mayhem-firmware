@@ -2352,7 +2352,7 @@ struct GpsRxStatusMessage : public Message {
                            LEVEL_HIGH /* clipping: results still reported */ };
     /* The M4 RAM the GPS images lend the app: orbit tables and solver work
      * space (never touched by the M4). */
-    static constexpr uint16_t kScratchSize = 23552; /* Autonomous (AutoState, PVT work, cache record) + the diagnostics log ring */
+    static constexpr uint16_t kScratchSize = 25344; /* orbit tables, Autonomous (AutoState, PVT work), the log ring, the other systems' sky */
     uint8_t state{IDLE};
     uint8_t level{LEVEL_OK};
     uint8_t confirming{0}; /* second (confirmation) snapshot under way */
