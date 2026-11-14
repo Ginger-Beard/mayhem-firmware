@@ -884,7 +884,7 @@ HeardView::HeardView(GpsView& main, Rect r)
     check_gal_.set_value(main_.gal_on_ != 0);
     check_gal_.on_select = [this](Checkbox&, bool v) {
         main_.gal_on_ = v ? 1 : 0;
-        if (!v) main_.gal_pending_ = false; /* a running search finishes; its result is dropped */
+        if (!v) main_.gal_off(); /* the search stops, the Galileo channels are freed */
         main_.sys_maybe_start();
         show();
     };
@@ -1054,9 +1054,10 @@ void HeardView::show_other() {
             f.s("/GPS/GALE1.BIN: not codes");
         else if (gal && !(main_.tracking_ && main_.fix_ok_ && main_.fix_mode_ == GpsView::FIX_PRECISE))
             f.s("waits for a precise GPS fix");
-        else if (gal)
+        else if (gal) {
             f.s("Heard ").u(main_.gal_heard()).s(" of ").u(k->up[sys]).s(" up");
-        else {
+            if (main_.gal_trk_max_) f.s(", ").u(main_.gal_tracking()).s(" trk");
+        } else {
             f.s("Predicted up ").u(k->up[sys]);
             if (age >= 0) f.s(" (alm. ").u(static_cast<uint32_t>(age + 0.5)).s(" d)");
         }
@@ -1069,12 +1070,20 @@ void HeardView::show_other() {
             main_.sys_label(t, lbl, sizeof(lbl));
             main_.sys_label(t, full, sizeof(full));
             const uint8_t st = gal && t.prn <= 36 ? main_.mem_->gal_state[t.prn] : 0;
-            sky_.add(static_cast<int16_t>(t.az2 * 2), t.el, lbl, st == 2 ? Color::green() : sys_color(t.sys), st == 2);
+            const GpsScratch::GalPrev* tc = gal ? main_.gal_tracked(t.prn) : nullptr;
+            sky_.add(static_cast<int16_t>(t.az2 * 2), t.el, lbl, (st == 2 || tc) ? Color::green() : sys_color(t.sys), st == 2 || tc);
             if (j < kListRows - 3) {
                 Fmt g{b, sizeof(b)};
                 g.s(full).s(" el").u(static_cast<uint32_t>(t.el), 2);
                 Color c = white;
-                if (st == 2) {
+                if (tc && tc->state == gps_trk::TRK_SEARCH) { /* a tracking channel lost it: re-acquiring */
+                    g.s(" lost: search");
+                    c = yellow;
+                } else if (tc) { /* a Galileo channel: E1C C/N0, CS = secondary code in sync (verified) */
+                    g.c(' ').u(static_cast<uint32_t>((tc->cn0c_x10 + 5u) / 10u)).s(" dB trk");
+                    if (tc->flags & gal_acq::TF_CS) g.s(" CS");
+                    c = (tc->flags & gal_acq::TF_CS) ? Color::green() : yellow;
+                } else if (st == 2) {
                     g.c(' ').u(main_.mem_->gal_cn0[t.prn]).s(" dB-Hz heard");
                     c = Color::green();
                 } else if (st == 1) {
@@ -1089,7 +1098,7 @@ void HeardView::show_other() {
                 text_list_.set(j, b, c);
             }
         }
-        if (sys == SYS_GAL) text_list_.set(kListRows - 2, gal ? "heard only: not in the fix" : "E1 box: aided search", grey);
+        if (sys == SYS_GAL) text_list_.set(kListRows - 2, gal ? (main_.gal_trk_max_ ? "tracked: not in the fix yet" : "heard only: not in the fix") : "E1 box: aided search", grey);
         if (sys == SYS_BDS) text_list_.set(kListRows - 2, "B1C: C19-C58 only", grey);
         if (sys == SYS_GLO) text_list_.set(kListRows - 2, "1602 MHz: not with GPS", grey);
         if (sys == SYS_SBAS) text_list_.set(kListRows - 2, "SBAS: after Galileo", grey);
@@ -2034,7 +2043,8 @@ GpsView::GpsView(NavigationView& nav, uint32_t reselect)
            {"depth"sv, &depth_},
            {"log"sv, &log_on_},
            {"sys"sv, &sys_view_},
-           {"gal"sv, &gal_on_}}},
+           {"gal"sv, &gal_on_},
+           {"gal_trk"sv, &gal_trk_max_}}},
       reselect_{reselect},
       view_fix_{*this, view_rect_},
       view_heard_{*this, view_rect_},
@@ -2464,9 +2474,12 @@ void GpsView::on_status(const GpsRxStatusMessage& m) {
         gal_status_seq_ = m.gal_seq;
         gal_status_busy_ = m.gal_busy;
         gal_status_cycles_ = m.unit_cycles;
+        gal_trk_sh_ = static_cast<const gal_acq::TrkShared*>(m.gal_track);
+        if (gal_on_) gal_poll();
     } else {
         gal_codes_ = nullptr;
         gal_result_ = nullptr;
+        gal_trk_sh_ = nullptr;
     }
     if (!mem_ && m.scratch && m.scratch_size >= sizeof(GpsScratch)) {
         mem_ = reinterpret_cast<GpsScratch*>(m.scratch); /* kept across the images: cleared once */

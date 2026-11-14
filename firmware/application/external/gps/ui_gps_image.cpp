@@ -53,6 +53,9 @@ gps_image::Check GpsView::load_image(gps_image::Id id) {
     baseband::shutdown(); /* the M4 runs from m4_code: stop it before overwriting (no-op when none runs) */
     image_ = gps_image::ID_NONE;
     image_ready_ = false;
+    gal_codes_ = nullptr; /* they lived in the old image's RAM */
+    gal_result_ = nullptr;
+    gal_trk_sh_ = nullptr;
     gps_image::Check c = gps_image::OK;
     uint32_t size = 0;
     void* const m = chHeapAlloc(nullptr, sizeof(File)); /* not operator new: it halts on a short heap */

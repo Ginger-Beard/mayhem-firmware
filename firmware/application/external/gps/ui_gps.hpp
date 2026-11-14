@@ -230,7 +230,15 @@ struct GpsScratch {
     uint8_t n_gal;
     uint8_t gal_state[37];
     uint8_t gal_cn0[37];
-    uint16_t gal_metric_x10[37];
+    /* the tracking image's Galileo channels as last seen (5 times a second):
+     * what the log's events compare with (secondary code, side-peak jumps,
+     * losses) and what the Heard rows show */
+    struct GalPrev {
+        uint8_t prn, state, flags, fl_fixes;
+        uint16_t side_jumps, cn0c_x10;
+        uint32_t lock_ms;
+    };
+    GalPrev gal_prev[gal_acq::kMaxTrk];
 };
 
 class GpsView;
@@ -909,9 +917,12 @@ class GpsView : public View {
     size_t sys_tmp_ngal_{0};
     /* The aided Galileo E1 search (ui_gps_gal.cpp): after a precise GPS fix,
      * one satellite at a time in the tracking image's spare M4 time */
-    void* gal_codes_{nullptr};        /* the tracking image's Codes buffer (status) */
-    const void* gal_result_{nullptr}; /* its Result */
-    uint16_t gal_status_seq_{0};      /* searches finished (status) */
+    void* gal_codes_{nullptr};                      /* the tracking image's Codes buffer (status) */
+    const void* gal_result_{nullptr};               /* its Result */
+    const gal_acq::TrkShared* gal_trk_sh_{nullptr}; /* its Galileo channels (status) */
+    uint32_t gal_trk_max_{gal_acq::kMaxTrk};        /* Galileo channels a detection may take (rx_gps.ini gal_trk; 0 = Heard only) */
+    bool gal_off_sent_{true};                       /* the tracking image was told Galileo is off */
+    uint16_t gal_status_seq_{0};                    /* searches finished (status) */
     uint8_t gal_status_busy_{0};
     uint32_t gal_status_cycles_{0};
     bool gal_pending_{false};
@@ -925,6 +936,13 @@ class GpsView : public View {
     void gal_step();
     void gal_collect();
     void gal_reset();
+    void gal_poll();                                       /* copy the Galileo channels, log their events (UI thread, 5/s) */
+    void gal_off();                                        /* the E1 box unticked: the tracking image stops Galileo */
+    const GpsScratch::GalPrev* gal_tracked(int prn) const; /* the channel on that PRN, or nullptr */
+    uint8_t gal_tracking() const;                          /* Galileo channels in use */
+    bool gal_channel(int i, gal_acq::TrkInfo& c) const;    /* copy one Galileo channel (seqlock) */
+    void log_gal_second();
+    void log_gal_event(const gal_acq::TrkInfo& c, const char* event, int32_t a, int32_t b);
     uint8_t gal_heard() const; /* satellites heard in this round */
     void log_gal(const gal_acq::Result& r);
     void image_fallback_ram(); /* no image: use the kept block as plain RAM */

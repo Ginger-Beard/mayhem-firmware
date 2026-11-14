@@ -116,7 +116,10 @@ void GpsView::log_header() {
         "#LOG,event,errors (the log file reopened after the Log box was ticked again)",
         "#IMG,image,result,bytes,load_ms,loads (a baseband image loaded from /APPS)",
         "#SYS,event (view / sky),view,file (1 read 2 missing 3 empty),age_dx10,sats,E up/total,C up/total,R up/total,S up/total,bad_lines",
-        "#GAL,prn,el_deg,pred_code_chips_x100,pred_doppler_hz,clock_term_hz,fix_age_ms,result,metric_x100,cn0_x10,offset_half_samples,side_db_x10,found_doppler,blocks,m4_kcycles,search_s",
+        "#GAL,prn,el_deg,pred_code_chips_x100,pred_doppler_hz,clock_term_hz,fix_age_ms,result,metric_x100,cn0_x10,offset_half_samples,side_db_x10,found_doppler,blocks,m4_kcycles,search_s,handover",
+        "#GTRK,max_ch,active,handovers,refused,preempted,reacq_searches,pool_x10,pool_budget_x10,last_ho_prn,last_ho (Galileo channels, 1/s)",
+        "#GCH,ch,prn,state,mode,flags,cn0c_x10,cn0b_x10,pld_x100,doppler_x10,code_x16,code_err_x1000,lock_ms,side_e_x100,side_l_x100,side_jumps,cs_phase,cs_errs,cs_syncs,fl_fixes,reacq,epochs",
+        "#GEV,prn,event (start / cs / cs_lost / side / lost / found / released),a,b (Galileo channel events; see README)",
     };
     for (const char* h : kHead) log_push(mem_->log, h, std::strlen(h));
 }
@@ -258,6 +261,40 @@ void GpsView::log_gal(const gal_acq::Result& r) {
     f.c(',').s(r.detected ? "heard" : "not found").c(',').u(static_cast<uint32_t>(r.metric * 100.0f)).c(',').u(static_cast<uint32_t>(r.cn0 * 10.0f));
     f.c(',').d(r.offset).c(',').d(static_cast<int32_t>(std::lround(r.side_db * 10.0f))).c(',').d(static_cast<int32_t>(std::lround(r.doppler)));
     f.c(',').u(r.blocks).c(',').u(gal_status_cycles_ / 1000u).c(',').u(static_cast<uint32_t>((chTimeNow() - gal_sent_t_) / CH_FREQUENCY));
+    static const char* const kHo[] = {"-", "tracked", "no room", "already", "-", "search only"};
+    const uint8_t ho = gal_trk_sh_ && gal_trk_sh_->last_ho_prn == r.prn ? gal_trk_sh_->last_ho_result : 0;
+    f.c(',').s(kHo[ho < 6 ? ho : 0]);
+    log_end(f);
+}
+
+/* the Galileo channels once a second (with the E1 box on, while the tracking image runs) */
+void GpsView::log_gal_second() {
+    if (!log_active() || !gal_on_ || !gal_trk_sh_ || !mem_) return;
+    const gal_acq::TrkShared& t = *gal_trk_sh_; /* counters: a torn read only mixes two seconds */
+    {
+        Fmt f = log_row("GTRK");
+        f.c(',').u(t.max_ch).c(',').u(t.active).c(',').u(t.handovers).c(',').u(t.refused).c(',').u(t.preempted).c(',').u(t.reacq_searches);
+        f.c(',').u(t.pool_x10).c(',').u(t.pool_budget_x10).c(',').u(t.last_ho_prn).c(',').u(t.last_ho_result);
+        log_end(f);
+    }
+    for (int i = 0; i < gal_acq::kMaxTrk; i++) {
+        gal_acq::TrkInfo c;
+        if (!gal_channel(i, c) || c.state == gps_trk::TRK_IDLE || c.state == gps_trk::TRK_FAILED) continue;
+        Fmt f = log_row("GCH");
+        f.c(',').u(static_cast<uint32_t>(i)).c(',').c('E').d2(c.prn).c(',').u(c.state).c(',').u(c.mode).c(',');
+        f.s(c.flags & gal_acq::TF_PLL ? "L" : "-").s(c.flags & gal_acq::TF_CS ? "C" : "-").s(c.flags & gal_acq::TF_EVER ? "E" : "-");
+        f.s(c.flags & gal_acq::TF_SIDE ? "S" : "-").s(c.flags & gal_acq::TF_REACQ ? "Q" : "-");
+        f.c(',').u(c.cn0c_x10).c(',').u(c.cn0b_x10).c(',').d(c.pld_x100).c(',').d(static_cast<int32_t>(std::lround(c.doppler_hz * 10.0f))).c(',').u(c.code_x16);
+        f.c(',').d(static_cast<int32_t>(std::lround(c.code_err * 1000.0f))).c(',').u(c.lock_ms).c(',').u(c.side_e_x100).c(',').u(c.side_l_x100).c(',').u(c.side_jumps);
+        f.c(',').u(c.cs_phase).c(',').u(c.cs_errs).c(',').u(c.cs_syncs).c(',').u(c.fl_fixes).c(',').u(c.reacq).c(',').u(c.epochs);
+        log_end(f);
+    }
+}
+
+void GpsView::log_gal_event(const gal_acq::TrkInfo& c, const char* event, int32_t a, int32_t b) {
+    if (!log_active()) return;
+    Fmt f = log_row("GEV");
+    f.c(',').c('E').d2(c.prn).c(',').s(event).c(',').d(a).c(',').d(b);
     log_end(f);
 }
 
@@ -291,6 +328,7 @@ void GpsView::log_second() {
         UsbSerialAsyncmsg::asyncmsg(static_cast<const char*>(mem_->log.row)); /* only with `asyncmsg enable` and a client connected */
     }
     if (!trk_sh_ || !tracking_) return;
+    log_gal_second();
     const gps_trk::Shared& sh = *trk_sh_;
     {
         Fmt f = log_row("M4");
