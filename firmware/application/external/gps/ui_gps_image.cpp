@@ -142,6 +142,7 @@ void GpsView::on_image_ready() {
         view_heard_.show();
         view_fix_.show();
     }
+    if (image_ == gps_image::ID_L1T) gal_reset(); /* a new tracking run: the Galileo search starts over */
     if (pending_track_mask_ && image_ == gps_image::ID_L1T) send_track();
 }
 

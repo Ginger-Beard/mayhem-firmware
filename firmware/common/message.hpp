@@ -2311,7 +2311,8 @@ struct GpsRxConfigMessage : public Message {
     enum Cmd : uint8_t { CMD_STOP = 0, /* stops a search and the tracking */
                          CMD_SEARCH = 1,
                          CMD_TRACK = 2, /* track the PRNs in prn_mask from the last search's results */
-                         CMD_ADD = 3 }; /* while tracking: aided search for one newly risen satellite (add_*) */
+                         CMD_ADD = 3,   /* while tracking: aided search for one newly risen satellite (add_*) */
+                         CMD_GAL = 4 }; /* while tracking: aided Galileo E1 search (add_*; codes in gal_codes of the status) */
     uint8_t cmd{CMD_STOP};
     uint8_t k_ms{20};      /* snapshot length, 1..20 ms */
     uint8_t half_bins{12}; /* Doppler bins of 500 Hz either side of each centre */
@@ -2375,6 +2376,14 @@ struct GpsRxStatusMessage : public Message {
     uint64_t sample_now{0};
     uint64_t results_sample{0};
     uint8_t image{0}; /* the GPS image sending this (gps_image::Id: 1 L1 acquisition, 2 L1 tracking) */
+    /* tracking image: the aided Galileo E1 search (gal_acq.hpp). The app puts a
+     * satellite's codes in gal_codes (gal_acq::Codes, 1 KB) before CMD_GAL;
+     * gal_result (gal_acq::Result) belongs to search number gal_seq. Both live in
+     * the tracking image's RAM: valid while it runs. */
+    void* gal_codes{nullptr};
+    const void* gal_result{nullptr};
+    uint16_t gal_seq{0};
+    uint8_t gal_busy{0};
 };
 
 #endif /*__MESSAGE_H__*/

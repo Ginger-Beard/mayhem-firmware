@@ -49,44 +49,27 @@
 #include <cstdint>
 #include <cstring>
 
+#include "gal_e1.hpp"
+
 namespace gal_acq {
 
-constexpr int kChips = 4092;
 constexpr int kHalf = 2 * kChips;
 constexpr int kN = 8192; /* samples per 4 ms block at 2.048 Msps */
 constexpr double kFs = 2048000.0;
 constexpr double kL1 = 1575.42e6;
 constexpr int kMaxHalfWin = 24; /* samples either side (~12 chips) */
 constexpr int kMaxBins = 5;
-constexpr int kCodeBytes = 512; /* 4092 bits + 4 padding */
-
-struct Codes {
-    uint8_t b[kCodeBytes]; /* E1B (data) */
-    uint8_t c[kCodeBytes]; /* E1C (pilot) */
-};
 
 inline int code_bit(const uint8_t* code, int chip) {
     return (code[chip >> 3] >> (7 - (chip & 7))) & 1;
 }
 
-struct Result {
-    uint8_t prn{0};
-    uint8_t done{0};
-    uint8_t detected{0};
-    uint8_t blocks{0};
-    float metric{0};     /* peak / mean over the cells */
-    float side_db{0};    /* peak over the higher of its +-1.5-sample neighbours (dB): small = ambiguous */
-    float cn0{0};        /* dB-Hz, E1B + E1C */
-    float code_phase{0}; /* chips at the block's first sample */
-    float doppler{0};    /* Hz */
-    int16_t offset{0};   /* half samples from the prediction */
-};
-
 class Searcher {
    public:
     /* peak / mean threshold: 1.2 x the largest of 220 noise trials (8 blocks, +-16
      * samples, 3 bins) on the outdoor test recording (rf_test/gps, run_gps_real_test) */
-    float threshold{3.0f};
+    static constexpr float kThreshold = 3.0f;
+    float threshold{0}; /* 0: kThreshold (every member starts at 0: the object stays in .bss) */
 
     /* a new search: PRN, codes, predicted code phase (chips) at sample
      * `at`, predicted Doppler (Hz, incl. the receiver clock), window half
@@ -129,10 +112,10 @@ class Searcher {
         }
     }
 
-    /* one unit of work, each ~60k M4 cycles or less (gcc -O3: ~14 cycles per
-     * sample in the correlation): a quarter of a bin's carrier wipe, one
-     * replica, or half the samples of one component at one offset. False
-     * when done. */
+    /* one unit of work, each ~40k M4 cycles or less (gcc -O3: ~14 cycles per
+     * sample in the correlation): a quarter of a bin's carrier wipe, a quarter
+     * of one replica, or a quarter of the samples of one component at one
+     * offset. False when done. */
     bool step() {
         switch (phase_) {
             case WIPE:
@@ -142,18 +125,18 @@ class Searcher {
                     unit_ = 0;
                 }
                 return true;
-            case REP:
-                replica(unit_ >> 1, unit_ & 1);
-                if (++unit_ == 4) {
+            case REP: /* 4 replicas in 4 parts each */
+                replica((unit_ >> 3) & 1, (unit_ >> 2) & 1, unit_ & 3);
+                if (++unit_ == 16) {
                     phase_ = CORR;
                     unit_ = 0;
                 }
                 return true;
             case CORR: {
-                /* unit: offset, component, half of the samples */
-                const int d2 = unit_ / 4 - 2 * hw_, comp = (unit_ >> 1) & 1, half = unit_ & 1;
-                correlate(d2, comp, half);
-                if (++unit_ < 4 * (4 * hw_ + 1)) return true;
+                /* unit: offset, component, quarter of the samples */
+                const int d2 = unit_ / 8 - 2 * hw_, comp = (unit_ >> 2) & 1, quarter = unit_ & 3;
+                correlate(d2, comp, quarter);
+                if (++unit_ < 8 * (4 * hw_ + 1)) return true;
                 unit_ = 0;
                 if (++bin_ < nb_) {
                     phase_ = WIPE;
@@ -185,14 +168,15 @@ class Searcher {
     double cp_at_{0};
     uint64_t at_{0}, s0_{0};
     double fd0_{0};
-    int hw_{8}, nb_{3}, blocks_{1}, block_{0}, bin_{0}, filled_{0}, unit_{0};
-    float bin_hz_{125};
+    int hw_{0}, nb_{0}, blocks_{0}, block_{0}, bin_{0}, filled_{0}, unit_{0};
+    float bin_hz_{0};
     Result res_{};
     int8_t raw_[2 * kN]{};
     int8_t y_[2 * kN]{}; /* this bin's carrier-wiped samples */
     int32_t sum_i_{0}, sum_q_{0};
-    int32_t ni_{0}, nq_{0}; /* the first half's sums */
-    float rot_c_{1}, rot_s_{0};
+    int32_t ni_{0}, nq_{0};            /* the sums of the quarters so far */
+    uint32_t rep_hi_{0}, rep_frac_{0}; /* replica phase between its parts */
+    float rot_c_{0}, rot_s_{0};
     /* replica bits (1 = -1) for samples -hw .. kN + hw: [component][half-sample shift] */
     uint32_t rep_[2][2][(kN + 2 * kMaxHalfWin + 31) / 32 + 2]{};
     float part_[2]{}; /* this offset's |E1B|^2 (the E1C one completes it) */
@@ -235,21 +219,26 @@ class Searcher {
 
     /* one replica: the nearest half chip per sample by an integer phase
      * accumulator (2^-32 half chips), BOC(1,1): + then - within a chip */
-    void replica(int comp, int sh) {
+    void replica(int comp, int sh, int part) {
         const double fd = bin_hz_at(bin_);
         const double rate = 2.0 * kChips / kN * (1.0 + fd / kL1); /* half chips per sample */
-        const double dt = (static_cast<double>(s0_) - static_cast<double>(at_)) / kFs;
-        double h = 2.0 * (cp_at_ + dt * 1.023e6 * (1.0 + fd / kL1)) - hw_ * rate + (sh ? 0.5 * rate : 0.0);
-        h = std::fmod(h, static_cast<double>(kHalf));
-        if (h < 0) h += kHalf;
-        uint32_t hi = static_cast<uint32_t>(h);
-        uint32_t frac = static_cast<uint32_t>((h - hi) * 4294967296.0);
         const uint32_t step_frac = static_cast<uint32_t>((rate - std::floor(rate)) * 4294967296.0);
         const uint32_t step_int = static_cast<uint32_t>(rate);
+        if (part == 0) { /* the phase at the window's first sample */
+            const double dt = (static_cast<double>(s0_) - static_cast<double>(at_)) / kFs;
+            double h = 2.0 * (cp_at_ + dt * 1.023e6 * (1.0 + fd / kL1)) - hw_ * rate + (sh ? 0.5 * rate : 0.0);
+            h = std::fmod(h, static_cast<double>(kHalf));
+            if (h < 0) h += kHalf;
+            rep_hi_ = static_cast<uint32_t>(h);
+            rep_frac_ = static_cast<uint32_t>((h - rep_hi_) * 4294967296.0);
+        }
+        uint32_t hi = rep_hi_, frac = rep_frac_;
         const uint8_t* code = comp ? codes_->c : codes_->b;
         uint32_t* r = rep_[comp][sh];
         const int n_bits = kN + 2 * hw_;
-        for (int w = 0; w * 32 < n_bits; w++) {
+        const int n_words = (n_bits + 31) / 32;
+        const int w_begin = part * ((n_words + 3) / 4), w_end = part == 3 ? n_words : (part + 1) * ((n_words + 3) / 4);
+        for (int w = w_begin; w < w_end; w++) {
             uint32_t word = 0;
             for (int b = 0; b < 32; b++) {
                 const uint32_t bit = static_cast<uint32_t>(code_bit(code, static_cast<int>(hi >> 1)) ^ (hi & 1u));
@@ -261,20 +250,22 @@ class Searcher {
             }
             r[w] = word;
         }
-        r[(n_bits + 31) / 32] = 0;
+        rep_hi_ = hi;
+        rep_frac_ = frac;
+        if (part == 3) r[n_words] = 0;
     }
 
-    /* one component at one offset (half samples), half of the samples: the
-     * sums over the samples whose replica chip is -1, then sum - 2 x that */
-    void correlate(int d2, int comp, int half) {
+    /* one component at one offset (half samples), a quarter of the samples:
+     * the sums over the samples whose replica chip is -1, then sum - 2 x that */
+    void correlate(int d2, int comp, int quarter) {
         const int d = d2 >= 0 ? d2 / 2 : -((-d2 + 1) / 2);
         const int sh = d2 & 1;
         const uint32_t* r = rep_[comp][sh];
         const int base = d + hw_; /* bit index of sample 0 */
         const int wsh = base & 31;
-        if (!half) ni_ = nq_ = 0;
+        if (!quarter) ni_ = nq_ = 0;
         int32_t ni = ni_, nq = nq_;
-        const int k_begin = half ? kN / 2 : 0, k_end = half ? kN : kN / 2;
+        const int k_begin = quarter * (kN / 4), k_end = k_begin + kN / 4;
         const int8_t* y = y_ + 2 * k_begin;
         for (int k = k_begin; k < k_end; k += 32) {
             const int wi = (base + k) >> 5;
@@ -289,7 +280,7 @@ class Searcher {
         }
         ni_ = ni;
         nq_ = nq;
-        if (!half) return;
+        if (quarter != 3) return;
         const float ci = static_cast<float>(sum_i_ - 2 * ni), cq = static_cast<float>(sum_q_ - 2 * nq);
         const float p = ci * ci + cq * cq;
         if (comp == 0)
@@ -341,7 +332,7 @@ class Searcher {
         if (cp < 0) cp += kChips;
         res_.code_phase = static_cast<float>(cp);
         res_.blocks = static_cast<uint8_t>(blocks_);
-        res_.detected = res_.metric > threshold ? 1 : 0;
+        res_.detected = res_.metric > (threshold > 0 ? threshold : kThreshold) ? 1 : 0;
         res_.done = 1;
     }
 };

@@ -880,7 +880,14 @@ HeardView::HeardView(GpsView& main, Rect r)
       text_status_{{0, 26, UI_POS_MAXWIDTH, UI_POS_HEIGHT(kStatusRows)}, status_, kStatusRows, &ui::font::fixed_8x16},
       text_list_{{0, UI_POS_Y(3) + 12, 118, 8 * kListRows}, list_, kListRows, &ui::font::fixed_5x8},
       sky_{{120, UI_POS_Y(3) + 12, 120, 120}, "Heard"} {
-    add_children({&field_depth_, &field_sys_, &button_search_, &button_stop_, &text_status_, &text_list_, &sky_});
+    add_children({&field_depth_, &field_sys_, &check_gal_, &button_search_, &button_stop_, &text_status_, &text_list_, &sky_});
+    check_gal_.set_value(main_.gal_on_ != 0);
+    check_gal_.on_select = [this](Checkbox&, bool v) {
+        main_.gal_on_ = v ? 1 : 0;
+        if (!v) main_.gal_pending_ = false; /* a running search finishes; its result is dropped */
+        main_.sys_maybe_start();
+        show();
+    };
     field_sys_.set_selected_index(main_.sys_view_ < VIEW_N ? main_.sys_view_ : 0, false);
     field_sys_.on_change = [this](size_t i, OptionsField::value_t) {
         main_.set_sys_view(static_cast<uint8_t>(i));
@@ -1022,10 +1029,14 @@ void HeardView::show_other() {
     text_list_.begin();
     sky_.clear();
     for (auto& r : list_prn_) r = 0;
+    const bool gal = sys == SYS_GAL && main_.gal_on_;
     {
         Fmt f{b, sizeof(b)};
-        f.s(sys_name(sys)).s(sys == SYS_GLO ? ": own tuning, not yet" : ": not decoded yet");
-        text_status_.set(0, b, yellow);
+        if (gal)
+            f.s("Galileo E1: aided search");
+        else
+            f.s(sys_name(sys)).s(sys == SYS_GLO ? ": own tuning, not yet" : ": not decoded yet");
+        text_status_.set(0, b, gal ? white : yellow);
     }
     const SysSky* k = main_.mem_ ? &main_.mem_->sys : nullptr;
     if (!k || !main_.pos_valid_) {
@@ -1037,9 +1048,19 @@ void HeardView::show_other() {
     } else {
         Fmt f{b, sizeof(b)};
         const double age = main_.sys_age_days();
-        f.s("Predicted up ").u(k->up[sys]);
-        if (age >= 0) f.s(" (alm. ").u(static_cast<uint32_t>(age + 0.5)).s(" d)");
-        text_status_.set(1, b, grey);
+        if (gal && main_.gal_file_ == 2)
+            f.s("No /GPS/GALE1.BIN (README)");
+        else if (gal && main_.gal_file_ == 3)
+            f.s("/GPS/GALE1.BIN: not codes");
+        else if (gal && !(main_.tracking_ && main_.fix_ok_ && main_.fix_mode_ == GpsView::FIX_PRECISE))
+            f.s("waits for a precise GPS fix");
+        else if (gal)
+            f.s("Heard ").u(main_.gal_heard()).s(" of ").u(k->up[sys]).s(" up");
+        else {
+            f.s("Predicted up ").u(k->up[sys]);
+            if (age >= 0) f.s(" (alm. ").u(static_cast<uint32_t>(age + 0.5)).s(" d)");
+        }
+        text_status_.set(1, b, gal && main_.gal_file_ >= 2 ? yellow : grey);
         uint8_t idx[SkyPlot::kMax];
         const size_t n = main_.sys_top(sys, idx, SkyPlot::kMax);
         for (size_t j = 0; j < n; j++) {
@@ -1047,14 +1068,28 @@ void HeardView::show_other() {
             char lbl[4], full[6];
             main_.sys_label(t, lbl, sizeof(lbl));
             main_.sys_label(t, full, sizeof(full));
-            sky_.add(static_cast<int16_t>(t.az2 * 2), t.el, lbl, sys_color(t.sys), false);
+            const uint8_t st = gal && t.prn <= 36 ? main_.mem_->gal_state[t.prn] : 0;
+            sky_.add(static_cast<int16_t>(t.az2 * 2), t.el, lbl, st == 2 ? Color::green() : sys_color(t.sys), st == 2);
             if (j < kListRows - 3) {
                 Fmt g{b, sizeof(b)};
-                g.s(full).s(" el").u(static_cast<uint32_t>(t.el), 2).s(" az").u(static_cast<uint32_t>(t.az2 * 2), 3).s(" pred");
-                text_list_.set(j, b, white);
+                g.s(full).s(" el").u(static_cast<uint32_t>(t.el), 2);
+                Color c = white;
+                if (st == 2) {
+                    g.c(' ').u(main_.mem_->gal_cn0[t.prn]).s(" dB-Hz heard");
+                    c = Color::green();
+                } else if (st == 1) {
+                    g.s(" searching");
+                    c = yellow;
+                } else if (st == 3) {
+                    g.s(" not found");
+                    c = Color::grey();
+                } else {
+                    g.s(" az").u(static_cast<uint32_t>(t.az2 * 2), 3).s(" pred");
+                }
+                text_list_.set(j, b, c);
             }
         }
-        if (sys == SYS_GAL) text_list_.set(kListRows - 2, "Galileo E1: next step", grey);
+        if (sys == SYS_GAL) text_list_.set(kListRows - 2, gal ? "heard only: not in the fix" : "E1 box: aided search", grey);
         if (sys == SYS_BDS) text_list_.set(kListRows - 2, "B1C: C19-C58 only", grey);
         if (sys == SYS_GLO) text_list_.set(kListRows - 2, "1602 MHz: not with GPS", grey);
         if (sys == SYS_SBAS) text_list_.set(kListRows - 2, "SBAS: after Galileo", grey);
@@ -1274,7 +1309,10 @@ void HeardView::show_gps() {
         }
         if (row < last) {
             Fmt f{b, sizeof(b)};
-            f.s("Up: E").u(e).s(" C").u(c).s(" S").u(sb).s(" not decoded");
+            if (main_.gal_on_)
+                f.s("Up: E").u(e).s(" (").u(main_.gal_heard()).s(" heard) C").u(c).s(" S").u(sb);
+            else
+                f.s("Up: E").u(e).s(" C").u(c).s(" S").u(sb).s(" not decoded");
             text_list_.set(row, b, Color::light_grey());
         }
     }
@@ -1995,7 +2033,8 @@ GpsView::GpsView(NavigationView& nav, uint32_t reselect)
            {"tab"sv, &tab_},
            {"depth"sv, &depth_},
            {"log"sv, &log_on_},
-           {"sys"sv, &sys_view_}}},
+           {"sys"sv, &sys_view_},
+           {"gal"sv, &gal_on_}}},
       reselect_{reselect},
       view_fix_{*this, view_rect_},
       view_heard_{*this, view_rect_},
@@ -2365,6 +2404,7 @@ bool GpsView::start_search(Job job, uint8_t k_ms, bool force_full) {
 
 void GpsView::stop_auto() {
     want_job_ = JOB_NONE;
+    gal_pending_ = false; /* the tracking image drops its Galileo search with the loops */
     pending_track_mask_ = 0;
     pending_search_ = false;
     if (image_want_ == gps_image::ID_L1T) image_want_ = gps_image::ID_NONE; /* the switch was not done yet */
@@ -2418,6 +2458,16 @@ void GpsView::on_status(const GpsRxStatusMessage& m) {
     status_.units = m.units;
     status_.unit_cycles = m.unit_cycles;
     sample_clock_.at_status(m.sample_now, chTimeNow()); /* the image's samples on the app's clock */
+    if (m.image == gps_image::ID_L1T) {                 /* the aided Galileo search's buffers and state */
+        gal_codes_ = m.gal_codes;
+        gal_result_ = m.gal_result;
+        gal_status_seq_ = m.gal_seq;
+        gal_status_busy_ = m.gal_busy;
+        gal_status_cycles_ = m.unit_cycles;
+    } else {
+        gal_codes_ = nullptr;
+        gal_result_ = nullptr;
+    }
     if (!mem_ && m.scratch && m.scratch_size >= sizeof(GpsScratch)) {
         mem_ = reinterpret_cast<GpsScratch*>(m.scratch); /* kept across the images: cleared once */
         std::memset(static_cast<void*>(mem_), 0, sizeof(GpsScratch));
@@ -2956,6 +3006,7 @@ void GpsView::on_frame() {
      * device a coarse fix took 62 s while the first pass search ran, and the
      * tracking PVT and the subframe intake waited behind it. */
     if (solving()) return;
+    gal_step(); /* the aided Galileo E1 search (Heard "E1" box): collect, or the next satellite */
     if (geo_active_) {
         geo_step();
         return;

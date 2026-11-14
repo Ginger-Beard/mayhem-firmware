@@ -57,6 +57,7 @@ void GpsView::set_sys_view(uint8_t v) {
 }
 
 bool GpsView::sys_wanted() {
+    if (gal_on_ && tracking_) return true; /* the aided Galileo search needs the orbits */
     if (sys_view_ == VIEW_GPS) return false;
     const uint32_t tab = tab_view_.selected();
     return tab == 1 || tab == 2; /* Heard, Passes */
@@ -74,6 +75,7 @@ void GpsView::sys_maybe_start() {
     std::memset(sys_tmp_total_, 0, sizeof(sys_tmp_total_));
     sys_tmp_toa_ = 0;
     sys_tmp_bad_ = 0;
+    sys_tmp_ngal_ = 0;
     mem_->sys.line_len = 0;
 }
 
@@ -110,6 +112,7 @@ void GpsView::sys_take_line() {
     s.el = static_cast<int8_t>(std::lround(el < -90 ? -90 : (el > 90 ? 90 : el)));
     s.az2 = static_cast<uint8_t>(static_cast<uint32_t>(std::lround((az < 0 ? az + 360 : az) / 2.0)) % 180u);
     sys_tmp_total_[sys]++;
+    if (sys == SYS_GAL && !o.health && sys_tmp_ngal_ < GpsScratch::kMaxGal) mem_->gal[sys_tmp_ngal_++] = gal_alm(o); /* for the aided E1 search */
     if (!o.health && el > 0) sys_tmp_up_[sys]++;
     if (o.toe > sys_tmp_toa_) sys_tmp_toa_ = o.toe;
 }
@@ -119,6 +122,7 @@ void GpsView::sys_finish(uint8_t file_state) {
     sys_active_ = false;
     SysSky& k = mem_->sys;
     k.n = static_cast<uint8_t>(sys_tmp_n_);
+    mem_->n_gal = static_cast<uint8_t>(sys_tmp_ngal_);
     std::memcpy(k.up, sys_tmp_up_, sizeof(k.up));
     std::memcpy(k.total, sys_tmp_total_, sizeof(k.total));
     k.toa_newest = sys_tmp_toa_;
