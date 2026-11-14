@@ -468,6 +468,7 @@ class Channel {
         prn_ = static_cast<uint8_t>(prn);
         lp_ = lp;
         reacq_ = 0;
+        why_ = LOSS_NONE;
         xs_ = 0;
         ever_ok_ = released_ = rel_reported_ = false;
         aided_ = false;
@@ -522,6 +523,8 @@ class Channel {
         o.sweeps = sweeps_;
         o.code_err = code_err_;
         o.half_fixes = half_fixes_;
+        o.why = why_;
+        o.keep = 0;
     }
     uint8_t flags() const {
         uint8_t f = 0;
@@ -557,7 +560,7 @@ class Channel {
         lp_.verify_timeout_ms = 0;
         aided_ = true;
         good_freq_ = doppler_hz;
-        lost();
+        lost(LOSS_START);
         reacq_ = 0;
         s_wmax_ = static_cast<uint8_t>(wmax < 0 ? 0 : (wmax > 40 ? 40 : wmax));
     }
@@ -572,7 +575,7 @@ class Channel {
     static constexpr int kXsWmax = 68;
     __attribute__((noinline)) void start_xsearch(int k, int n) {
         good_freq_ = freq_;
-        lost();
+        lost(LOSS_START);
         reacq_ = 0;
         xs_ = 1;
         s_ndop_ = 1;
@@ -605,7 +608,7 @@ class Channel {
         shift_code((xs_ == 3 ? off - xs_off_ : off) - s_off_);
         xs_ = 0;
         if (wmax > 0) {
-            lost();
+            lost(LOSS_START);
             s_wmax_ = static_cast<uint8_t>(wmax > 40 ? 40 : wmax);
         } else {
             restart(s_f0_);
@@ -656,6 +659,7 @@ class Channel {
     uint8_t prn_{0};
     uint8_t state_{TRK_IDLE};
     uint8_t reacq_{0};
+    uint8_t why_{0};      /* LossWhy of the last loss */
     float freq_{0};       /* carrier NCO, Hz (float: 0.5 mHz steps at 7 kHz) */
     float freq_int_{0};   /* loop integrator, Hz */
     float code_corr_{0};  /* DLL correction, chips/s */
@@ -802,7 +806,7 @@ class Channel {
     void search_epoch(float ie, float qe, float ip, float qp, float il, float ql);
     void bit_epoch(float ip, bool valid, Shared* sh, int ch);
     void got_bit(int b, Shared* sh, int ch);
-    void lost();
+    void lost(uint8_t why);
     __attribute__((noinline)) void xs_track() { /* the code the loops moved since an offset-search hit */
         xs_acc_ += 2e-3f * (code_corr_ + static_cast<float>(kChip / kL1) * (freq_ - s_f0_));
     }
@@ -1024,8 +1028,9 @@ inline void Channel::epoch_skipped(Shared* sh, int ch) {
     if (state_ == TRK_TRACK) track_ms_++;
 }
 
-__attribute__((noinline)) inline void Channel::lost() {
+__attribute__((noinline)) inline void Channel::lost(uint8_t why) {
     if (++reacq_ == 0) reacq_ = 255;
+    why_ = why;
     state_ = TRK_SEARCH;
     el_all_ = true;
     sweeps_ = 0;
@@ -1274,12 +1279,12 @@ inline void Channel::track_epoch(float ip, float qp, float id, float qd, bool va
         /* lost: three windows in a row below, or the smoothed estimate below after
          * half a second (noise alone gives scattered single windows above 25) */
         if ((cn0_low_ >= 3 && cn0_wins_ >= 3) || (cn0_wins_ >= 5 && cn0_ < kLossCn0 - 2.0f)) {
-            lost();
+            lost(LOSS_CN0);
             return;
         }
     }
     if (state_ == TRK_PULLIN && mode_ms_ > kPullinMaxMs) {
-        lost();
+        lost(LOSS_PULLIN);
         return;
     }
     if (state_ == TRK_TRACK && !verified_) {
@@ -1289,7 +1294,7 @@ inline void Channel::track_epoch(float ip, float qp, float id, float qd, bool va
             verify_ms_ = 0;
         if (verify_ms_ >= 1000) verified_ = true;
         if (track_ms_ > 6000 && !pll_lock_ && cn0_ < kVerifyCn0) { /* never locked properly */
-            lost();
+            lost(LOSS_NOLOCK);
             return;
         }
     }

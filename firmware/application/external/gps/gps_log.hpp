@@ -84,6 +84,19 @@ inline void log_taken(LogRing& r, size_t n) {
     r.tail += static_cast<uint32_t>(n);
 }
 
+/* The header (a constant text, written before any queued row so it never
+ * fills the ring): the next piece of it at file position pos, from header
+ * offset done, by the same sector rule. 0 when it is all written. */
+inline size_t log_head_piece(const char* head, size_t len, size_t done, uint32_t pos, const char** p) {
+    if (done >= len) return 0;
+    size_t n = len - done;
+    const size_t room = kLogSector - pos % kLogSector;
+    const size_t cap = room < kLogSector ? room : kLogSector - 1;
+    if (n > cap) n = cap;
+    *p = head + done;
+    return n;
+}
+
 }  // namespace ui::external_app::gps
 
 #endif /*__GPS_LOG_H__*/

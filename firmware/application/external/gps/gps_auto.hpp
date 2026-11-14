@@ -91,6 +91,15 @@ struct AutoState {
 };
 
 void auto_reset(AutoState& a); /* also the PVT's correction defaults (troposphere model, 5 deg mask) */
+/* Get fix again: the ring counters, channel table, measurement and PVT work
+ * start over (the new tracking loops count from 0); the partial subframe 1-3
+ * collections, the almanac pages, the ionosphere and the week are kept, so a
+ * restart does not throw away what was decoded. Subframes older than
+ * kAutoKeepS against a newer one of the same satellite are dropped when it
+ * arrives; the IODE / IODC check keeps issues from mixing. */
+void auto_new_run(AutoState& a);
+#define GPS_AUTO_NEW_RUN 1
+constexpr uint32_t kAutoKeepS = 7200;
 
 /* One parity-checked subframe. Updates week / TOW / almanac pages; when it
  * completes a satellite's subframes 1-3 the ephemeris replaces table[prn-1]

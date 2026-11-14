@@ -416,6 +416,8 @@ class FixView : public View {
     void show_blocker(size_t row);
     void show_auto();
     void show_log_error();
+    void show_ant();                           /* "Ant power OFF" on the bottom row (read only) */
+    void show_subframes(size_t r0, size_t r1); /* per tracked satellite: subframes 1-3 held */
     static constexpr size_t kRows = 11;
     TextLines::Line lines_[kRows]{};
     TextLines text_;
@@ -846,7 +848,8 @@ class GpsView : public View {
     uint32_t log_pos_{0};
     systime_t log_sync_t_{0}, log_sec_t_{0}, log_retry_t_{0};
     bool log_dirty_{false};
-    bool log_started_{false}; /* header and START row queued */
+    bool log_started_{false};  /* header and START row queued */
+    uint16_t log_head_pos_{0}; /* header bytes written (straight from flash, before the ring) */
     uint16_t log_errs_{0};
     uint8_t log_eph_tick_{0};
     const char* log_err_{nullptr};
@@ -858,6 +861,7 @@ class GpsView : public View {
     void log_header();
     void log_start_row();
     void log_frame();
+    bool log_write_some(int n); /* header rest, then queued rows: up to n sector-bounded pieces */
     void log_open();
     void log_close();
     void log_fail(const char* what);
@@ -874,6 +878,16 @@ class GpsView : public View {
     void log_solve_start(uint8_t kind);
     void log_fix(uint8_t kind, bool ok, const char* why);
     void log_error(const char* what, const char* detail);
+    /* a button, tab, method, box (UI row): what the user did, in order with the rest */
+    void log_ui(const char* event, const char* detail);
+    /* channel events (EV rows): lost / found / coast / released, from the
+     * channel table's state, re-acquisition count and loss reason */
+    void log_ch_events();
+    uint8_t ev_prn_[gps_trk::kMaxCh]{}, ev_state_[gps_trk::kMaxCh]{}, ev_reacq_[gps_trk::kMaxCh]{}, ev_mode_[gps_trk::kMaxCh]{};
+    bool iq_skip_logged_{false}; /* this hand-over's "IQ skipped" row */
+    void log_iq_skip(const char* source, const char* why, uint32_t v);
+    systime_t autos_sf_t_{0}; /* app clock of the last subframe taken (0: none): partial sets kept up to kAutoKeepS */
+    uint32_t autos_sf_seen_{0};
     void stop_auto();
     void load_position();
     void start_load();
@@ -1041,6 +1055,12 @@ class GpsView : public View {
      * user does, with Mayhem's status-bar control or Settings > Radio. */
     Text text_ant_{{UI_POS_X(22), UI_POS_Y(0), UI_POS_WIDTH(8), UI_POS_HEIGHT(1)}, ""};
     void show_antenna();
+    /* the stored antenna-power setting is off (read only: the app never writes it) */
+    bool ant_off() const;
+    /* the level (AC rms, LSB x10) below which the input is called low: at high
+     * gains (LNA >= 32, VGA >= 40) an active antenna gives ~10-14 LSB and the
+     * front end alone ~4.5, so below 7 the antenna adds nothing (unpowered?) */
+    uint16_t level_low_x10() const;
 
     Rect view_rect_{0, UI_POS_Y(1) + 24, screen_width, static_cast<Dim>(screen_height - UI_POS_Y(1) - 24 - UI_POS_Y(1))};
     FixView view_fix_;

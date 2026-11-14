@@ -169,6 +169,7 @@ void GpsView::send_track(bool neg_dop) {
     m.conj = iq_conj_ ^ iq_trk_flip_;
     track_mask_ = pending_track_mask_;
     track_t_ = chTimeNow();
+    iq_skip_logged_ = false; /* this hand-over's mirrored-spectrum check */
     pending_track_mask_ = 0;
     baseband::gps_rx_config(m);
 }
@@ -195,14 +196,24 @@ void GpsView::iq_flip(bool trk, uint32_t n) {
  * spectrum mirrored (each image start sets up the stream anew). Once per
  * hand-over: flip, and hand the same detections over again, Dopplers negated. */
 void GpsView::iq_trk_check() {
-    if (iq_trk_retried_ || !trk_sh_ || !results_ || !track_mask_ || iq_flips_ >= kIqMaxFlips) return;
+    if (iq_trk_retried_ || !trk_sh_ || !results_ || !track_mask_) return;
     if (chTimeNow() - track_t_ < kIqTrkWait || trk_sh_->xs_found) return;
+    if (iq_flips_ >= kIqMaxFlips) {
+        log_iq_skip("skipped_tracking", "all corrections of this session used", iq_flips_);
+        return;
+    }
     float best = 0;
     for (int p = 0; p < 32; p++)
         if (((track_mask_ >> p) & 1u) && results_[p].cn0 > best) best = results_[p].cn0;
-    if (best < 40.0f) return; /* weak ones may just need longer */
+    if (best < 40.0f) { /* weak ones may just need longer */
+        log_iq_skip("skipped_tracking", "best C/N0 below 40 (x10)", static_cast<uint32_t>(best * 10.0f + 0.5f));
+        return;
+    }
     for (int i = 0; i < gps_trk::kMaxCh; i++)
-        if (trk_sh_->ch[i].flags & (gps_trk::F_EVER | gps_trk::F_VERIFIED)) return;
+        if (trk_sh_->ch[i].flags & (gps_trk::F_EVER | gps_trk::F_VERIFIED)) {
+            log_iq_skip("skipped_tracking", "a channel verified (prn)", trk_sh_->ch[i].prn);
+            return;
+        }
     iq_trk_retried_ = true;
     iq_flip(true, static_cast<uint32_t>(best + 0.5f));
     pending_track_mask_ = track_mask_;

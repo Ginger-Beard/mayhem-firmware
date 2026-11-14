@@ -35,7 +35,29 @@ void auto_reset(AutoState& a) {
     a.pvt.mask_deg = 5.0f;
 }
 
+void auto_new_run(AutoState& a) {
+    /* the new tracking loops count from 0: ring counters, channels, measurement
+     * and solver state start over; what was decoded off the air stays */
+    a.ch_n = 0;
+    a.have_meas = 0;
+    a.sf_read = 0;
+    a.meas_seq = 0;
+    a.sf_total = a.sf_eph = 0;
+    a.tow_at_sample = 0;
+    std::memset(static_cast<void*>(&a.meas), 0, sizeof(a.meas));
+    std::memset(static_cast<void*>(a.ch), 0, sizeof(a.ch));
+    std::memset(static_cast<void*>(&a.pvt), 0, sizeof(a.pvt));
+    a.pvt.tropo = 2;
+    a.pvt.mask_deg = 5.0f;
+}
+
 namespace {
+
+/* seconds between two times of week (either order, across the week's end) */
+uint32_t tow_dist(uint32_t a, uint32_t b) {
+    const uint32_t d = a > b ? a - b : b - a;
+    return d > 302400u ? 604800u - d : d;
+}
 
 EphCollect* slot_for(AutoState& a, uint8_t prn) {
     EphCollect* free_slot = nullptr;
@@ -95,8 +117,12 @@ int auto_take_subframe(AutoState& a, const gps_trk::SubframeSlot& s, int32_t wee
     if (id >= 1 && id <= 3) {
         EphCollect* c = slot_for(a, s.prn);
         if (!c) return 0;
-        /* a new issue (IODE / IODC) restarts the set */
+        /* a new issue (IODE / IODC) restarts the set; subframes kept from an earlier
+         * Get fix are dropped once over kAutoKeepS older than this one */
         const int k = id - 1;
+        for (int j = 0; j < 3; j++)
+            if (j != k && ((c->have >> j) & 1u) && tow_dist(nav::sf_tow_start(c->sf[j]), a.tow_s) > kAutoKeepS)
+                c->have = static_cast<uint8_t>(c->have & ~(1u << j));
         std::memcpy(c->sf[k], w, sizeof(c->sf[k]));
         c->have |= static_cast<uint8_t>(1u << k);
         c->pending = 0;
