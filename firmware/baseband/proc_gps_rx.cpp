@@ -36,10 +36,13 @@ static gps_keep::Block& keep = *gps_keep::block();
 static const gps_trk::CarrierTable carrier_table;
 /* a fresh Tracker for each hand-over (it clears the shared block's counters) */
 alignas(8) static uint8_t tracker_mem[sizeof(gps_trk::Tracker)];
-/* the aided Galileo E1 search: ~42 KB (a raw and a wiped 4 ms block) and the
- * codes the app puts here */
+/* the aided Galileo E1 search: ~42 KB (a raw and a wiped 4 ms block, the
+ * codes' half-chip streams), the codes the app puts here, the Galileo
+ * channels' output for the app */
 static gal_acq::Searcher gal_search;
 static gal_acq::Codes gal_codes;
+static gal_acq::TrkShared gal_shared;
+static gps_trk::GalService gal_svc{gal_search};
 #else
 /* Big working memory, outside the processor object (bss). */
 alignas(8) static gps_acq::Snapshot snapshot;
@@ -64,14 +67,19 @@ GpsRxProcessor::GpsRxProcessor() {
 
 #if defined(BASEBAND_gps_l1t)
 
-void GpsRxProcessor::start_tracking(uint32_t prn_mask, uint32_t age_ms) {
+/* commands and status: rare, small rather than fast (the tracking image's
+ * code region is nearly full) */
+#define GPS_RX_COLD __attribute__((optimize("Os")))
+
+GPS_RX_COLD void GpsRxProcessor::start_tracking(uint32_t prn_mask, uint32_t age_ms) {
     const gps_acq::Result* res = keep.results;
     int n = 0;
     for (int i = 0; i < 32; i++)
         if (((prn_mask >> i) & 1u) && res[i].detected && !res[i].once) n++;
     if (!n) return;
     stop_tracking();
-    trk_ = new (tracker_mem) gps_trk::Tracker(&keep.shared, &carrier_table);
+    gal_svc.stop(); /* a search refers to the old tracker's channels */
+    trk_ = new (tracker_mem) gps_trk::Tracker(&keep.shared, &carrier_table, &gal_shared);
     trk_->set_max_active(max_ch_);
     /* unconfirmed detections (no second snapshot): the loops verify them, and
      * one that never verifies gives its channel back (to a spare detection) */
@@ -92,7 +100,7 @@ void GpsRxProcessor::start_tracking(uint32_t prn_mask, uint32_t age_ms) {
     send_status();
 }
 
-void GpsRxProcessor::stop_tracking() {
+GPS_RX_COLD void GpsRxProcessor::stop_tracking() {
     if (!trk_) return;
     trk_->reset(samples_);
     trk_->publish();
@@ -100,7 +108,7 @@ void GpsRxProcessor::stop_tracking() {
     trk_ = nullptr;
 }
 
-void GpsRxProcessor::apply() {
+GPS_RX_COLD void GpsRxProcessor::apply() {
     pending_ = false;
     switch (req_.cmd) {
         case GpsRxConfigMessage::CMD_ADD: /* the loops keep running */
@@ -110,9 +118,14 @@ void GpsRxProcessor::apply() {
                 trk_->publish();
             }
             return;
-        case GpsRxConfigMessage::CMD_GAL: /* the loops keep running; one satellite at a time */
-            if (trk_ && req_.add_prn >= 1 && req_.add_prn <= 50) {
-                gal_search.start(req_.add_prn, &gal_codes, req_.add_code, req_.add_at, req_.add_doppler, req_.add_windows, 1, 100.0f, 8);
+        case GpsRxConfigMessage::CMD_GAL:    /* the loops keep running; one satellite at a time */
+            if (trk_ && req_.add_prn == 0) { /* Galileo off */
+                gal_svc.stop();
+                trk_->gal_off();
+                trk_->publish();
+            } else if (trk_ && req_.add_prn <= 50) {
+                trk_->set_max_gal(req_.gal_max);
+                gal_svc.app_search(req_.add_prn, &gal_codes, req_.add_code, req_.add_at, req_.add_doppler, req_.add_windows, req_.gal_max > 0);
                 gal_cycles_ = 0;
             }
             return;
@@ -122,7 +135,7 @@ void GpsRxProcessor::apply() {
             start_tracking(req_.prn_mask, req_.age_ms);
             return;
         default: /* stop (a search is the acquisition image's job) */
-            gal_search.stop();
+            gal_svc.stop();
             stop_tracking();
             state_ = GpsRxStatusMessage::IDLE;
             send_status();
@@ -173,9 +186,10 @@ void GpsRxProcessor::send_status() {
     status_.unit_cycles = gal_cycles_; /* tracking image: this Galileo search's M4 cycles so far */
     status_.dt_ms = 0;
     status_.gal_codes = &gal_codes;
-    status_.gal_result = &gal_search.result();
-    status_.gal_seq = gal_seq_;
-    status_.gal_busy = gal_search.busy() ? 1 : 0;
+    status_.gal_result = &gal_svc.result();
+    status_.gal_seq = gal_svc.seq();
+    status_.gal_busy = gal_svc.busy() ? 1 : 0;
+    status_.gal_track = &gal_shared;
 #else
     status_.level = session.level();
     status_.confirming = session.confirming();
@@ -225,18 +239,13 @@ void GpsRxProcessor::execute(const buffer_c8_t& buffer) {
     const uint32_t t0 = DWT->CYCCNT;
     trk_->process(reinterpret_cast<const int8_t*>(buffer.p), samples_ - buffer.count);
     uint32_t dt = DWT->CYCCNT - t0;
-    if (gal_search.busy()) { /* Galileo: capture, or one unit of work when the loops left room */
+    { /* Galileo: the searcher captures, or works in units of <= ~40k cycles while the
+       * buffer's total stays under the budget; a detection may start a channel */
         const uint32_t g0 = DWT->CYCCNT;
-        if (gal_search.wants_samples())
-            gal_search.put(reinterpret_cast<const int8_t*>(buffer.p), static_cast<int>(buffer.count), samples_ - buffer.count);
-        else /* units of <= ~40k cycles while the buffer's total stays under the budget */
-            while (dt + (DWT->CYCCNT - g0) + kGalUnit < kGalBudget && !gal_search.wants_samples())
-                if (!gal_search.step()) {
-                    gal_seq_++; /* done: the result is in gal_search.result() */
-                    break;
-                }
+        gal_svc.run(trk_, reinterpret_cast<const int8_t*>(buffer.p), static_cast<int>(buffer.count), samples_ - buffer.count,
+                    [&] { return dt + (DWT->CYCCNT - g0) + kGalUnit < kGalBudget; });
         const uint32_t g = DWT->CYCCNT - g0;
-        gal_cycles_ += g;
+        if (gal_svc.app_busy()) gal_cycles_ += g;
         dt += g; /* the M4 load shown includes it */
     }
     if ((trk_buffers_ & 63u) == 0) { /* the input level, one buffer in 64 (~12k cycles) */
@@ -313,6 +322,7 @@ void GpsRxProcessor::on_message(const Message* const message) {
             req_.add_code = m.add_code;
             req_.add_doppler = m.add_doppler;
             req_.add_at = m.add_at;
+            req_.gal_max = m.gal_max;
             pending_ = true;
             return;
         }

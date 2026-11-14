@@ -51,6 +51,12 @@
 
 #include "gal_e1.hpp"
 
+/* cold code (once per search step or per 4 ms epoch, not per sample): small
+ * rather than fast, the tracking image's code region is the constraint */
+#if !defined(GAL_COLD)
+#define GAL_COLD __attribute__((noinline, optimize("Os")))
+#endif
+
 namespace gal_acq {
 
 constexpr int kHalf = 2 * kChips;
@@ -59,9 +65,32 @@ constexpr double kFs = 2048000.0;
 constexpr double kL1 = 1575.42e6;
 constexpr int kMaxHalfWin = 24; /* samples either side (~12 chips) */
 constexpr int kMaxBins = 5;
+/* A code as the BOC(1,1) half-chip stream the correlators read (search and
+ * tracking): bit b (LSB first) = half chip (b - 2) mod kHalf, 1 = -1; half chip
+ * h = chip h / 2 XOR (h & 1) (+ then - within a chip). The two leading half
+ * chips and the wrapped tail let a 64-bit window at any prompt index reach
+ * two half chips either side. */
+constexpr int kStreamWords = 258; /* 8256 bits: 8184 + 2 before + 70 wrapped */
+constexpr int kStreamLead = 2;
 
 inline int code_bit(const uint8_t* code, int chip) {
     return (code[chip >> 3] >> (7 - (chip & 7))) & 1;
+}
+
+/* Words [w_begin, w_end) of a code's half-chip stream (~160 cycles per word). */
+inline void expand_stream(const uint8_t* code, uint32_t* hc, int w_begin, int w_end) {
+    for (int w = w_begin; w < w_end; w++) {
+        int h = 32 * w - kStreamLead; /* even: the stream starts on a chip boundary */
+        if (h < 0) h += kHalf;
+        uint32_t word = 0;
+        for (int k = 0; k < 32; k += 2) {
+            const uint32_t c = static_cast<uint32_t>(code_bit(code, h >> 1));
+            word |= (c | ((c ^ 1u) << 1)) << k;
+            h += 2;
+            if (h >= kHalf) h -= kHalf;
+        }
+        hc[w] = word;
+    }
 }
 
 class Searcher {
@@ -73,8 +102,10 @@ class Searcher {
 
     /* a new search: PRN, codes, predicted code phase (chips) at sample
      * `at`, predicted Doppler (Hz, incl. the receiver clock), window half
-     * width (samples), Doppler bins either side and their step, blocks */
-    void start(int prn, const Codes* codes, double code_phase_at, uint64_t at, double doppler, int half_win, int bins_each_side, float bin_hz, int blocks) {
+     * width (samples), Doppler bins either side and their step, blocks.
+     * codes == nullptr: the half-chip streams are already loaded
+     * (load_streams: a tracking channel's re-acquisition). */
+    GAL_COLD void start(int prn, const Codes* codes, double code_phase_at, uint64_t at, double doppler, int half_win, int bins_each_side, float bin_hz, int blocks) {
         prn_ = prn;
         codes_ = codes;
         cp_at_ = code_phase_at;
@@ -87,15 +118,26 @@ class Searcher {
         block_ = 0;
         filled_ = 0;
         bin_ = 0;
-        phase_ = CAPTURE;
+        unit_ = 0;
+        phase_ = codes ? EXPAND : CAPTURE; /* the streams first (a few units), then the samples */
         std::memset(power_, 0, sizeof(power_));
         res_ = Result{};
         res_.prn = static_cast<uint8_t>(prn);
     }
     bool busy() const { return phase_ != IDLE; }
+    int phase() const { return phase_; } /* diagnostics (the M4 bench): 1 codes, 2 capture, 3 wipe, 4 replica, 5 correlation */
     bool wants_samples() const { return phase_ == CAPTURE; }
     const Result& result() const { return res_; }
     void stop() { phase_ = IDLE; }
+    /* the sample Result::code_phase refers to (first sample of the last block) */
+    uint64_t block_sample() const { return s0_; }
+    /* the codes as half-chip streams (comp 0 E1B, 1 E1C): what a tracking
+     * channel takes over after a detection */
+    const uint32_t* stream(int comp) const { return hc_[comp & 1]; }
+    void load_streams(const uint32_t* b, const uint32_t* c) {
+        std::memcpy(hc_[0], b, sizeof(hc_[0]));
+        std::memcpy(hc_[1], c, sizeof(hc_[1]));
+    }
 
     /* samples of this image's clock: the block starts with the first buffer
      * given while capturing (first_sample: its index) */
@@ -116,8 +158,17 @@ class Searcher {
      * sample in the correlation): a quarter of a bin's carrier wipe, a quarter
      * of one replica, or a quarter of the samples of one component at one
      * offset. False when done. */
-    bool step() {
+    __attribute__((noinline)) bool step() {
         switch (phase_) {
+            case EXPAND: { /* 4 units: E1B, E1C, half of the stream each */
+                const int comp = unit_ >> 1, half = kStreamWords / 2;
+                expand_stream(comp ? codes_->c : codes_->b, hc_[comp], (unit_ & 1) ? half : 0, (unit_ & 1) ? kStreamWords : half);
+                if (++unit_ == 4) {
+                    unit_ = 0;
+                    phase_ = CAPTURE;
+                }
+                return true;
+            }
             case WIPE:
                 wipe_part(unit_);
                 if (++unit_ == 4) {
@@ -158,6 +209,7 @@ class Searcher {
 
    private:
     enum Phase : uint8_t { IDLE,
+                           EXPAND,
                            CAPTURE,
                            WIPE,
                            REP,
@@ -171,6 +223,7 @@ class Searcher {
     int hw_{0}, nb_{0}, blocks_{0}, block_{0}, bin_{0}, filled_{0}, unit_{0};
     float bin_hz_{0};
     Result res_{};
+    uint32_t hc_[2][kStreamWords]{}; /* E1B, E1C half-chip streams */
     int8_t raw_[2 * kN]{};
     int8_t y_[2 * kN]{}; /* this bin's carrier-wiped samples */
     int32_t sum_i_{0}, sum_q_{0};
@@ -187,15 +240,17 @@ class Searcher {
 
     /* the carrier at each 16-sample group's centre (|fd| < 6 kHz: < 0.1 dB),
      * by a float rotation; samples scaled to stay within int8 */
-    void wipe_part(int q) {
+    __attribute__((noinline)) void wipe_part(int q) {
         const float w = static_cast<float>(-2.0 * 3.14159265358979 * bin_hz_at(bin_) / kFs);
         const int k_begin = q * (kN / 4), k_end = k_begin + kN / 4;
+        /* double cos / sin: the image links them anyway (the carrier table); the
+         * float ones would add ~2.6 KB of argument reduction */
         if (q == 0) {
-            rot_c_ = std::cos(8.0f * w);
-            rot_s_ = std::sin(8.0f * w);
+            rot_c_ = static_cast<float>(std::cos(static_cast<double>(w) * 8));
+            rot_s_ = static_cast<float>(std::sin(static_cast<double>(w) * 8));
             sum_i_ = sum_q_ = 0;
         }
-        const float dc = std::cos(16.0f * w), ds = std::sin(16.0f * w);
+        const float dc = static_cast<float>(std::cos(static_cast<double>(w) * 16)), ds = static_cast<float>(std::sin(static_cast<double>(w) * 16));
         for (int k0 = k_begin; k0 < k_end; k0 += 16) {
             const int c = static_cast<int>(rot_c_ * 180.0f), s = static_cast<int>(rot_s_ * 180.0f);
             for (int k = k0; k < k0 + 16; k++) {
@@ -219,7 +274,7 @@ class Searcher {
 
     /* one replica: the nearest half chip per sample by an integer phase
      * accumulator (2^-32 half chips), BOC(1,1): + then - within a chip */
-    void replica(int comp, int sh, int part) {
+    __attribute__((noinline)) void replica(int comp, int sh, int part) {
         const double fd = bin_hz_at(bin_);
         const double rate = 2.0 * kChips / kN * (1.0 + fd / kL1); /* half chips per sample */
         const uint32_t step_frac = static_cast<uint32_t>((rate - std::floor(rate)) * 4294967296.0);
@@ -233,7 +288,7 @@ class Searcher {
             rep_frac_ = static_cast<uint32_t>((h - rep_hi_) * 4294967296.0);
         }
         uint32_t hi = rep_hi_, frac = rep_frac_;
-        const uint8_t* code = comp ? codes_->c : codes_->b;
+        const uint32_t* hc = hc_[comp];
         uint32_t* r = rep_[comp][sh];
         const int n_bits = kN + 2 * hw_;
         const int n_words = (n_bits + 31) / 32;
@@ -241,8 +296,8 @@ class Searcher {
         for (int w = w_begin; w < w_end; w++) {
             uint32_t word = 0;
             for (int b = 0; b < 32; b++) {
-                const uint32_t bit = static_cast<uint32_t>(code_bit(code, static_cast<int>(hi >> 1)) ^ (hi & 1u));
-                word |= bit << b;
+                const uint32_t hb = hi + kStreamLead;
+                word |= ((hc[hb >> 5] >> (hb & 31u)) & 1u) << b;
                 const uint32_t f2 = frac + step_frac;
                 hi += step_int + (f2 < frac ? 1u : 0u);
                 frac = f2;
@@ -257,7 +312,7 @@ class Searcher {
 
     /* one component at one offset (half samples), a quarter of the samples:
      * the sums over the samples whose replica chip is -1, then sum - 2 x that */
-    void correlate(int d2, int comp, int quarter) {
+    __attribute__((noinline)) void correlate(int d2, int comp, int quarter) {
         const int d = d2 >= 0 ? d2 / 2 : -((-d2 + 1) / 2);
         const int sh = d2 & 1;
         const uint32_t* r = rep_[comp][sh];
@@ -289,7 +344,7 @@ class Searcher {
             power_[bin_][d2 + 2 * hw_] += part_[0] + p;
     }
 
-    void finish() {
+    GAL_COLD void finish() {
         const int nd = 4 * hw_ + 1;
         float best = 0, sum = 0;
         int bb = 0, bd = 0;

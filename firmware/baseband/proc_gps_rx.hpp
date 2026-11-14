@@ -36,7 +36,9 @@
  * which run on every DMA buffer and publish channels, parity-checked
  * subframes and once-a-second transmit-time measurements in the kept block
  * (gps_trk::Shared); CMD_ADD starts an aided search for a newly risen
- * satellite; lost channels search locally. */
+ * satellite; lost channels search locally. CMD_GAL: an aided Galileo E1
+ * search (gal_acq.hpp); a detection may go to a Galileo channel (gal_trk.hpp)
+ * when the app allows and the channel pool has room. */
 
 #include "baseband_processor.hpp"
 #include "baseband_thread.hpp"
@@ -82,6 +84,7 @@ class GpsRxProcessor : public BasebandProcessor {
         uint8_t add_prn{0}, add_windows{0};
         float add_code{0}, add_doppler{0};
         uint64_t add_at{0};
+        uint8_t gal_max{0};
     } req_{};
 
     uint8_t state_{GpsRxStatusMessage::IDLE};
@@ -105,13 +108,12 @@ class GpsRxProcessor : public BasebandProcessor {
     uint32_t trk_cycles_sum_{0}, trk_cycles_max_{0}, trk_buffers_{0};
     void start_tracking(uint32_t prn_mask, uint32_t age_ms);
     void stop_tracking();
-    /* the aided Galileo E1 search: one unit per buffer when the loops leave room */
-    /* a unit only while the buffer's tracking + Galileo cycles stay under the
-     * budget (of 204k per 1 ms buffer): the loops come first */
+    /* the Galileo searcher (the app's aided searches, re-acquisitions of lost
+     * Galileo channels): a unit only while the buffer's tracking + Galileo
+     * cycles stay under the budget (of 204k per 1 ms buffer): the loops come first */
     static constexpr uint32_t kGalBudget = 180000;
     static constexpr uint32_t kGalUnit = 45000; /* the largest unit, with margin */
-    uint16_t gal_seq_{0};
-    uint32_t gal_cycles_{0}; /* this search's M4 cycles (diagnostics) */
+    uint32_t gal_cycles_{0};                    /* the app's current search's M4 cycles (diagnostics) */
 #else
     static constexpr uint8_t kSettleBuffers = 20; /* 20 ms skipped before a capture: LO / gain settling after enable */
     uint8_t settle_{0};

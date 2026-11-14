@@ -26,8 +26,12 @@
  * plus the receiver clock term measured on the GPS channels; its codes read
  * from /GPS/GALE1.BIN (1 KB) into the tracking image's buffer; CMD_GAL; the
  * image searches in the M4 time the loops leave (gal_acq.hpp) and reports.
- * Heard only: nothing of Galileo enters the fix yet. GPS is unchanged when
- * the box is off (no command, no file read, no extra M4 work). */
+ * A detection goes to a Galileo tracking channel (gal_trk.hpp) when
+ * rx_gps.ini's gal_trk allows (default 4, 0 = search only) and the channel
+ * pool has room: GPS keeps its channels, Galileo gets what the M4 time
+ * leaves. Nothing of Galileo enters the fix yet. GPS is unchanged when the
+ * box is off (no command, no file read, no extra M4 work; unticking it
+ * releases the Galileo channels). */
 
 #include "ui_gps.hpp"
 
@@ -54,7 +58,7 @@ void GpsView::gal_reset() {
     if (!mem_) return;
     std::memset(mem_->gal_state, 0, sizeof(mem_->gal_state));
     std::memset(mem_->gal_cn0, 0, sizeof(mem_->gal_cn0));
-    std::memset(mem_->gal_metric_x10, 0, sizeof(mem_->gal_metric_x10));
+    std::memset(static_cast<void*>(mem_->gal_prev), 0, sizeof(mem_->gal_prev));
     gal_round_t_ = chTimeNow();
 }
 
@@ -63,6 +67,84 @@ uint8_t GpsView::gal_heard() const {
     uint8_t n = 0;
     for (int p = 1; p <= 36; p++) n += mem_->gal_state[p] == 2;
     return n;
+}
+
+const GpsScratch::GalPrev* GpsView::gal_tracked(int prn) const {
+    if (!mem_ || !gal_trk_sh_) return nullptr;
+    for (const auto& c : mem_->gal_prev)
+        if (c.prn == prn && c.state != gps_trk::TRK_IDLE && c.state != gps_trk::TRK_FAILED) return &c;
+    return nullptr;
+}
+
+uint8_t GpsView::gal_tracking() const {
+    if (!mem_ || !gal_trk_sh_) return 0;
+    uint8_t n = 0;
+    for (const auto& c : mem_->gal_prev) n += c.state != gps_trk::TRK_IDLE && c.state != gps_trk::TRK_FAILED;
+    return n;
+}
+
+/* one Galileo channel of the tracking image's table (seqlock; false: being written) */
+bool GpsView::gal_channel(int i, gal_acq::TrkInfo& c) const {
+    if (!gal_trk_sh_) return false;
+    for (int k = 0; k < 3; k++) {
+        const uint32_t s0 = gal_trk_sh_->seq;
+        if (s0 & 1u) continue;
+        std::memcpy(static_cast<void*>(&c), const_cast<const gal_acq::TrkInfo*>(&gal_trk_sh_->ch[i]), sizeof(c));
+        if (gal_trk_sh_->seq == s0) return true;
+    }
+    return false;
+}
+
+/* the E1 box unticked: the tracking image stops its search and frees the Galileo channels */
+void GpsView::gal_off() {
+    gal_pending_ = false;
+    if (gal_off_sent_ || image_ != gps_image::ID_L1T || !image_ready_ || !tracking_) return;
+    GpsRxConfigMessage msg;
+    msg.cmd = GpsRxConfigMessage::CMD_GAL;
+    msg.add_prn = 0;
+    baseband::gps_rx_config(msg);
+    gal_off_sent_ = true;
+}
+
+/* 5 times a second with the status (UI thread): copy the Galileo channels
+ * (seqlock) and log what changed since the last copy */
+void GpsView::gal_poll() {
+    if (!mem_ || !gal_trk_sh_ || image_ != gps_image::ID_L1T) return;
+    bool changed = false;
+    for (int i = 0; i < gal_acq::kMaxTrk; i++) {
+        gal_acq::TrkInfo c;
+        if (!gal_channel(i, c)) continue;
+        GpsScratch::GalPrev& p = mem_->gal_prev[i];
+        const bool on = c.state != gps_trk::TRK_IDLE && c.state != gps_trk::TRK_FAILED;
+        const bool was = p.prn == c.prn && p.state != gps_trk::TRK_IDLE && p.state != gps_trk::TRK_FAILED;
+        if (on && !was) {
+            log_gal_event(c, "start", static_cast<int32_t>(c.code_x16), static_cast<int32_t>(std::lround(c.doppler_hz)));
+            changed = true;
+        }
+        if (p.prn == c.prn) {
+            if ((c.flags & gal_acq::TF_CS) && !(p.flags & gal_acq::TF_CS)) log_gal_event(c, "cs", c.cs_phase, c.cs_syncs);
+            if (!(c.flags & gal_acq::TF_CS) && (p.flags & gal_acq::TF_CS) && on) log_gal_event(c, "cs_lost", c.cs_errs, 0);
+            if (c.side_jumps != p.side_jumps) log_gal_event(c, "side", c.side_e_x100, c.side_l_x100);
+            if (c.fl_fixes != p.fl_fixes) log_gal_event(c, "false_lock", c.fl_fixes, static_cast<int32_t>(std::lround(c.doppler_hz)));
+            if (c.state == gps_trk::TRK_SEARCH && p.state != gps_trk::TRK_SEARCH) log_gal_event(c, "lost", static_cast<int32_t>(p.lock_ms), c.reacq);
+            if (p.state == gps_trk::TRK_SEARCH && (c.state == gps_trk::TRK_PULLIN || c.state == gps_trk::TRK_TRACK))
+                log_gal_event(c, "found", static_cast<int32_t>(c.code_x16), static_cast<int32_t>(std::lround(c.doppler_hz)));
+        }
+        if ((c.flags & gal_acq::TF_RELEASED) && !((p.flags & gal_acq::TF_RELEASED) && p.prn == c.prn)) {
+            log_gal_event(c, "released", c.release, 0);
+            if (c.prn >= 1 && c.prn <= 36) mem_->gal_state[c.prn] = 0; /* searched again in a later round */
+            changed = true;
+        }
+        if (c.state != p.state || (c.flags & gal_acq::TF_CS) != (p.flags & gal_acq::TF_CS)) changed = true;
+        p.prn = c.prn;
+        p.state = c.state;
+        p.flags = c.flags;
+        p.fl_fixes = c.fl_fixes;
+        p.side_jumps = c.side_jumps;
+        p.cn0c_x10 = c.cn0c_x10;
+        p.lock_ms = c.lock_ms;
+    }
+    if (changed) view_heard_.show();
 }
 
 /* the tracking image finished the search */
@@ -74,7 +156,6 @@ void GpsView::gal_collect() {
     if (r.prn != gal_prn_ || !r.done || gal_prn_ > 36) return;
     mem_->gal_state[gal_prn_] = r.detected ? 2 : 3;
     mem_->gal_cn0[gal_prn_] = static_cast<uint8_t>(r.cn0 > 0 ? (r.cn0 > 99 ? 99 : r.cn0 + 0.5f) : 0);
-    mem_->gal_metric_x10[gal_prn_] = static_cast<uint16_t>(r.metric * 10.0f > 65535 ? 65535 : r.metric * 10.0f);
     log_gal(r);
     view_heard_.show();
 }
@@ -115,8 +196,9 @@ void GpsView::gal_step() {
     }
     if (best < 0) { /* all searched: another round after a pause */
         if (chTimeNow() - gal_round_t_ > kGalRoundPause) {
-            for (int p = 1; p <= 36; p++)
-                if (mem_->gal_state[p] == 3) mem_->gal_state[p] = 0; /* the heard ones keep their result */
+            const bool room = gal_trk_max_ && gal_tracking() < gal_trk_max_;
+            for (int p = 1; p <= 36; p++) /* the heard ones keep their result (heard, not tracked: again while channels are free) */
+                if (mem_->gal_state[p] == 3 || (room && mem_->gal_state[p] == 2 && !gal_tracked(p))) mem_->gal_state[p] = 0;
             gal_round_t_ = chTimeNow();
             if (!gal_heard())
                 for (int p = 1; p <= 36; p++) mem_->gal_state[p] = 0;
@@ -170,7 +252,9 @@ void GpsView::gal_step() {
     msg.add_code = static_cast<float>(cp);
     msg.add_doppler = static_cast<float>(dg + clk);
     msg.add_at = fix_sample_;
+    msg.gal_max = static_cast<uint8_t>(gal_trk_max_ > gal_acq::kMaxTrk ? gal_acq::kMaxTrk : gal_trk_max_);
     baseband::gps_rx_config(msg);
+    gal_off_sent_ = false;
     gal_pending_ = true;
     gal_seq_sent_ = gal_status_seq_;
     gal_prn_ = g.prn;

@@ -277,7 +277,31 @@ file starts with a header line and one "#TYPE,..." line per row type. Types:
           x100 (threshold 300), C/N0 x10 (E1, reads ~3 dB low), offset from
           the prediction in half samples, main peak over its side peaks dB
           x10 (small = ambiguous), Doppler found, 4 ms blocks, M4 time kcycles,
-          time taken s
+          time taken s, hand-over (tracked: a Galileo channel took it / no
+          room: the M4 time is taken by GPS / already / search only)
+  GTRK    the Galileo channels once a second (E1 box on, tracking): channels
+          allowed, in use, hand-overs, detections refused (no room), channels
+          freed for GPS, re-acquisition searches, channel pool in use and its
+          budget (GPS channels x10: a GPS channel 10, a Galileo channel 16),
+          the last hand-over's PRN and result (1 tracked, 2 no room, 3
+          already, 4 not detected, 5 search only)
+  GCH     each Galileo channel once a second: channel, PRN, state (1 pull-in,
+          2 tracking, 3 lost: waiting for a search), loop mode (0 FLL, 1 PLL
+          wide, 2 narrow, 3 search), flags (L phase lock, C secondary code in
+          sync = a verified Galileo signal, E found once, S side-peak monitor
+          above the prompt in its last window, Q re-acquiring), C/N0 x10 of
+          E1C (pilot) and E1B (data), lock indicator x100, Doppler Hz x10, code
+          phase chips x16, code discriminator chips x1000, ms in lock, the
+          side-peak monitor's very early / very late tap power over the prompt
+          x100 (on the main peak both ~40-60; on a side peak one is above 100),
+          side-peak jumps, secondary code chip, its chip errors and syncs, 125
+          Hz false locks corrected, re-acquisitions, 4 ms epochs
+  GEV     a Galileo channel event: PRN, event, two values: start (code chips
+          x16, Doppler), cs (secondary code found: chip, syncs), cs_lost (chip
+          errors), side (moved 0.75 chip onto the main peak: VE/P, VL/P x100),
+          false_lock (125 Hz false lock corrected: count, Doppler), lost (ms in
+          lock, re-acquisitions), found (re-acquired: code chips x16, Doppler),
+          released (1 lost for 60 s, 2 freed for GPS, 3 E1 box off)
   IMG     a baseband image loaded from /APPS: image (GPS_L1A / GPS_L1T),
           result (ok / missing / read error / not an image / wrong image /
           other firmware version / too large / damaged), bytes, load time ms
@@ -292,8 +316,8 @@ BeiDou, GLONASS, SBAS. Rows carry the system's letter: G GPS, E Galileo,
 C BeiDou, R GLONASS, S SBAS (S131 = PRN 131). What each system is today:
   GPS      received and decoded (search, tracking, fix).
   Galileo  predictions, and with the "E1" box (Heard, top row) an aided
-           search: heard / not found with C/N0 (see "Galileo E1 search"
-           below); not decoded yet, not in the fix.
+           search: heard / not found with C/N0, then tracking (see "Galileo
+           E1 search" below); not decoded yet, not in the fix.
   BeiDou   predictions only. Its L1 signal B1C comes only from the BDS-3
            satellites C19-C58; B1I (1561 MHz) needs its own tuning.
   GLONASS  predictions only: its signals are at 1598-1606 MHz, a tuning of
@@ -325,8 +349,20 @@ predicted from the fix, GPS time and the orbit, and only a small window
 around them is searched, in the M4 time the GPS tracking leaves (32 ms of
 signal per satellite; with 8 GPS channels it takes ~10-20 s per
 satellite, a few minutes for all). System wheel on Galileo: "E31 38 dB-Hz
-heard", "E23 not found", "searching". Heard only for now: nothing of
-Galileo enters the fix, and with the box off GPS is exactly as before.
+heard", "E23 not found", "searching".
+A satellite heard goes on to a Galileo tracking channel when the M4 has
+time for it: "E31 el62 40 dB trk CS" (E1C C/N0; CS = its pilot's secondary
+code found: a verified Galileo signal), "lost: search" while a lost channel
+is searched again (given up after 60 s). GPS comes first: the channels
+share the M4 time (a Galileo channel costs about 1.6 GPS channels), so with
+8 GPS satellites tracked one Galileo channel fits, with 6 three, at most 4;
+a GPS satellite that needs a channel frees the weakest Galileo one. While a
+Galileo channel runs, the M4 has less time for the next searches (they get
+slower). The status row says "Heard 8 of 11 up, 2 trk". Nothing of Galileo
+enters the fix yet. Unticking the box stops the search and frees the
+Galileo channels at once; with the box off GPS is exactly as before. To
+keep the search but not track: set gal_trk=0 in /SETTINGS/rx_gps.ini (the
+number of Galileo channels allowed, 0-4, default 4).
 Needs /GPS/GALE1.BIN, the Galileo E1 codes, which you make yourself (the
 Galileo ICD's terms do not allow us to ship them in another form):
 download the OS SIS ICD's E1 code attachments (files for annexes C.7 E1-B

@@ -1269,20 +1269,111 @@ inline void Channel::got_bit(int b, Shared* sh, int ch) {
     if (!framer_.synced()) tsync_ = false;
 }
 
+}  // namespace gps_trk
+
+/* the Galileo E1 channel (uses the helpers above; the Tracker runs it next to the GPS channels) */
+#include "gal_trk.hpp"
+
+namespace gps_trk {
+
 /* ---------------------------------------------------------------- tracker */
 
 class Tracker {
    public:
-    Tracker(Shared* sh, const CarrierTable* table)
-        : sh_{sh}, cs_{table->cs} {
+    Tracker(Shared* sh, const CarrierTable* table, gal_acq::TrkShared* gsh = nullptr)
+        : sh_{sh}, gsh_{gsh}, cs_{table->cs} {
         std::memset(static_cast<void*>(sh_), 0, sizeof(Shared));
+        if (gsh_) std::memset(static_cast<void*>(gsh_), 0, sizeof(gal_acq::TrkShared));
         std::memset(lut_, 0, sizeof(lut_));
     }
+    /* ---- the channel pool shared by GPS and Galileo (M4 time). Costs in GPS
+     * channels x10: a GPS channel 10, a Galileo channel kGalCost (measured:
+     * rf_test/gps m4bench_trk). GPS never waits: a GPS start that overfills the
+     * pool frees the weakest Galileo channel. Galileo takes a channel only
+     * while the pool has room and the app allows (set_max_gal; 0 = none). */
+    static constexpr int kGpsCost = 10;
+    static constexpr int kGalCost = 16;
+    static constexpr int kPoolBudget = 108;
+    /* Galileo channels allowed (the app's setting); channels beyond it are freed */
+    GAL_COLD void set_max_gal(int n) {
+        max_gal_ = n < 0 ? 0 : (n > gal_trk::kMaxTrk ? gal_trk::kMaxTrk : n);
+        for (int i = max_gal_; i < gal_trk::kMaxTrk; i++)
+            if (gal_[i].in_use()) gal_[i].release(gal_acq::TR_OFF);
+    }
+    int max_gal() const { return max_gal_; }
+    void set_pool(int budget_x10, int gal_cost_x10) {
+        pool_budget_ = budget_x10;
+        gal_cost_ = gal_cost_x10;
+    }
+    int pool_used() const {
+        int u = 0;
+        for (const auto& c : ch_) u += (c.state() != TRK_IDLE && c.state() != TRK_FAILED) ? kGpsCost : 0;
+        for (const auto& g : gal_) u += g.in_use() ? gal_cost_ : 0;
+        return u;
+    }
+    int gal_in_use() const {
+        int n = 0;
+        for (const auto& g : gal_) n += g.in_use();
+        return n;
+    }
+    /* A Galileo detection (the aided search): half-chip streams, code phase
+     * (chips) at sample `at`, Doppler; `now` = the next sample process() gets.
+     * Returns gal_acq::TrkHandover. */
+    GAL_COLD uint8_t gal_start(int prn, const uint32_t* hc_b, const uint32_t* hc_c, double code_phase_chips, double doppler_hz, uint64_t at, uint64_t now) {
+        int slot = -1;
+        for (int i = 0; i < gal_trk::kMaxTrk; i++) {
+            if (gal_[i].in_use() && gal_[i].prn() == prn) return gal_acq::HO_ALREADY;
+            if (slot < 0 && !gal_[i].in_use() && i < max_gal_) slot = i;
+        }
+        if (max_gal_ <= 0) return gal_acq::HO_OFF;
+        if (slot < 0 || pool_used() + gal_cost_ > pool_budget_) {
+            if (gsh_) gsh_->refused = static_cast<uint16_t>(gsh_->refused + 1);
+            return gal_acq::HO_NO_ROOM;
+        }
+        const double dt = (static_cast<double>(now) - static_cast<double>(at)) / kFs;
+        const double cp = code_phase_chips + dt * kChip * (1.0 + doppler_hz / kL1);
+        gal_[slot].start(prn, hc_b, hc_c, cp, static_cast<float>(doppler_hz), gp_);
+        if (active_ == 0) next_ = now;
+        if (gsh_) gsh_->handovers = static_cast<uint16_t>(gsh_->handovers + 1);
+        return gal_acq::HO_TRACKED;
+    }
+    /* Galileo off (the app): every Galileo channel released */
+    void gal_off() { set_max_gal(0); }
+    /* a lost Galileo channel waiting for a re-acquisition search, round robin
+     * (-1: none) */
+    int gal_reacq_next() {
+        for (int k = 1; k <= gal_trk::kMaxTrk; k++) {
+            const int i = (gal_rr_ + k) % gal_trk::kMaxTrk;
+            if (gal_[i].wants_search()) {
+                gal_rr_ = i;
+                return i;
+            }
+        }
+        return -1;
+    }
+    /* its result: code phase (chips) at sample `at`; `now` as in gal_start */
+    GAL_COLD void gal_reacq_done(int i, const gal_acq::Result& r, uint64_t at, uint64_t now) {
+        gal_trk::Channel& g = gal_[i];
+        if (!g.wants_search()) return;
+        if (gsh_) gsh_->reacq_searches = static_cast<uint16_t>(gsh_->reacq_searches + 1);
+        if (r.detected) {
+            const double dt = (static_cast<double>(now) - static_cast<double>(at)) / kFs;
+            g.reacquired(r.code_phase + dt * kChip * (1.0 + r.doppler / kL1), r.doppler);
+        } else if (g.search_ms() > kGalGiveUpMs) {
+            g.release(gal_acq::TR_LOST);
+        }
+    }
+    static constexpr uint32_t kGalGiveUpMs = 60000;
+    gal_trk::Channel& gal(int i) { return gal_[i]; }
+    const gal_trk::Channel& gal(int i) const { return gal_[i]; }
+    gal_trk::Params& gal_params() { return gp_; }
+    gal_acq::TrkShared* gal_shared() { return gsh_; }
     /* channels in use at most (M4 time: ~11.5k cycles each per 1 ms + ~23k shared) */
     void set_max_active(int n) { max_active_ = n < 1 ? 1 : (n > kMaxCh ? kMaxCh : n); }
     int max_active() const { return max_active_; }
     void reset(uint64_t now) {
         for (auto& c : ch_) c.stop();
+        for (auto& g : gal_) g.stop();
         active_ = 0;
         next_ = now;
         publish();
@@ -1303,6 +1394,7 @@ class Tracker {
         const double cp = code_phase_chips + dt * kChip * (1.0 + doppler_hz / kL1);
         ch_[slot].start(prn, cp, static_cast<float>(doppler_hz), lp_);
         if (active_ == 0) next_ = now;
+        make_room();
         return slot;
     }
     void stop(int prn) {
@@ -1347,7 +1439,7 @@ class Tracker {
      * the first max_active, else the one extra search slot (index max_active:
      * at most one aided search beyond the channel count, ~15k cycles per ms).
      * Returns the channel or -1 (busy, or the PRN already has a channel). */
-    int start_aided(int prn, double code_phase_chips, double doppler_hz, uint64_t at, uint64_t now, int wmax) {
+    __attribute__((noinline)) int start_aided(int prn, double code_phase_chips, double doppler_hz, uint64_t at, uint64_t now, int wmax) {
         int slot = -1;
         const int lim = max_active_ < kMaxCh ? max_active_ + 1 : kMaxCh;
         for (int i = 0; i < lim; i++) {
@@ -1360,6 +1452,7 @@ class Tracker {
         const double cp = code_phase_chips + dt * kChip * (1.0 + doppler_hz / kL1);
         ch_[slot].start_aided(prn, cp, static_cast<float>(doppler_hz), lp_, wmax);
         if (active_ == 0) next_ = now;
+        make_room();
         sh_->aided_starts = static_cast<uint16_t>(sh_->aided_starts + 1);
         return slot;
     }
@@ -1373,8 +1466,10 @@ class Tracker {
      * A jump of `at` (missed buffers) is propagated first. */
     void process(const int8_t* iq, uint64_t at) {
         if (at != next_) {
-            if (at > next_)
+            if (at > next_) {
                 for (int i = 0; i < kMaxCh; i++) ch_[i].skip(at - next_, sh_, i);
+                for (auto& g : gal_) g.skip(at - next_);
+            }
             sh_->missed++;
         }
         next_ = at;
@@ -1398,26 +1493,47 @@ class Tracker {
             }
             n_on += on_[i];
         }
+        /* Galileo: tracking channels correlate; one waiting for a search keeps its
+         * code phase running (the search window is centred on it) */
+        int n_gal = 0;
+        for (int i = 0; i < gal_trk::kMaxTrk; i++) {
+            gon_[i] = gal_[i].on();
+            n_gal += gon_[i];
+            n_used += gal_[i].in_use();
+            if (gal_[i].wants_search()) gal_[i].skip(kBufN);
+        }
         active_ = static_cast<uint8_t>(n_used);
-        if (n_on) {
+        if (n_on || n_gal) {
             for (int g = 0; g < kBufN / kGroupN; g++) {
                 const int8_t* p = iq + 2 * g * kGroupN;
                 for (int b = 0; b < kGroupBlk; b++) sblk_[b] = build_block_lut(p + 2 * kBlk * b, lut_ + 128 * b);
                 for (int i = 0; i < kMaxCh; i++)
                     if (on_[i]) ch_[i].run_group(lut_, sblk_, cs_, sh_, i);
+                for (int i = 0; i < gal_trk::kMaxTrk; i++)
+                    if (gon_[i]) gal_[i].run_group(lut_, sblk_, cs_);
             }
         }
         next_ = at + kBufN;
         sh_->buffers++;
     }
     /* Channel table for the app (seqlock). */
-    void publish() {
+    __attribute__((noinline)) void publish() {
         sh_->ch_seq = sh_->ch_seq + 1;
         mem_barrier();
         for (int i = 0; i < kMaxCh; i++) ch_[i].info(sh_->ch[i]);
         sh_->active = active_;
         mem_barrier();
         sh_->ch_seq = sh_->ch_seq + 1;
+        if (!gsh_) return;
+        gsh_->seq = gsh_->seq + 1;
+        mem_barrier();
+        for (int i = 0; i < gal_trk::kMaxTrk; i++) gal_[i].info(gsh_->ch[i]);
+        gsh_->max_ch = static_cast<uint8_t>(max_gal_);
+        gsh_->active = static_cast<uint8_t>(gal_in_use());
+        gsh_->pool_x10 = static_cast<uint16_t>(pool_used());
+        gsh_->pool_budget_x10 = static_cast<uint16_t>(pool_budget_);
+        mem_barrier();
+        gsh_->seq = gsh_->seq + 1;
     }
     Channel& channel(int i) { return ch_[i]; }
     const Channel& channel(int i) const { return ch_[i]; }
@@ -1428,8 +1544,35 @@ class Tracker {
 
    private:
     Shared* sh_;
+    gal_acq::TrkShared* gsh_;
     Channel ch_[kMaxCh]{};
     bool on_[kMaxCh]{};
+    gal_trk::Channel gal_[gal_trk::kMaxTrk]{};
+    bool gon_[gal_trk::kMaxTrk]{};
+    gal_trk::Params gp_{};
+    int max_gal_{0};
+    int gal_rr_{0};
+    int pool_budget_{kPoolBudget};
+    int gal_cost_{kGalCost};
+    /* a GPS start overfilled the pool: free the weakest Galileo channels
+     * (one waiting for a search first) */
+    GAL_COLD void make_room() {
+        while (pool_used() > pool_budget_) {
+            int w = -1;
+            for (int i = 0; i < gal_trk::kMaxTrk; i++) {
+                if (!gal_[i].in_use()) continue;
+                if (w < 0) {
+                    w = i;
+                    continue;
+                }
+                const bool si = gal_[i].wants_search(), sw = gal_[w].wants_search();
+                if ((si && !sw) || (si == sw && gal_[i].cn0() < gal_[w].cn0())) w = i;
+            }
+            if (w < 0) return;
+            gal_[w].release(gal_acq::TR_POOL);
+            if (gsh_) gsh_->preempted = static_cast<uint16_t>(gsh_->preempted + 1);
+        }
+    }
     uint32_t lut_[128 * kGroupBlk]; /* 8 blocks x 8 nibbles x 16 */
     uint32_t sblk_[kGroupBlk]{};
     const uint32_t* cs_;
@@ -1473,7 +1616,7 @@ class Tracker {
             for (int i = 0; i < max_active_ && free < 0; i++)
                 if (ch_[i].state() == TRK_IDLE || ch_[i].state() == TRK_FAILED) free = i;
             if (free < 0) break;
-            start(s.prn, s.code_phase, s.doppler, spare_at_, now);
+            start(s.prn, s.code_phase, s.doppler, spare_at_, now); /* frees Galileo channels if the pool is full */
             next_spare_++;
             sh_->refills = static_cast<uint16_t>(sh_->refills + 1);
         }
@@ -1502,6 +1645,95 @@ class Tracker {
         m.n = static_cast<uint8_t>(n);
         mem_barrier();
         sh_->meas_seq = seq + 1;
+    }
+};
+
+/* The tracking image's Galileo searcher between the app and the Galileo
+ * channels: the app's aided searches (CMD_GAL; a detection goes to a channel
+ * when the app asks for tracking and the pool has room) and the
+ * re-acquisition searches of lost channels (around their propagated code
+ * phase; one at most every kReacqGap, so the app's searches get turns). The
+ * firmware and the host tests run this same code. */
+class GalService {
+   public:
+    explicit GalService(gal_acq::Searcher& s)
+        : s_{s} {}
+    static constexpr uint64_t kReacqGap = kFs; /* samples between re-acquisition searches */
+    static constexpr int kReacqHalfWin = 16;   /* samples either side of the propagated code phase */
+    /* the app's search: preempts a re-acquisition search (that channel retries) */
+    GAL_COLD void app_search(int prn, const gal_acq::Codes* codes, double code_phase, uint64_t at, double doppler, int half_win, bool track) {
+        s_.start(prn, codes, code_phase, at, doppler, half_win, 1, 100.0f, 8);
+        owner_ = kApp;
+        track_ = track;
+    }
+    void stop() {
+        s_.stop();
+        owner_ = kNone;
+    }
+    /* After Tracker::process(iq, first) for one buffer of n samples: capture,
+     * or work units while more() says one fits (the M4 time the loops leave). */
+    template <class More>
+    __attribute__((noinline)) void run(Tracker* t, const int8_t* iq, int n, uint64_t first, More more) {
+        const uint64_t now = first + static_cast<uint64_t>(n);
+        if (!s_.busy() && t && now >= reacq_after_) {
+            const int k = t->gal_reacq_next();
+            if (k >= 0) {
+                const gal_trk::Channel& g = t->gal(k);
+                s_.load_streams(g.stream(0), g.stream(1));
+                s_.start(g.prn(), nullptr, g.code_phase_chips(), now, g.search_doppler(), kReacqHalfWin, 1, 100.0f, 8);
+                owner_ = k;
+            }
+        }
+        if (!s_.busy()) return;
+        if (s_.wants_samples()) {
+            s_.put(iq, n, first);
+            return;
+        }
+        while (!s_.wants_samples() && more())
+            if (!s_.step()) {
+                done(t, now);
+                break;
+            }
+    }
+    bool busy() const { return s_.busy(); }
+    bool app_busy() const { return s_.busy() && owner_ == kApp; }
+    uint16_t seq() const { return seq_; } /* the app's searches finished */
+    const gal_acq::Result& result() const { return app_res_; }
+    uint8_t last_handover() const { return last_ho_; }
+
+   private:
+    static constexpr int kNone = -2, kApp = -1;
+    gal_acq::Searcher& s_;
+    int owner_{kNone};
+    bool track_{false};
+    uint16_t seq_{0};
+    uint8_t last_ho_{0};
+    uint64_t reacq_after_{0};
+    gal_acq::Result app_res_{};
+
+    GAL_COLD void done(Tracker* t, uint64_t now) {
+        const gal_acq::Result& r = s_.result();
+        const uint64_t at = s_.block_sample();
+        if (owner_ == kApp) {
+            app_res_ = r;
+            uint8_t ho = gal_acq::HO_OFF;
+            if (t && track_) {
+                if (!r.detected)
+                    ho = gal_acq::HO_NOT_DETECTED;
+                else
+                    ho = t->gal_start(r.prn, s_.stream(0), s_.stream(1), r.code_phase, r.doppler, at, now);
+            }
+            last_ho_ = ho;
+            if (t && t->gal_shared()) {
+                t->gal_shared()->last_ho_prn = r.prn;
+                t->gal_shared()->last_ho_result = ho;
+            }
+            seq_++;
+        } else if (owner_ >= 0 && t) {
+            t->gal_reacq_done(owner_, r, at, now);
+            reacq_after_ = now + kReacqGap;
+        }
+        owner_ = kNone;
     }
 };
 

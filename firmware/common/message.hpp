@@ -2598,7 +2598,8 @@ struct GpsRxConfigMessage : public Message {
                          CMD_SEARCH = 1,
                          CMD_TRACK = 2, /* track the PRNs in prn_mask from the last search's results */
                          CMD_ADD = 3,   /* while tracking: aided search for one newly risen satellite (add_*) */
-                         CMD_GAL = 4 }; /* while tracking: aided Galileo E1 search (add_*; codes in gal_codes of the status) */
+                         CMD_GAL = 4 }; /* while tracking: aided Galileo E1 search (add_*; codes in gal_codes of the status);
+                                         * add_prn 0: Galileo off (search stopped, Galileo channels released) */
     uint8_t cmd{CMD_STOP};
     uint8_t k_ms{20};      /* snapshot length, 1..20 ms */
     uint8_t half_bins{12}; /* Doppler bins of 500 Hz either side of each centre */
@@ -2621,6 +2622,9 @@ struct GpsRxConfigMessage : public Message {
     float add_code{0};
     float add_doppler{0};
     uint64_t add_at{0};
+    /* CMD_GAL: Galileo channels the detection may go to (gal_acq::kMaxTrk at
+     * most; the M4 time decides too: GPS first); 0 = search only (Heard) */
+    uint8_t gal_max{0};
 };
 
 /* M4 -> M0: progress, noise statistics, and where the results and the lent
@@ -2670,6 +2674,8 @@ struct GpsRxStatusMessage : public Message {
     const void* gal_result{nullptr};
     uint16_t gal_seq{0};
     uint8_t gal_busy{0};
+    /* tracking image: the Galileo E1 channels (gal_acq::TrkShared, its RAM) */
+    const void* gal_track{nullptr};
 };
 
 #endif /*__MESSAGE_H__*/
