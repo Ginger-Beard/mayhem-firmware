@@ -355,7 +355,7 @@ SignatureDetectView::SignatureDetectView(NavigationView& nav)
     async_tx_was_ = portapack::async_tx_enabled;
     baseband::run_image(portapack::spi_flash::image_tag_signature_detect);
 
-    add_children({&labels_, &field_lna_, &field_vga_, &field_amp_, &check_log_, &text_status_, &labels_sig_, &field_sig_,
+    add_children({&labels_, &field_lna_, &field_vga_, &field_amp_, &check_log_, &field_vol_, &text_status_, &labels_sig_, &field_sig_,
                   &check_survey_, &list_, &button_map_, &button_track_, &button_setup_, &button_debug_});
     list_.set_parent_rect({0, UI_POS_Y(4), UI_POS_MAXWIDTH, UI_POS_HEIGHT_REMAINING(7)});
     check_log_.set_value(log_on());
@@ -3667,7 +3667,7 @@ void TrackHistory::paint(Painter& painter) {
 TrackView::TrackView(NavigationView& nav, SignatureDetectView& main, const TrackTarget& target)
     : nav_{nav}, main_{main}, target_{target} {
     add_children({&labels_, &field_lna_, &field_vga_, &field_amp_, &check_beep_, &text_target_, &field_freq_, &field_bw_, &field_ble_,
-                  &field_sq_, &text_status_, &level_, &history_, &button_reset_, &button_listen_, &button_cap_, &button_back_});
+                  &field_sq_, &field_vol_, &text_status_, &level_, &history_, &button_reset_, &button_listen_, &button_cap_, &button_back_});
     const bool freq = target_.kind == TrackTarget::FREQ;
     field_freq_.hidden(!freq);
     field_bw_.hidden(!freq);

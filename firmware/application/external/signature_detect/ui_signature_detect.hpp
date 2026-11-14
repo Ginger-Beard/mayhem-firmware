@@ -399,6 +399,9 @@ class SignatureDetectView : public View {
         3,
         "Log",
         true};
+    /* Beep volume, top right as in the stock Audio app (no room for a label). */
+    AudioVolumeField field_vol_{
+        {UI_POS_X(28), UI_POS_Y(0)}};
     /* Signature class (wheel; files in /SIGDET/SIGS, as Looking Glass's
      * presets) and the survey level of the log. */
     Labels labels_sig_{
@@ -740,7 +743,8 @@ class TrackView : public View {
 
     Labels labels_{
         {{UI_POS_X(0), UI_POS_Y(0)}, "LNA:   VGA:   AMP:", Theme::getInstance()->fg_light->foreground},
-        {{UI_POS_X(20), UI_POS_Y(2)}, "Sq", Theme::getInstance()->fg_light->foreground}};
+        {{UI_POS_X(18), UI_POS_Y(2)}, "Sq", Theme::getInstance()->fg_light->foreground},
+        {{UI_POS_X(25), UI_POS_Y(2)}, "Vol", Theme::getInstance()->fg_light->foreground}};
     LNAGainField field_lna_{{UI_POS_X(4), UI_POS_Y(0)}};
     VGAGainField field_vga_{{UI_POS_X(11), UI_POS_Y(0)}};
     RFAmpField field_amp_{{UI_POS_X(18), UI_POS_Y(0)}};
@@ -750,7 +754,8 @@ class TrackView : public View {
     FrequencyField field_freq_{{UI_POS_X(0), UI_POS_Y(2)}};
     OptionsField field_bw_{{UI_POS_X(13), UI_POS_Y(2)}, 4, {{"890k", 0}, {"220k", 1}, {" 55k", 2}, {" 14k", 3}}};
     OptionsField field_ble_{{UI_POS_X(0), UI_POS_Y(2)}, 9, {{"address", TrackTarget::BLE_ADDR}, {"rule", TrackTarget::BLE_RULE}}};
-    NumberField field_sq_{{UI_POS_X(23), UI_POS_Y(2)}, 4, {-120, 0}, 1, ' '};
+    NumberField field_sq_{{UI_POS_X(20), UI_POS_Y(2)}, 4, {-120, 0}, 1, ' '};
+    AudioVolumeField field_vol_{{UI_POS_X(28), UI_POS_Y(2)}};
     Line status_lines_[2]{};
     TextLines text_status_{{0, UI_POS_Y(3), UI_POS_MAXWIDTH, UI_POS_HEIGHT(2)}, status_lines_, 2};
     TrackLevel level_{{0, UI_POS_Y(5), UI_POS_MAXWIDTH, 72}, stats_};
