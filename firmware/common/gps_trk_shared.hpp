@@ -53,6 +53,8 @@ enum ChFlags : uint8_t {
     F_FRAME = 4,      /* subframe sync confirmed: transmit time (TOW) known */
     F_VERIFIED = 8,   /* PLL lock and C/N0 >= 28 dB-Hz for a second: a real signal */
     F_MEAS_GAP = 16,  /* (measurement) a missed DMA buffer in the last second */
+    F_EVER = 32,      /* verified (or bit-synced) at least once since the hand-over: a real satellite */
+    F_RELEASED = 64,  /* never verified within the verification timeout: channel given up (detection only) */
 };
 
 struct ChInfo {
@@ -127,6 +129,13 @@ struct Shared {
     uint16_t level_x10;
     int16_t dc_i_x10, dc_q_x10;
     uint16_t clip_pm;
+    /* unconfirmed hand-over (Autonomous): channels released because they never
+     * verified within the timeout (PRN ring, newest at (released - 1) & 7) and
+     * spare detections started in the freed channels */
+    uint16_t released;
+    uint16_t refills;
+    uint8_t rel_prn[8];
+    uint16_t rel_ms[8]; /* time from the start of that channel to the release, ms */
 };
 
 }  // namespace gps_trk

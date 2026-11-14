@@ -396,6 +396,10 @@ struct LoopParams {
     float fll_assist{3.0f};   /* Hz, FLL assist while wide */
     float dll_bn{0.5f};       /* Hz, steady */
     float dll_bn_wide{2.0f};
+    /* > 0: a channel that has never verified (1 s of PLL lock at >= 28 dB-Hz) nor
+     * found bit sync this long after its start is given up (TRK_FAILED +
+     * F_RELEASED): the hand-over of an unconfirmed detection (Autonomous) */
+    uint32_t verify_timeout_ms{0};
 };
 
 class Channel {
@@ -432,6 +436,7 @@ class Channel {
         prn_ = static_cast<uint8_t>(prn);
         lp_ = lp;
         reacq_ = 0;
+        ever_ok_ = released_ = rel_reported_ = false;
         double h = code_phase_chips * 2.0;
         h = std::fmod(h, static_cast<double>(kHalfChips));
         if (h < 0) h += kHalfChips;
@@ -490,6 +495,8 @@ class Channel {
         if (bit_edge_ >= 0) f |= F_BIT;
         if (tsync_) f |= F_FRAME;
         if (verified_) f |= F_VERIFIED;
+        if (ever_ok_) f |= F_EVER;
+        if (released_) f |= F_RELEASED;
         return f;
     }
     float cn0() const { return cn0_; }
@@ -503,6 +510,13 @@ class Channel {
     }
     uint32_t epochs() const { return epochs_; }
     uint32_t track_ms() const { return track_ms_; }
+    bool released() const { return released_; }
+    /* true once per release (the tracker reports it, then may reuse the slot) */
+    bool take_release() {
+        if (!released_ || rel_reported_) return false;
+        rel_reported_ = true;
+        return true;
+    }
     /* test access */
     double code_phase_halfchips() const { return m_ + f_ / 4294967296.0; }
     int bit_edge() const { return bit_edge_; }
@@ -559,6 +573,9 @@ class Channel {
     int cn0_wins_{0};
     uint32_t verify_ms_{0};
     bool verified_{false};
+    bool ever_ok_{false};      /* verified or bit-synced since start() */
+    bool released_{false};     /* given up unverified (LoopParams::verify_timeout_ms) */
+    bool rel_reported_{false};
     float good_freq_{0};
     /* bit sync and bits */
     uint16_t hist_[20]{};
@@ -851,6 +868,15 @@ inline void Channel::epoch_end(Shared* sh, int ch) {
         track_epoch(ip, qp, id, qd, valid, sh, ch);
     }
     epochs_++;
+    if (lp_.verify_timeout_ms && !ever_ok_) {
+        if (verified_ || bit_edge_ >= 0)
+            ever_ok_ = true;
+        else if (epochs_ > lp_.verify_timeout_ms && state_ != TRK_IDLE && state_ != TRK_FAILED) {
+            state_ = TRK_FAILED; /* a false detection must not hold a channel */
+            released_ = true;
+        }
+    } else if (!ever_ok_ && (verified_ || bit_edge_ >= 0))
+        ever_ok_ = true;
 }
 
 inline void Channel::epoch_skipped(Shared* sh, int ch) {
@@ -1219,6 +1245,39 @@ class Tracker {
         for (auto& c : ch_)
             if (c.prn() == prn) c.stop();
     }
+    /* PGPR's hand-over of a search result: the detected PRNs strongest first
+     * into the channels; the rest wait as spares and take channels that fail
+     * later (released unverified detections, or satellites given up). Code
+     * phases refer to sample `at`; `now` is the next buffer's first sample.
+     * Returns the number of detections. */
+    int handover(const gps_acq::Result* res, uint32_t prn_mask, uint64_t at, uint64_t now) {
+        int order[32];
+        int n = 0;
+        for (int i = 0; i < 32; i++)
+            if (((prn_mask >> i) & 1u) && res[i].detected && !res[i].once) order[n++] = i;
+        for (int a = 1; a < n; a++)
+            for (int b = a; b > 0 && res[order[b]].cn0 > res[order[b - 1]].cn0; b--) {
+                const int t = order[b];
+                order[b] = order[b - 1];
+                order[b - 1] = t;
+            }
+        reset(now);
+        n_spare_ = next_spare_ = 0;
+        spare_at_ = at;
+        for (int k = 0; k < n; k++) {
+            const gps_acq::Result& r = res[order[k]];
+            if (k < max_active_)
+                start(order[k] + 1, r.code_phase, r.doppler, at, now);
+            else {
+                Spare& s = spare_[n_spare_++];
+                s.prn = static_cast<uint8_t>(order[k] + 1);
+                s.code_phase = r.code_phase;
+                s.doppler = r.doppler;
+            }
+        }
+        return n;
+    }
+    int spares_left() const { return n_spare_ - next_spare_; }
     /* One DMA buffer: n == kBufN samples starting at absolute sample `at`.
      * A jump of `at` (missed buffers) is propagated first. */
     void process(const int8_t* iq, uint64_t at) {
@@ -1232,6 +1291,7 @@ class Tracker {
         if (at / kFs != last_meas_s_) {
             last_meas_s_ = at / kFs;
             measure(at);
+            releases_and_refill(at);
         }
         int n_on = 0, n_used = 0;
         nbuf_++;
@@ -1288,6 +1348,45 @@ class Tracker {
     uint64_t next_{0};
     uint64_t last_meas_s_{~0ull};
     uint32_t nbuf_{0};
+    struct Spare {
+        uint8_t prn;
+        float code_phase, doppler;
+    };
+    static constexpr uint64_t kSpareMaxAge = 60ull * kFs;
+    Spare spare_[32]{};
+    uint8_t n_spare_{0}, next_spare_{0};
+    uint64_t spare_at_{0};
+
+    /* once a second: report released channels, then give failed channels to
+     * the spare detections (their code phase propagated from the search) */
+    void releases_and_refill(uint64_t now) {
+        for (int i = 0; i < kMaxCh; i++)
+            if (ch_[i].take_release()) {
+                const uint16_t k = sh_->released;
+                sh_->rel_prn[k & 7u] = ch_[i].prn();
+                const uint32_t ms = ch_[i].epochs();
+                sh_->rel_ms[k & 7u] = static_cast<uint16_t>(ms > 65535u ? 65535u : ms);
+                sh_->released = static_cast<uint16_t>(k + 1);
+            }
+        if (now - spare_at_ > kSpareMaxAge) next_spare_ = n_spare_; /* too old to propagate: a new search finds them */
+        while (next_spare_ < n_spare_) {
+            bool busy = false; /* never two channels on one PRN */
+            const Spare& s = spare_[next_spare_];
+            for (int i = 0; i < kMaxCh; i++)
+                if (ch_[i].prn() == s.prn && ch_[i].state() != TRK_IDLE && ch_[i].state() != TRK_FAILED) busy = true;
+            if (busy) {
+                next_spare_++;
+                continue;
+            }
+            int free = -1;
+            for (int i = 0; i < max_active_ && free < 0; i++)
+                if (ch_[i].state() == TRK_IDLE || ch_[i].state() == TRK_FAILED) free = i;
+            if (free < 0) break;
+            start(s.prn, s.code_phase, s.doppler, spare_at_, now);
+            next_spare_++;
+            sh_->refills = static_cast<uint16_t>(sh_->refills + 1);
+        }
+    }
 
     void measure(uint64_t at) {
         const uint32_t seq = sh_->meas_seq;

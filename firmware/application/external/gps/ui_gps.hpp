@@ -733,6 +733,8 @@ class GpsView : public View {
     void auto_cache_step();   /* one EPH_AIR.TXT line per call, from the frame handler */
     uint16_t cache_errs_{0};
     bool meas_waiting_{false}; /* a measurement set copied while the solver ran */
+    bool req_confirm_{true};   /* the last search asked for a 2nd-snapshot confirmation */
+    uint16_t log_rel_seen_{0}; /* tracker releases already logged */
     int32_t status_dt_ms_{0}; /* the last search's snapshot A -> B interval */
 
     /* Diagnostics log (ui_gps_log.cpp): rows built in GpsScratch::log, written

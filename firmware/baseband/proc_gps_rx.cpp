@@ -48,31 +48,24 @@ GpsRxProcessor::GpsRxProcessor() {
 
 void GpsRxProcessor::start_tracking(uint32_t prn_mask) {
     const gps_acq::Result* res = session.results();
-    /* the PRNs to track, strongest first */
-    int order[32];
     int n = 0;
     for (int i = 0; i < 32; i++)
-        if (((prn_mask >> i) & 1u) && res[i].detected && !res[i].once) order[n++] = i;
-    for (int a = 1; a < n; a++)
-        for (int b = a; b > 0 && res[order[b]].cn0 > res[order[b - 1]].cn0; b--) {
-            const int t = order[b];
-            order[b] = order[b - 1];
-            order[b - 1] = t;
-        }
+        if (((prn_mask >> i) & 1u) && res[i].detected && !res[i].once) n++;
     if (!n) return;
     session.stop();
     if (!trk_) trk_ = new (&snapshot) gps_trk::Tracker(&trk_shared, &carrier_table);
     trk_->set_max_active(max_ch_);
+    /* unconfirmed detections (no second snapshot): the loops verify them, and
+     * one that never verifies gives its channel back (to a spare detection) */
+    trk_->params().verify_timeout_ms = req_.confirm ? 0 : kVerifyTimeoutMs;
     /* code phases refer to the first sample of the result snapshot; samples_
      * is the index of the next buffer's first sample (put() got samples_ / fs
      * after this buffer was counted) */
     const uint64_t now = samples_;
     const uint64_t at = static_cast<uint64_t>(std::llround(session.t_results() * gps_acq::kFs)) - gps_acq::kN;
-    trk_->reset(now);
+    trk_->handover(res, prn_mask, at, now);
     trk_shared.handover_age_ms = static_cast<uint32_t>((now - at) * 1000u / gps_acq::kFs);
     trk_shared.handovers++;
-    for (int k = 0; k < n && k < trk_->max_active(); k++)
-        trk_->start(order[k] + 1, res[order[k]].code_phase, res[order[k]].doppler, at, now);
     trk_->publish();
     trk_cycles_sum_ = trk_cycles_max_ = trk_buffers_ = 0;
     state_ = GpsRxStatusMessage::TRACKING;

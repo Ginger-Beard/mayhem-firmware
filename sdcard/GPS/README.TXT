@@ -131,8 +131,13 @@ are not needed). Every decoded ephemeris is appended to /GPS/EPH_AIR.TXT (three
 lines each; the file restarts when it passes 48 KB); within about 4 hours the
 next start is precise at once. The app never writes EPHEM.RNX: a file you copy
 there is read as before, and per satellite the record closest to now is used.
-The Heard tab shows the tracked satellites: C/N0, L (phase lock), B (bits),
-T (time decoded), E (orbit decoded).
+Autonomous skips the second confirmation snapshot: each detection goes
+straight to a tracking channel (Heard shows it yellow with "?" until then),
+and the loops verify it: a channel that is not phase locked at 28 dB-Hz for a
+second (or bit-synced) within 10 s is freed ("not verified: freed") and
+given to the next detection. The Heard tab shows the tracked satellites:
+C/N0, L (phase lock), B (bits), T (time decoded), E (orbit decoded); yellow
+rows are not verified yet ("verifying").
 
 Diagnostics log (Fix tab, "Log" box; a development aid)
 -------------------------------------------------------
@@ -174,7 +179,8 @@ file starts with a header line and one "#TYPE,..." line per row type. Types:
   CH      every second per channel: channel, PRN, state (1 pull-in, 2 track,
           3 lost: searching, 4 given up), loop (0 FLL, 1 PLL wide, 2 PLL narrow,
           3 search), flags (L phase lock, B bit sync, T subframe time,
-          V verified), C/N0 x10, phase lock indicator x100 (cos 2 phi; ~100 =
+          V verified, E verified since the hand-over, R released: never
+          verified, channel freed), C/N0 x10, phase lock indicator x100 (cos 2 phi; ~100 =
           locked), Doppler Hz x10, code phase chips x64, code discriminator
           chips x1000 (code lock: near 0), ms in track, bits, parity-good
           words, parity failures, subframes, last TOW s, losses of lock,
@@ -182,11 +188,15 @@ file starts with a header line and one "#TYPE,..." line per row type. Types:
   SR      each search result (after every search): search number, search
           kind, snapshot ms, PRN, searched, detected, seen once only, refined,
           peak/mean x100, threshold x100, C/N0 x10, Doppler Hz, code phase
-          chips x1000, verdict (accepted / rejected: below threshold /
+          chips x1000, verdict (accepted / detected (unconfirmed: the
+          tracker verifies; Autonomous) / rejected: below threshold /
           rejected: 2nd snapshot did not find it / Doppler moved / code phase
           off the prediction) and, when rejected that way, what the 2nd
           snapshot found (peak/mean x100, Doppler Hz, code phase x1000)
   HO      hand-over to tracking: count, age of the search result ms, PRNs
+  REL     a channel freed because its detection never verified (Autonomous):
+          PRN, ms from its start, releases so far, spare detections started
+          in freed channels so far
   SF      each parity-good subframe: PRN, channel, subframe 1-5, page,
           TOW of its start s, the ten 24-bit data words (hex)
   EPH     decoded / cached events (PRN, subframes held 1+2+4, not yet saved,

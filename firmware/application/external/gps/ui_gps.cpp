@@ -859,14 +859,15 @@ void HeardView::show_tracking() {
         Fmt f{b, sizeof(b)};
         f.c('G').d2(c.prn).c(' ');
         Color col = white;
+        const bool ever = (c.flags & gps_trk::F_EVER) != 0; /* verified since the hand-over */
         if (c.state == gps_trk::TRK_SEARCH) {
-            f.s("lost: searching");
+            f.s(ever ? "lost: searching" : "verifying: search");
             col = yellow;
         } else if (c.state == gps_trk::TRK_FAILED) {
-            f.s("lost");
+            f.s(c.flags & gps_trk::F_RELEASED ? "not verified: freed" : "lost");
             col = grey;
         } else if (c.state == gps_trk::TRK_PULLIN) {
-            f.s("pull-in");
+            f.s(ever ? "pull-in" : "verifying");
             col = yellow;
         } else {
             f.u((c.cn0_x10 + 5u) / 10u).s("  ");
@@ -1029,7 +1030,9 @@ void HeardView::show() {
     for (size_t k = 0; k < n && k < kListRows; k++) {
         const auto& r = main_.results_[order[k]];
         Fmt f{b, sizeof(b)};
-        f.c('G').d2(r.prn).c(' ');
+        f.c('G').d2(r.prn);
+        if (!main_.req_confirm_) f.c('?'); /* detected once (Autonomous): the tracking list says if verified */
+        f.c(' ');
         int bars = static_cast<int>((r.cn0 - 32.0f) / 1.5f);
         if (bars < 1) bars = 1;
         if (bars > 10) bars = 10;
@@ -1038,7 +1041,7 @@ void HeardView::show() {
         const int32_t dop = static_cast<int32_t>(std::lround(r.doppler / 100.0f));
         if (dop >= 0) f.c('+');
         f.fixed(dop, 1).c('k');
-        text_list_.set(k, b, r.cn0 >= 38 ? Color::green() : white);
+        text_list_.set(k, b, !main_.req_confirm_ ? Color::yellow() : (r.cn0 >= 38 ? Color::green() : white));
         list_prn_[k] = static_cast<uint8_t>(order[k] + 1);
         if (main_.sel_kind_ == GpsView::SEL_GPS && main_.sel_idx_ == order[k]) text_list_.set_highlight(static_cast<int>(k));
     }
@@ -2022,8 +2025,13 @@ bool GpsView::start_search(Job job, uint8_t k_ms, bool force_full) {
     /* Autonomous: the fast refine (Doppler only): the hand-over is ~10 s younger on the
      * device, and the coarse fix it also feeds is almanac-limited (~1 km) anyway */
     m.refine = job == JOB_AUTO ? 2 : (job == JOB_FIX ? 1 : 0);
-    m.confirm = 1; /* a PRN is reported only if a second snapshot confirms it */
-    m.track = job == JOB_AUTO; /* the confirmed PRNs go straight to the tracking loops */
+    /* Heard / Fix: a PRN is reported only if a second snapshot confirms it.
+     * Autonomous: no second snapshot (~6 s sooner); the detections go straight to
+     * the tracking loops, which verify them (1 s of phase lock at >= 28 dB-Hz, or
+     * bit sync) and give back within 10 s a channel that never verifies. */
+    m.confirm = job == JOB_AUTO ? 0 : 1;
+    req_confirm_ = m.confirm != 0;
+    m.track = job == JOB_AUTO;
     m.max_ch = 8;              /* M4: ~60 % with 8 channels (notes, gps-autonomous) */
     int nprn = 0;
     if (!force_full && assisted_possible() && geo_ready_) {
