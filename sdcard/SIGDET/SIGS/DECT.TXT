@@ -1,0 +1,22 @@
+# Signature Detect signature class: DECT 6.0 (US) cordless phone bases, energy
+# only. One custom sweep band, 1916-1930 MHz (below the PCS downlink at 1930).
+# Format: /SIGDET/README.TXT. valid=real: carrier seen in a test recording;
+# valid=doc: from documents only.
+#
+# An idle base sends one beacon of ~90 us every 10 ms on one of five carriers
+# (1.728 MHz apart), 1.152 Mb/s GFSK, ~1 MHz wide: about 1 % duty. The sync word
+# was checked offline in the recording; the device sees energy only (low
+# confidence, '?'). points=180 gives short looks (51 us) and more of them, so
+# a beacon can fill a look. A rule needs energy in 2 looks of a dwell, in 2
+# dwells: expect seconds to tens of seconds near a base. duty=0-20 rejects a
+# continuous carrier or spur. No burst= / period=: one look is far longer
+# than a beacon. A base in ECO / no-emission mode is silent when idle.
+# NOT YET TESTED ON THE DEVICE (rules written 2026-11-14 from the sweep code).
+BAND,name=DCT,lo=1916,hi=1930,points=180,dwell=500
+NB,label=DECT6 1921.536,kind=home,f=1921.536,bw=800,db=8,duty=0-20,valid=real
+NB,label=DECT6 1923.264,kind=home,f=1923.264,bw=800,db=8,duty=0-20,valid=real
+NB,label=DECT6 1924.992,kind=home,f=1924.992,bw=800,db=8,duty=0-20,valid=doc
+NB,label=DECT6 1926.720,kind=home,f=1926.720,bw=800,db=8,duty=0-20,valid=doc
+NB,label=DECT6 1928.448,kind=home,f=1928.448,bw=800,db=8,duty=0-20,valid=real
+# Any carrier (a base may move its beacon): the whole 1921-1929 MHz block.
+NB,label=DECT6 any,kind=home,f=1924.992,bw=8000,db=9,duty=0-30,valid=real
