@@ -54,9 +54,14 @@ namespace {
 constexpr systime_t kSliceTicks = MS2ST(6);
 constexpr size_t kMaxLinesPerFrame = 200;
 constexpr uint32_t kGeoPeriodS = 5; /* a new sky-cache pass every 5 s */
-/* solver thread: snapshot_fix 152 + coarse_time_solve 296 + geometric_range 128
- * + sat_position 104 B (-fstack-usage) + libm and the exception frame */
-constexpr size_t kSolverStack = 1536;
+/* solver thread working area (Thread struct and context frames included: the
+ * stack check trips ~210 B before the end). The deepest path is the tracking
+ * loop PVT, not the snapshot: solver_fn 104 + pvt_solve 472 + ls 224 +
+ * elevations 136 + atmo_m 96 + tropo_delay_m 56 + libm pow ~300 = ~1390 B
+ * (from the image's prologues); the snapshot path is ~1030 B. 1536 held the
+ * snapshot only: the first PVT solve stopped the device with "stack overflow"
+ * (2026-11-14, as the UI thread preempted the solver inside pow). */
+constexpr size_t kSolverStack = 2048;
 constexpr int kMinFixSats = 6; /* 5 unknowns + 1 to check them */
 constexpr double kL1Lambda = kC / 1575.42e6;
 constexpr uint8_t kAssistedHalfBins = 6; /* +-3 kHz around the predicted Doppler: TCXO <= ~1.5 ppm */
