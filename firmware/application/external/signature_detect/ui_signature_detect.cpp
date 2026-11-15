@@ -2964,11 +2964,16 @@ void SignatureDetectView::refresh_status() {
     if (map_nomem_) g.s(log_ ? "MAP: NO MEM, Log off? " : "MAP: NO MEM ");
     static constexpr const char* esp_names[] = {"off", "no module", "starting", "no app", "on ", "lost", "bus err"};
     const auto st = esp_.state();
-    g.s("ESP ").s(esp_names[static_cast<size_t>(st)]);
-    if (st == EspFeed::State::Active) g.d(esp_.count());
+    /* Nothing while the feed is switched off (Setup): only a feed that is on,
+     * or wanted and not working, is worth the room. */
+    if (st != EspFeed::State::Off) {
+        g.s("ESP ").s(esp_names[static_cast<size_t>(st)]);
+        if (st == EspFeed::State::Active) g.d(esp_.count());
+        g.c(' ');
+    }
     /* BLE dwell drops only: buffers skipped while a sweep FFTs or the rate
      * switches lose no Remote ID (debug view: all of them). */
-    g.s(" M4 ").d(stats_.cpu_pct).s("% drop ").d(stats_.drops_ble);
+    g.s("M4 ").d(stats_.cpu_pct).s("% drop ").d(stats_.drops_ble);
     if (log_on() && !log_bad) g.s(log_ ? (survey_on() ? " SRV" : " LOG") : " LOG...");
     if (opt_.json) g.s(" JSON");
     if (demo_on_) g.s(" DEMO");

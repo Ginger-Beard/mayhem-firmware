@@ -240,6 +240,8 @@ WHAT EACH SHIPPED CLASS RUNS
                      entry for the rule), R2 40 kb/s and R3 100 kb/s rules
                      (documents only): two dwells, 908.42 and 916.00 MHz
   LAND_MOBILE        two custom sweep bands, NB rules
+  DECT               one custom sweep band, 1916-1930 MHz: DECT 6.0 base
+                     beacons by energy (NB rules; not yet tested on the device)
   INTERFERENCE       interference scan: 30-6000 MHz at 81.5 kHz, HF 1.5-30 MHz
                      at 5 kHz (SCAN lines)
   HOME_IOT also holds the common phone / earbud / Apple adverts (Handoff,
